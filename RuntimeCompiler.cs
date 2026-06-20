@@ -26,13 +26,31 @@ public static class RuntimeCompiler
     /// false instead of throwing. "Bad generated code" is an expected, recoverable event
     /// in this project, not a crash.
     /// </summary>
+    /// <summary>
+    /// Convenience overload for callers that don't need the error text (e.g. the Step 1
+    /// demo). Delegates to the full version and discards the diagnostics string.
+    /// </summary>
     public static bool TryCompileAndLoad(
         string name,
         string sourceCode,
         HandlerRegistry registry,
         out IHandler? handler)
+        => TryCompileAndLoad(name, sourceCode, registry, out handler, out _);
+
+    /// <summary>
+    /// Full version. On compile failure, <paramref name="diagnostics"/> receives the same
+    /// CS#### error text that gets printed — so the caller (Step 3's generator) can feed
+    /// the errors back to the LLM and ask it to fix its own code. Null on success.
+    /// </summary>
+    public static bool TryCompileAndLoad(
+        string name,
+        string sourceCode,
+        HandlerRegistry registry,
+        out IHandler? handler,
+        out string? diagnostics)
     {
         handler = null;
+        diagnostics = null;
 
         try
         {
@@ -131,13 +149,19 @@ public static class RuntimeCompiler
                     .Where(d => d.Severity == DiagnosticSeverity.Error)
                     .ToList();
 
-                Console.WriteLine($"  [compile] FAILED with {errors.Count} error(s):");
+                // Build the error text once: we both print it AND return it via the out
+                // parameter so a caller can show it to the LLM for a fix-up attempt.
+                var report = new System.Text.StringBuilder();
+                report.AppendLine($"  [compile] FAILED with {errors.Count} error(s):");
                 foreach (Diagnostic diagnostic in errors)
                 {
                     // Location maps the error back to a line/column in the source text.
-                    Console.WriteLine($"    {diagnostic.Id}: {diagnostic.GetMessage()}");
-                    Console.WriteLine($"      at {diagnostic.Location.GetLineSpan()}");
+                    report.AppendLine($"    {diagnostic.Id}: {diagnostic.GetMessage()}");
+                    report.AppendLine($"      at {diagnostic.Location.GetLineSpan()}");
                 }
+
+                diagnostics = report.ToString();
+                Console.Write(diagnostics);
                 return false;
             }
 
@@ -148,9 +172,14 @@ public static class RuntimeCompiler
             // the assembly into the default load context, where its types become usable
             // by reflection just like any other loaded type.
             //
-            // (Forward note for a later step: this assembly can't be unloaded. To make
-            // handlers reloadable/replaceable without leaking, you'd load each into its
-            // own collectible AssemblyLoadContext. Overkill for proving the core works.)
+            // ┌── KNOWN LEAK (intentional, for now) ───────────────────────────────────┐
+            // │ Assembly.Load(byte[]) loads into the DEFAULT load context, which never  │
+            // │ unloads. As of Step 3 we generate a fresh assembly per LLM request, so  │
+            // │ a long session slowly accumulates dead assemblies in memory. The fix is │
+            // │ to load each handler into its own *collectible* AssemblyLoadContext and │
+            // │ unload it when replaced — deliberately deferred; it's orthogonal to     │
+            // │ proving generation works.                                               │
+            // └────────────────────────────────────────────────────────────────────────┘
             // ----------------------------------------------------------------
             assemblyStream.Seek(0, SeekOrigin.Begin);
             Assembly compiledAssembly = Assembly.Load(assemblyStream.ToArray());
@@ -191,7 +220,8 @@ public static class RuntimeCompiler
         {
             // Anything unexpected (e.g. the constructor throwing) lands here. Report and
             // keep the program alive — graceful failure is the whole point.
-            Console.WriteLine($"  [error] Unexpected failure while compiling/loading: {ex.Message}");
+            diagnostics = $"  [error] Unexpected failure while compiling/loading: {ex.Message}";
+            Console.WriteLine(diagnostics);
             return false;
         }
     }
