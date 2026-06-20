@@ -27,7 +27,7 @@ public sealed class PeerNode : IAsyncDisposable
     private readonly CancellationTokenSource _cts = new();
 
     /// <summary>Raised (on a background thread) for each complete message from the peer.</summary>
-    public event Action<string>? MessageReceived;
+    public event Action<PeerMessage>? MessageReceived;
 
     /// <summary>Raised once when the peer disconnects or the link drops.</summary>
     public event Action? PeerDisconnected;
@@ -98,7 +98,7 @@ public sealed class PeerNode : IAsyncDisposable
             {
                 while (!_cts.IsCancellationRequested)
                 {
-                    string? message = await ReadMessageAsync(_stream!, _cts.Token);
+                    PeerMessage? message = await ReadMessageAsync(_stream!, _cts.Token);
                     if (message is null) break;        // peer closed the connection cleanly
                     MessageReceived?.Invoke(message);
                 }
@@ -112,8 +112,17 @@ public sealed class PeerNode : IAsyncDisposable
         });
     }
 
-    /// <summary>Send one message to the peer.</summary>
-    public Task SendAsync(string message) => WriteMessageAsync(_stream!, message, _cts.Token);
+    /// <summary>Send a typed message (Chat / Question / …) to the peer.</summary>
+    public Task SendAsync(PeerMessageKind kind, string text)
+    {
+        // No-op if we're not connected, so callers can "send to the peer" unconditionally
+        // and it just does nothing when there's no peer.
+        if (_stream is null) return Task.CompletedTask;
+        return WriteMessageAsync(_stream, kind, text, _cts.Token);
+    }
+
+    /// <summary>Convenience: send a plain chat line (what the Step 2 demo uses).</summary>
+    public Task SendAsync(string text) => SendAsync(PeerMessageKind.Chat, text);
 
     // =====================================================================================
     // MESSAGE FRAMING — the key networking lesson of this step.
@@ -122,28 +131,34 @@ public sealed class PeerNode : IAsyncDisposable
     //   * split one SendAsync across several reads on the other side, OR
     //   * coalesce several SendAsyncs into a single read.
     // So "one read == one message" is NOT guaranteed and you must impose your own message
-    // boundaries. We use length-prefix framing: every message goes out as
+    // boundaries. We use length-prefix framing. As of Step 6A each frame also carries a
+    // one-byte KIND tag so the receiver knows what sort of message it is:
     //
-    //        [ 4-byte big-endian length ][ UTF-8 payload bytes ]
+    //        [ 4-byte big-endian length ][ 1-byte kind ][ UTF-8 text bytes ]
+    //                                     └──────────── payload (length bytes) ───────────┘
     //
-    // The reader first reads exactly 4 bytes to learn how big the payload is, then reads
-    // exactly that many bytes. This handles arbitrary content — including the multi-line
-    // C# source we'll be shipping between instances in a later step.
+    // The reader reads exactly 4 bytes for the length, then exactly that many payload bytes;
+    // the first payload byte is the kind, the rest is the UTF-8 text.
     // =====================================================================================
 
-    private static async Task WriteMessageAsync(NetworkStream stream, string message, CancellationToken ct)
+    private static async Task WriteMessageAsync(NetworkStream stream, PeerMessageKind kind, string text, CancellationToken ct)
     {
-        byte[] payload = Encoding.UTF8.GetBytes(message);
+        byte[] textBytes = Encoding.UTF8.GetBytes(text);
+
+        // payload = [kind byte][text bytes]
+        byte[] payload = new byte[1 + textBytes.Length];
+        payload[0] = (byte)kind;
+        textBytes.CopyTo(payload, 1);
 
         byte[] header = new byte[4];
         BinaryPrimitives.WriteInt32BigEndian(header, payload.Length);
 
-        await stream.WriteAsync(header, ct);   // 1) how many bytes follow
-        await stream.WriteAsync(payload, ct);  // 2) the bytes themselves
+        await stream.WriteAsync(header, ct);   // 1) how many payload bytes follow
+        await stream.WriteAsync(payload, ct);  // 2) kind + text
         await stream.FlushAsync(ct);
     }
 
-    private static async Task<string?> ReadMessageAsync(NetworkStream stream, CancellationToken ct)
+    private static async Task<PeerMessage?> ReadMessageAsync(NetworkStream stream, CancellationToken ct)
     {
         byte[] header = new byte[4];
         try
@@ -161,7 +176,12 @@ public sealed class PeerNode : IAsyncDisposable
         int length = BinaryPrimitives.ReadInt32BigEndian(header);
         byte[] payload = new byte[length];
         await stream.ReadExactlyAsync(payload, ct); // read exactly the advertised length
-        return Encoding.UTF8.GetString(payload);
+
+        if (length < 1) return new PeerMessage(PeerMessageKind.Chat, string.Empty); // malformed guard
+
+        var kind = (PeerMessageKind)payload[0];
+        string text = Encoding.UTF8.GetString(payload, 1, payload.Length - 1);
+        return new PeerMessage(kind, text);
     }
 
     /// <summary>Cancel the receive loop and release the socket.</summary>

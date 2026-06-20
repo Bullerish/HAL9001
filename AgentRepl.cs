@@ -9,7 +9,7 @@ namespace HAL9001;
 /// </summary>
 public static class AgentRepl
 {
-    public static async Task RunAsync()
+    public static async Task RunAsync(PeerEndpoint? peerEndpoint = null)
     {
         // The whole loop needs an API key. Fail friendly if it's missing.
         AnthropicClient? client = AnthropicClient.FromEnvironment();
@@ -33,6 +33,10 @@ public static class AgentRepl
             GitSync? git = GitSync.Discover();
             var generator = new HandlerGenerator(client, registry, git);
 
+            // Sub-step A: optional live link to a peer instance (Step 2 PeerNode). Null when
+            // launched as a plain single instance (`dotnet run`).
+            PeerNode? peer = null;
+
             Console.WriteLine("HAL9001 — self-extending agent (local, single instance)");
             Console.WriteLine($"Model: {AnthropicClient.Model}");
             if (git is not null)
@@ -52,6 +56,30 @@ public static class AgentRepl
                 Console.WriteLine("No git repo detected — handlers will stay in memory only.");
             }
             Console.WriteLine();
+
+            // Sub-step A: if a peer endpoint was given, open the TCP link (reusing the Step 2
+            // host/join logic). A received Question is only DISPLAYED here — routing it into
+            // the agent is sub-step B.
+            if (peerEndpoint is not null)
+            {
+                peer = new PeerNode();
+                peer.MessageReceived += message =>
+                {
+                    string label = message.Kind == PeerMessageKind.Question ? "[peer asks]" : "[peer]";
+                    Console.WriteLine($"\n{label} {message.Text}");
+                    Console.Write("> ");
+                };
+                peer.PeerDisconnected += () => Console.WriteLine("\n[peer] disconnected.");
+
+                if (peerEndpoint.IsHost)
+                    await peer.ListenAndAcceptAsync(peerEndpoint.Port);
+                else
+                    await peer.ConnectAsync(peerEndpoint.RemoteHost, peerEndpoint.Port);
+
+                Console.WriteLine("Linked to peer — follow-up questions will be sent over the socket.");
+                Console.WriteLine();
+            }
+
             Console.WriteLine("Type a request. If I have no handler for it, I'll write one, compile it,");
             Console.WriteLine("and answer. Repeating a request reuses the handler I already built.");
             Console.WriteLine("Type 'exit' to quit.");
@@ -104,12 +132,30 @@ public static class AgentRepl
                 string answer = handler.Handle(request);
                 Console.WriteLine($"  answer: {answer}");
 
-                // ── 3) Generate + print a follow-up question (local only for now) ────────
+                // ── 3) Generate a follow-up question; print it AND send it to the peer ────
                 try
                 {
                     string followUp = await generator.GenerateFollowUpAsync(request, answer);
                     if (followUp.Length > 0)
+                    {
                         Console.WriteLine($"  follow-up: {followUp}");
+
+                        // Sub-step A: also send it to the connected peer as a QUESTION.
+                        // No peer → SendAsync no-ops. Send fails (peer dropped) → we report
+                        // and carry on; a transport hiccup must never crash the agent.
+                        if (peer is not null)
+                        {
+                            try
+                            {
+                                await peer.SendAsync(PeerMessageKind.Question, followUp);
+                                Console.WriteLine("  [sent follow-up to peer]");
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"  [could not send to peer: {ex.Message}]");
+                            }
+                        }
+                    }
                 }
                 catch
                 {
@@ -120,6 +166,10 @@ public static class AgentRepl
             }
 
             Console.WriteLine("Goodbye.");
+
+            // Close the peer link (cancels its receive loop, closes the socket) so the other
+            // instance sees a clean disconnect.
+            if (peer is not null) await peer.DisposeAsync();
         }
     }
 
@@ -145,3 +195,9 @@ public static class AgentRepl
         return name.Length == 0 ? "handler" : name;
     }
 }
+
+/// <summary>
+/// How an agent instance should link to a peer — the Step 2 host/join roles.
+/// IsHost = listen on Port; otherwise connect to RemoteHost:Port.
+/// </summary>
+public sealed record PeerEndpoint(bool IsHost, string RemoteHost, int Port);

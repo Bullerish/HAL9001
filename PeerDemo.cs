@@ -36,7 +36,12 @@ public static class PeerDemo
     /// <summary>Print incoming messages and link state. Events fire on a background thread.</summary>
     private static void WireUp(PeerNode peer)
     {
-        peer.MessageReceived += message => Console.WriteLine($"[received] {message}");
+        peer.MessageReceived += message =>
+        {
+            // The Step 2 demo only sends Chat, but label a Question if one ever arrives.
+            string label = message.Kind == PeerMessageKind.Question ? "[peer asks]" : "[received]";
+            Console.WriteLine($"{label} {message.Text}");
+        };
         peer.PeerDisconnected += () => Console.WriteLine("[peer] disconnected.");
     }
 
