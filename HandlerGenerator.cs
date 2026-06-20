@@ -1,3 +1,6 @@
+using System.Text;
+using System.Text.RegularExpressions;
+
 namespace HAL9001;
 
 /// <summary>
@@ -7,17 +10,26 @@ namespace HAL9001;
 ///   3. compiling it through <see cref="RuntimeCompiler"/>,
 ///   4. and, if that fails, sending the compiler errors back for ONE fix-up attempt.
 ///
-/// This is the self-extension step running locally on one instance — no socket involved.
+/// Step 4 adds one thing on success: the compiled handler's source is written to
+/// handlers/ and pushed to GitHub (via <see cref="GitSync"/>) so another instance can
+/// later pull it. Generation/compilation is unchanged; the socket is still not involved.
 /// </summary>
 public sealed class HandlerGenerator
 {
     private readonly AnthropicClient _client;
     private readonly HandlerRegistry _registry;
+    private readonly GitSync? _git;
 
-    public HandlerGenerator(AnthropicClient client, HandlerRegistry registry)
+    // Handlers persisted+pushed this session, so a repeated request never makes a second
+    // commit. (In practice the REPL's in-memory cache already prevents re-generation; this
+    // is an explicit second guard against duplicate commits.)
+    private readonly HashSet<string> _persisted = new(StringComparer.OrdinalIgnoreCase);
+
+    public HandlerGenerator(AnthropicClient client, HandlerRegistry registry, GitSync? git = null)
     {
         _client = client;
         _registry = registry;
+        _git = git;
     }
 
     // =====================================================================================
@@ -72,6 +84,8 @@ public sealed class HandlerGenerator
         // First compile attempt. We capture the diagnostics so we can feed them back.
         if (RuntimeCompiler.TryCompileAndLoad(name, source, _registry, out IHandler? handler, out string? errors))
         {
+            // Compiled + registered → persist the exact source that compiled, then push.
+            PersistAndPush(name, source);
             return handler;
         }
 
@@ -90,11 +104,71 @@ public sealed class HandlerGenerator
 
         if (RuntimeCompiler.TryCompileAndLoad(name, fixedSource, _registry, out handler, out _))
         {
+            PersistAndPush(name, fixedSource);
             return handler;
         }
 
         Console.WriteLine("  [generate] Still didn't compile after one fix attempt. Giving up on this request.");
         return null;
+    }
+
+    // =====================================================================================
+    // PERSIST + PUSH (Step 4, push-half)
+    //
+    // Only ever called AFTER a handler compiled and registered — failed code never reaches
+    // here, so the repo only ever gets working handlers. Writes one .cs file per handler to
+    // handlers/, then commits + pushes just that file. A push failure is reported but never
+    // fatal: the handler is already live in memory for this session.
+    // =====================================================================================
+    private void PersistAndPush(string name, string source)
+    {
+        if (_git is null)
+        {
+            Console.WriteLine("  [sync] no git repo detected — handler kept in memory only.");
+            return;
+        }
+
+        if (_persisted.Contains(name))
+            return; // already saved this session; don't make a duplicate commit
+
+        try
+        {
+            Directory.CreateDirectory(_git.HandlersDirectory);
+
+            // Unique filename: descriptive base (the generated class name) + short GUID, so
+            // two instances generating the same capability don't collide on a filename.
+            string fileBase = DeriveFileBase(source, name);
+            string unique = Guid.NewGuid().ToString("N")[..8];
+            string fileName = $"{fileBase}_{unique}.cs";
+            string fullPath = Path.Combine(_git.HandlersDirectory, fileName);
+
+            File.WriteAllText(fullPath, source);
+            Console.WriteLine($"  [sync] wrote handlers/{fileName}");
+
+            if (_git.CommitAndPushFile(fullPath, $"Add handler: {name}"))
+            {
+                _persisted.Add(name);
+                Console.WriteLine($"  [sync] pushed handlers/{fileName} to GitHub.");
+            }
+        }
+        catch (Exception ex)
+        {
+            // Disk/IO or anything unexpected — never let persistence crash the agent.
+            Console.WriteLine($"  [sync] could not persist/push handler: {ex.Message}");
+        }
+    }
+
+    // Use the generated class name as the file's base (e.g. "WordOrderReverser"); fall back
+    // to a PascalCase version of the registry name if no class declaration is found.
+    private static string DeriveFileBase(string source, string fallbackName)
+    {
+        Match m = Regex.Match(source, @"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)");
+        if (m.Success) return m.Groups[1].Value;
+
+        var sb = new StringBuilder();
+        foreach (string part in fallbackName.Split('-', StringSplitOptions.RemoveEmptyEntries))
+            sb.Append(char.ToUpperInvariant(part[0])).Append(part.AsSpan(1));
+        return sb.Length > 0 ? sb.ToString() : "Handler";
     }
 
     /// <summary>

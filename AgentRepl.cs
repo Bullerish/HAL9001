@@ -27,10 +27,23 @@ public static class AgentRepl
         using (client)
         {
             var registry = new HandlerRegistry();
-            var generator = new HandlerGenerator(client, registry);
+
+            // Step 4: locate the git repo so generated handlers can be pushed. Null if we're
+            // somehow not inside a repo — generation still works, just stays in memory.
+            GitSync? git = GitSync.Discover();
+            var generator = new HandlerGenerator(client, registry, git);
 
             Console.WriteLine("HAL9001 — self-extending agent (local, single instance)");
             Console.WriteLine($"Model: {AnthropicClient.Model}");
+            if (git is not null)
+            {
+                Console.WriteLine("Generated handlers will be pushed to:");
+                git.PrintRemoteAndBranch();
+            }
+            else
+            {
+                Console.WriteLine("No git repo detected — handlers will stay in memory only.");
+            }
             Console.WriteLine();
             Console.WriteLine("Type a request. If I have no handler for it, I'll write one, compile it,");
             Console.WriteLine("and answer. Repeating a request reuses the handler I already built.");

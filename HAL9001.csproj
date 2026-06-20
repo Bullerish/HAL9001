@@ -28,4 +28,15 @@
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Scripting" Version="5.3.0" />
   </ItemGroup>
 
+  <!--
+    Generated handlers are written to handlers/ as repo artifacts so other instances can
+    pull them (Step 4). They are compiled at RUNTIME by Roslyn, NOT as part of this build.
+    Exclude them from the static compile — otherwise the SDK's default "compile every .cs"
+    behavior would pull them in and duplicate class names across handlers would break the
+    build the moment there's more than one.
+  -->
+  <ItemGroup>
+    <Compile Remove="handlers/**/*.cs" />
+  </ItemGroup>
+
 </Project>
