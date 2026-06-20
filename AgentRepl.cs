@@ -3,9 +3,16 @@ using System.Text;
 namespace HAL9001;
 
 /// <summary>
-/// Step 3's main experience: the self-extending REPL. You type a request; if no handler
-/// is registered for it, the agent writes one with the LLM, compiles it at runtime, and
-/// uses it to answer — then suggests a follow-up question. All local, one instance.
+/// The self-extending agent REPL. You type a request; if no handler is registered for it,
+/// the agent writes one with the LLM, compiles it at runtime, registers + pushes it, and
+/// answers — then suggests a follow-up.
+///
+/// With a peer link (`agent host`/`agent join`):
+///   • a locally-generated follow-up is SENT to the peer as a Question (sub-step A), and
+///   • an incoming peer Question is routed through the SAME answer path and the result is
+///     sent back as an Answer (sub-step B).
+/// One round only: an arriving Answer is displayed and the chain STOPS — no automatic
+/// re-question — so two instances can't volley forever and burn tokens.
 /// </summary>
 public static class AgentRepl
 {
@@ -28,24 +35,107 @@ public static class AgentRepl
         {
             var registry = new HandlerRegistry();
 
-            // Step 4: locate the git repo so generated handlers can be pushed. Null if we're
-            // somehow not inside a repo — generation still works, just stays in memory.
             GitSync? git = GitSync.Discover();
             var generator = new HandlerGenerator(client, registry, git);
 
-            // Sub-step A: optional live link to a peer instance (Step 2 PeerNode). Null when
-            // launched as a plain single instance (`dotnet run`).
             PeerNode? peer = null;
 
-            Console.WriteLine("HAL9001 — self-extending agent (local, single instance)");
+            // Local requests (the REPL thread) and peer questions (the socket's background
+            // receive thread) both run through ProduceAnswerAsync, which touches the shared
+            // registry + generator. This gate serializes the two so they never corrupt that
+            // shared state or interleave a half-built handler.
+            var requestGate = new SemaphoreSlim(1, 1);
+
+            // ── Shared answer path ───────────────────────────────────────────────────────
+            // registry-check → (on a miss: generate + compile + register + push) → answer.
+            // Returns the answer text, or null if we couldn't produce one. Used identically
+            // by a locally-typed request AND a question received from the peer.
+            async Task<string?> ProduceAnswerAsync(string request)
+            {
+                await requestGate.WaitAsync();
+                try
+                {
+                    string name = DeriveName(request);
+
+                    if (!registry.TryGet(name, out IHandler? handler))
+                    {
+                        Console.WriteLine($"  (no handler '{name}' yet — generating one with the LLM...)");
+                        try
+                        {
+                            handler = await generator.GenerateAsync(name, request);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"  generation failed: {ex.Message}");
+                            return null;
+                        }
+                        if (handler is null)
+                            return null; // didn't compile even after the retry; details already printed
+                    }
+                    else
+                    {
+                        Console.WriteLine($"  (reusing handler '{name}')");
+                    }
+
+                    return handler.Handle(request);
+                }
+                finally
+                {
+                    requestGate.Release();
+                }
+            }
+
+            // ── Peer message handler ─────────────────────────────────────────────────────
+            // Runs on the socket's background thread (fire-and-forget from the receive loop),
+            // so it owns its own try/catch — a peer hiccup must never crash the agent.
+            async Task HandlePeerMessageAsync(PeerMessage message)
+            {
+                try
+                {
+                    switch (message.Kind)
+                    {
+                        case PeerMessageKind.Question:
+                            // Sub-step B: route the peer's question into our own agent path,
+                            // then send the result back as an Answer.
+                            Console.WriteLine($"\n[peer asks] {message.Text}");
+                            Console.WriteLine("  routing peer question into my agent...");
+                            string answer = await ProduceAnswerAsync(message.Text)
+                                             ?? "(sorry — I couldn't generate an answer for that)";
+                            Console.WriteLine($"  answering peer: {answer}");
+                            await peer!.SendAsync(PeerMessageKind.Answer, answer);
+                            Console.WriteLine("  [sent answer to peer]");
+                            Console.Write("> ");
+                            break;
+
+                        case PeerMessageKind.Answer:
+                            // LOOP GUARD: display and stop. Do NOT auto-generate a new
+                            // follow-up — otherwise A and B would answer each other forever.
+                            Console.WriteLine($"\n[peer answered] {message.Text}");
+                            Console.Write("> ");
+                            break;
+
+                        default: // Chat
+                            Console.WriteLine($"\n[peer] {message.Text}");
+                            Console.Write("> ");
+                            break;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"\n[peer handling error: {ex.Message}]");
+                }
+            }
+
+            // ── Startup banner + handler sync ────────────────────────────────────────────
+            Console.WriteLine(peerEndpoint is null
+                ? "HAL9001 — self-extending agent (single instance)"
+                : "HAL9001 — self-extending agent (peer-linked)");
             Console.WriteLine($"Model: {AnthropicClient.Model}");
+
             if (git is not null)
             {
                 Console.WriteLine("Generated handlers will be pushed to:");
                 git.PrintRemoteAndBranch();
-
-                // Pull-half: bring in handlers other instances pushed, then compile + load
-                // them so they're usable immediately — no regeneration, no API calls.
                 Console.WriteLine("Syncing existing handlers from GitHub...");
                 git.Pull();
                 HandlerLoader.LoadAll(git.HandlersDirectory, registry);
@@ -57,18 +147,13 @@ public static class AgentRepl
             }
             Console.WriteLine();
 
-            // Sub-step A: if a peer endpoint was given, open the TCP link (reusing the Step 2
-            // host/join logic). A received Question is only DISPLAYED here — routing it into
-            // the agent is sub-step B.
+            // ── Optional peer link ───────────────────────────────────────────────────────
             if (peerEndpoint is not null)
             {
                 peer = new PeerNode();
-                peer.MessageReceived += message =>
-                {
-                    string label = message.Kind == PeerMessageKind.Question ? "[peer asks]" : "[peer]";
-                    Console.WriteLine($"\n{label} {message.Text}");
-                    Console.Write("> ");
-                };
+                // Fire-and-forget: the handler has its own try/catch; discarding the Task
+                // keeps the receive loop free to read the next message.
+                peer.MessageReceived += message => _ = HandlePeerMessageAsync(message);
                 peer.PeerDisconnected += () => Console.WriteLine("\n[peer] disconnected.");
 
                 if (peerEndpoint.IsHost)
@@ -76,7 +161,7 @@ public static class AgentRepl
                 else
                     await peer.ConnectAsync(peerEndpoint.RemoteHost, peerEndpoint.Port);
 
-                Console.WriteLine("Linked to peer — follow-up questions will be sent over the socket.");
+                Console.WriteLine("Linked to peer — I'll send my follow-ups to it and answer its questions.");
                 Console.WriteLine();
             }
 
@@ -85,6 +170,7 @@ public static class AgentRepl
             Console.WriteLine("Type 'exit' to quit.");
             Console.WriteLine();
 
+            // ── REPL loop (locally-typed requests) ───────────────────────────────────────
             while (true)
             {
                 Console.Write("> ");
@@ -96,53 +182,24 @@ public static class AgentRepl
                 string request = line.Trim();
                 if (request.Length == 0) continue;
 
-                // The registry key is derived from the request, so the same request maps to
-                // the same handler across the session.
-                string name = DeriveName(request);
-
-                // ── 1) Check the registry — "do I already know how to do this?" ──────────
-                if (!registry.TryGet(name, out IHandler? handler))
+                // Same answer path a peer question uses.
+                string? answer = await ProduceAnswerAsync(request);
+                if (answer is null)
                 {
-                    Console.WriteLine($"  (no handler '{name}' yet — generating one with the LLM...)");
-                    try
-                    {
-                        handler = await generator.GenerateAsync(name, request);
-                    }
-                    catch (Exception ex)
-                    {
-                        // e.g. network error, bad API key, refusal — stay alive.
-                        Console.WriteLine($"  generation failed: {ex.Message}");
-                        Console.WriteLine();
-                        continue;
-                    }
-
-                    if (handler is null)
-                    {
-                        // Couldn't compile even after the retry; details already printed.
-                        Console.WriteLine();
-                        continue;
-                    }
+                    Console.WriteLine();
+                    continue;
                 }
-                else
-                {
-                    Console.WriteLine($"  (reusing handler '{name}')");
-                }
-
-                // ── 2) Answer with the (possibly brand-new) compiled handler ─────────────
-                string answer = handler.Handle(request);
                 Console.WriteLine($"  answer: {answer}");
 
-                // ── 3) Generate a follow-up question; print it AND send it to the peer ────
+                // Generate a follow-up question; print it AND send it to the peer (sub-step A).
+                // This happens ONLY for locally-typed requests — answering a peer's question
+                // never generates a follow-up (that's the loop guard).
                 try
                 {
                     string followUp = await generator.GenerateFollowUpAsync(request, answer);
                     if (followUp.Length > 0)
                     {
                         Console.WriteLine($"  follow-up: {followUp}");
-
-                        // Sub-step A: also send it to the connected peer as a QUESTION.
-                        // No peer → SendAsync no-ops. Send fails (peer dropped) → we report
-                        // and carry on; a transport hiccup must never crash the agent.
                         if (peer is not null)
                         {
                             try
