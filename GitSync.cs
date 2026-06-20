@@ -67,6 +67,21 @@ public sealed class GitSync
         return (process.ExitCode, stdoutTask.Result, stderrTask.Result);
     }
 
+    /// <summary>
+    /// Fast-forward pull to bring in handlers another instance pushed. `--ff-only` keeps it
+    /// safe: if histories have diverged it refuses rather than creating a merge commit, and
+    /// it won't touch unrelated local edits. Output is printed; failure is non-fatal — we
+    /// just load whatever is already on disk.
+    /// </summary>
+    public bool Pull()
+    {
+        var (exit, stdout, stderr) = Run("pull", "--ff-only");
+        Console.WriteLine($"  [git pull] exit {exit}");
+        if (stdout.Trim().Length > 0) Console.WriteLine(Indent(stdout));
+        if (stderr.Trim().Length > 0) Console.WriteLine(Indent(stderr));
+        return exit == 0;
+    }
+
     /// <summary>Print the remote URL and current branch so you can see where pushes go.</summary>
     public void PrintRemoteAndBranch()
     {

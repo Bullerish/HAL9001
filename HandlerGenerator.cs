@@ -85,7 +85,7 @@ public sealed class HandlerGenerator
         if (RuntimeCompiler.TryCompileAndLoad(name, source, _registry, out IHandler? handler, out string? errors))
         {
             // Compiled + registered → persist the exact source that compiled, then push.
-            PersistAndPush(name, source);
+            PersistAndPush(name, request, source);
             return handler;
         }
 
@@ -104,7 +104,7 @@ public sealed class HandlerGenerator
 
         if (RuntimeCompiler.TryCompileAndLoad(name, fixedSource, _registry, out handler, out _))
         {
-            PersistAndPush(name, fixedSource);
+            PersistAndPush(name, request, fixedSource);
             return handler;
         }
 
@@ -120,7 +120,7 @@ public sealed class HandlerGenerator
     // handlers/, then commits + pushes just that file. A push failure is reported but never
     // fatal: the handler is already live in memory for this session.
     // =====================================================================================
-    private void PersistAndPush(string name, string source)
+    private void PersistAndPush(string name, string request, string source)
     {
         if (_git is null)
         {
@@ -142,7 +142,14 @@ public sealed class HandlerGenerator
             string fileName = $"{fileBase}_{unique}.cs";
             string fullPath = Path.Combine(_git.HandlersDirectory, fileName);
 
-            File.WriteAllText(fullPath, source);
+            // Embed the registry name (and original request) as a header so the OTHER
+            // instance can register this handler under the SAME key when it pulls — that's
+            // what lets it answer the identical request without regenerating. Comments are
+            // ignored by the compiler, so the loaded handler is byte-for-byte equivalent.
+            string header =
+                $"// hal9001:name={name}\n" +
+                $"// hal9001:request={OneLine(request)}\n";
+            File.WriteAllText(fullPath, header + source);
             Console.WriteLine($"  [sync] wrote handlers/{fileName}");
 
             if (_git.CommitAndPushFile(fullPath, $"Add handler: {name}"))
@@ -157,6 +164,10 @@ public sealed class HandlerGenerator
             Console.WriteLine($"  [sync] could not persist/push handler: {ex.Message}");
         }
     }
+
+    // Collapse a request to a single comment-safe line for the file header.
+    private static string OneLine(string text) =>
+        text.Replace("\r", " ").Replace("\n", " ").Trim();
 
     // Use the generated class name as the file's base (e.g. "WordOrderReverser"); fall back
     // to a PascalCase version of the registry name if no class declaration is found.

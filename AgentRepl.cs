@@ -39,6 +39,13 @@ public static class AgentRepl
             {
                 Console.WriteLine("Generated handlers will be pushed to:");
                 git.PrintRemoteAndBranch();
+
+                // Pull-half: bring in handlers other instances pushed, then compile + load
+                // them so they're usable immediately — no regeneration, no API calls.
+                Console.WriteLine("Syncing existing handlers from GitHub...");
+                git.Pull();
+                HandlerLoader.LoadAll(git.HandlersDirectory, registry);
+                Console.WriteLine($"  {registry.Count} handler(s) loaded and ready.");
             }
             else
             {
