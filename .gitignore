@@ -1,0 +1,13 @@
+# .NET build output
+bin/
+obj/
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.user
+*.suo
+
+# Local environment / secrets (the Anthropic API key will live here in a later step)
+.env
+appsettings.*.local.json

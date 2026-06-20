@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!--
+      Targeting net8.0 (an LTS) on purpose:
+        - The .NET 9 SDK installed here can BUILD for net8.0 (an SDK targets its own
+          version or lower), and the .NET 8 runtime is installed to RUN it.
+        - The newest LTS is .NET 10, but targeting net10.0 needs the .NET 10 SDK
+          (we only have the .NET 10 *runtime*). To upgrade later: install the .NET 10
+          SDK and change this one line to <TargetFramework>net10.0</TargetFramework>.
+    -->
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>HAL9001</RootNamespace>
+    <AssemblyName>HAL9001</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Roslyn. The version is PINNED (exact) so builds are reproducible.
+      We asked for the *Scripting* package; it transitively pulls in
+      Microsoft.CodeAnalysis.CSharp, the lower-level *compilation* API
+      (CSharpCompilation / CSharpSyntaxTree) that RuntimeCompiler.cs actually uses
+      to turn source text into a real, loadable assembly.
+    -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Scripting" Version="5.3.0" />
+  </ItemGroup>
+
+</Project>
