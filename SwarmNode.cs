@@ -54,6 +54,9 @@ public sealed class SwarmNode : IAsyncDisposable
 
     public event Action<string, PeerMessage>? MessageReceived;
 
+    /// <summary>Raised after any join/leave, so a higher layer can recompute the coordinator.</summary>
+    public event Action? MembershipChanged;
+
     public SwarmNode(int listenPort)
     {
         _listenPort = listenPort;
@@ -196,6 +199,7 @@ public sealed class SwarmNode : IAsyncDisposable
             {
                 Console.WriteLine($"[swarm] + {id} connected");
                 PrintPeers();
+                MembershipChanged?.Invoke();
                 return link;
             }
             if (_peers.TryGetValue(id, out PeerLink? existing) && _peers.TryUpdate(id, link, existing))
@@ -215,6 +219,7 @@ public sealed class SwarmNode : IAsyncDisposable
             link.Dispose();
             Console.WriteLine($"[swarm] - {id} disconnected");
             PrintPeers();
+            MembershipChanged?.Invoke();
         }
     }
 

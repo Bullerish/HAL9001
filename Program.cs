@@ -43,7 +43,7 @@ switch (args[0].ToLowerInvariant())
             .Select(a => int.TryParse(a, out int p) ? p : -1)
             .Where(p => p > 0)
             .ToList();
-        await SwarmDemo.RunAsync(myPort, peerPorts);
+        await SwarmAgent.RunAsync(myPort, peerPorts);
         break;
     }
 
@@ -70,6 +70,6 @@ switch (args[0].ToLowerInvariant())
         Console.WriteLine("  HAL9001 demo                  Step 1 Roslyn compile-and-load demo");
         Console.WriteLine("  HAL9001 host <port>           Step 2 TCP chat: listen on <port>");
         Console.WriteLine("  HAL9001 join <host> <port>    Step 2 TCP chat: connect to <host>:<port>");
-        Console.WriteLine("  HAL9001 swarm <port> [ports]  Rung-1 swarm: mesh with peers on the listed ports");
+        Console.WriteLine("  HAL9001 swarm <port> [ports]  Swarm-agent: mesh + ask-the-swarm via coordinator");
         break;
 }
