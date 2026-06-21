@@ -103,6 +103,10 @@ public static class SwarmAgent
         AnthropicClient? client = AnthropicClient.FromEnvironment();
         var core = new AgentCore(client);
         core.LoadSharedHandlers();
+        // Bootstrap the shared knowledge store (facts) — every node connects to the same Turso DB,
+        // so a fact stored by one node is known to all. No-op if Turso isn't configured.
+        try { await core.EnsureHiveAsync(); }
+        catch (Exception ex) { Console.WriteLine($"[hive] knowledge store unavailable: {ex.Message}"); }
 
         await using var node = new SwarmNode(myPort);
         var pending = new ConcurrentDictionary<string, string>(); // reqId -> origin asker (coordinator role: in-progress guard)
@@ -228,6 +232,23 @@ public static class SwarmAgent
         {
             // Already answered (a re-ask that raced a completion)? Serve the cached answer, no work.
             if (doneAnswers.TryGetValue(reqId, out var cached)) { await DeliverAsync(reqId, cached.Answer, cached.By, origin); return; }
+
+            // KNOWLEDGE-LOOKUP first (routing's 1st of three kinds): does a stored FACT in the hive
+            // answer this? If so, return its value directly — NO handler run, NO generation. Only on a
+            // real match (conservative); otherwise fall through to the handler/generate flow below.
+            if (core.HasHive)
+            {
+                Fact? fact = null;
+                try { fact = await core.TryAnswerFromKnowledgeAsync(question); }
+                catch (Exception ex) { Console.WriteLine($"[knowledge] lookup error (falling through): {ex.Message}"); }
+                if (fact is not null)
+                {
+                    Console.WriteLine($"[knowledge] retrieved fact '{fact.Key}' = {fact.Value} ({CapTypes.Name(fact.Type)}) — no handler, no generation");
+                    Console.Write("> ");
+                    await HandleResultAsync(reqId, fact.Value, "knowledge", origin);
+                    return;
+                }
+            }
             // Already being worked here? Ignore the duplicate (re-ask to the SAME coordinator).
             if (!pending.TryAdd(reqId, origin)) return;
 
@@ -679,10 +700,11 @@ public static class SwarmAgent
         _ = AskerRecoveryLoop();
 
         Console.WriteLine();
-        Console.WriteLine($"Swarm-agent {node.Id}." + (client is null ? " (no API key — answers with stubs.)" : ""));
+        Console.WriteLine($"Swarm-agent {node.Id}." + (client is null ? " (no API key — answers with stubs.)" : "")
+            + (core.HasHive ? " [hive knowledge: on]" : " [hive knowledge: off]"));
         Console.WriteLine("Commands:  <question>   ask the swarm (assign-to-one)   |   deliberate <question>  fan-out: every node competes");
-        Console.WriteLine("           compose <question>  chain existing typed capabilities   |   @<port> <msg>  direct");
-        Console.WriteLine("           peers   |   coordinator   |   pause <secs>   |   exit");
+        Console.WriteLine("           compose <question>  chain existing typed capabilities   |   remember <fact>  store knowledge in the hive");
+        Console.WriteLine("           @<port> <msg>  direct   |   peers   |   coordinator   |   pause <secs>   |   exit");
         Console.WriteLine();
 
         while (true)
@@ -699,6 +721,22 @@ public static class SwarmAgent
             if (line.Equals("coordinator", StringComparison.OrdinalIgnoreCase)) { lock (stateLock) Console.WriteLine($"coordinator = {coordinator} (term {term})"); continue; }
             if (line.StartsWith("pause ", StringComparison.OrdinalIgnoreCase) && int.TryParse(line[6..].Trim(), out int secs))
             { lock (stateLock) pausedUntil = DateTime.UtcNow.AddSeconds(secs); Console.WriteLine($"[test] pausing my heartbeats for {secs}s (simulating a hung coordinator)"); continue; }
+            if (line.StartsWith("remember ", StringComparison.OrdinalIgnoreCase))
+            {
+                // EXPLICIT fact storage into the shared hive (Turso). Parsed to key/value, typed by value.
+                string stmt = line[("remember ".Length)..].Trim();
+                if (stmt.Length == 0) { Console.WriteLine("usage: remember <fact, e.g. the capital of Ohio is Columbus>"); continue; }
+                if (!core.HasHive) { Console.WriteLine("[knowledge] no hive configured (set TURSO_DATABASE_URL + TURSO_AUTH_TOKEN)."); continue; }
+                try
+                {
+                    Fact? f = await core.RememberFactAsync(stmt);
+                    Console.WriteLine(f is null
+                        ? "[knowledge] couldn't parse a fact from that — try \"remember the capital of Ohio is Columbus\"."
+                        : $"[knowledge] stored fact '{f.Key}' = {f.Value} ({CapTypes.Name(f.Type)}) in the hive");
+                }
+                catch (Exception ex) { Console.WriteLine($"[knowledge] store failed: {ex.Message}"); }
+                continue;
+            }
             if (line.StartsWith('@'))
             {
                 int sp = line.IndexOf(' ');

@@ -27,6 +27,7 @@ public sealed class AgentCore
     private readonly AnthropicClient? _client;
     private readonly CapabilityRouter? _router;
     private readonly HandlerGenerator? _generator;
+    private readonly TursoClient? _turso;   // the hive's shared knowledge store (facts), or null if no creds
 
     // One gate for the whole answer path. The registry and generator are shared mutable state;
     // serializing answer production keeps two concurrent callers from interleaving a half-built
@@ -46,12 +47,16 @@ public sealed class AgentCore
     {
         _client = client;
         Git = GitSync.Discover();
+        _turso = TursoClient.FromEnvironment();
         if (client is not null)
         {
             _generator = new HandlerGenerator(client, Registry, Git);
             _router = new CapabilityRouter(client, Registry);
         }
     }
+
+    /// <summary>True when the hive's shared knowledge store (Turso) is configured.</summary>
+    public bool HasHive => _turso is not null;
 
     /// <summary>
     /// Pull handlers other instances pushed and compile+register them. No-op without a repo.
@@ -65,6 +70,96 @@ public sealed class AgentCore
             HandlerLoader.LoadAll(Git.HandlersDirectory, Registry);
         }
         return Registry.Count;
+    }
+
+    // ── stored knowledge: explicit typed FACTS in the shared Turso hive ──────────────────
+    //
+    // A FACT is a noun — a piece of knowledge the hive holds (capital-of-ohio → Columbus, String) —
+    // distinct from a HANDLER (a verb that computes). Facts live in one shared Turso table, so a fact
+    // stored by any node is known to all and persists across restarts. This bite is EXPLICIT storage
+    // + retrieval + routing only: no auto-deriving facts from handler runs, no updating/staleness, no
+    // inference over facts.
+
+    /// <summary>Bootstrap the shared facts table (any node can call it — CREATE TABLE IF NOT EXISTS).</summary>
+    public async Task EnsureHiveAsync()
+    {
+        if (_turso is null) return;
+        await _turso.ExecuteAsync(
+            "CREATE TABLE IF NOT EXISTS facts (key TEXT PRIMARY KEY, value TEXT NOT NULL, type TEXT NOT NULL, updated_at TEXT NOT NULL)");
+    }
+
+    /// <summary>
+    /// EXPLICIT storage: parse a "remember ..." statement into a fact and write it to the hive.
+    /// KEY + VALUE come from a small LLM parse (key = a short kebab-case identifier of what the fact is
+    /// about, value = the knowledge); TYPE is inferred from the value via <see cref="CapTypes.InferFromValue"/>
+    /// ("Columbus" → String, "42" → Int). INSERT OR REPLACE so a re-stored key is overwritten (this is
+    /// explicit storage, not staleness handling). Returns the stored fact, or null if it couldn't parse.
+    /// </summary>
+    public async Task<Fact?> RememberFactAsync(string statement, CancellationToken ct = default)
+    {
+        if (_turso is null || _client is null) return null;
+        const string sys = """
+            Extract ONE stored fact from the user's "remember" statement. Output ONLY JSON:
+              {"key":"<short kebab-case identifier of what the fact is about>","value":"<the fact's value>"}
+            e.g. "the capital of Ohio is Columbus" -> {"key":"capital-of-ohio","value":"Columbus"}.
+            The value is the bare knowledge (a name, number, yes/no, or date) — no extra words.
+            """;
+        string key, value;
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(StripFences(await _client.CompleteAsync(sys, $"Statement: \"{statement}\"\nJSON:", ct)));
+            key = (doc.RootElement.TryGetProperty("key", out var k) ? k.GetString() : null)?.Trim() ?? "";
+            value = (doc.RootElement.TryGetProperty("value", out var v) ? v.GetString() : null)?.Trim() ?? "";
+        }
+        catch { return null; }
+        if (key.Length == 0 || value.Length == 0) return null;
+
+        CapType type = CapTypes.InferFromValue(value);
+        await _turso.ExecuteAsync(
+            "INSERT OR REPLACE INTO facts (key, value, type, updated_at) VALUES (?, ?, ?, ?)",
+            key, value, CapTypes.Name(type), DateTime.UtcNow.ToString("o"));
+        return new Fact(key, value, type);
+    }
+
+    /// <summary>
+    /// KNOWLEDGE-LOOKUP: does a stored fact directly answer this question? Lists the hive's fact keys,
+    /// and (only if any exist) asks the LLM to CONSERVATIVELY pick the one fact that IS the answer, or
+    /// none. On a match, returns the typed fact (caller returns it WITHOUT running or generating a
+    /// handler). Returns null — fall through to the normal handler/generate/compose flow — when there's
+    /// no hive, no facts, no key, or no real match. Deliberately conservative so it never steals a
+    /// question that should run a handler.
+    /// </summary>
+    public async Task<Fact?> TryAnswerFromKnowledgeAsync(string question, CancellationToken ct = default)
+    {
+        if (_turso is null || _client is null) return null;
+
+        List<List<string?>> rows;
+        try { rows = await _turso.ExecuteAsync("SELECT key, value, type FROM facts"); }
+        catch { return null; } // hive unreachable → behave as if no fact (fall through)
+        if (rows.Count == 0) return null;
+
+        var facts = rows.Where(r => r.Count >= 3 && r[0] is not null)
+                        .Select(r => new Fact(r[0]!, r[1] ?? "", CapTypes.Parse(r[2])))
+                        .ToList();
+        if (facts.Count == 0) return null;
+
+        string list = string.Join("\n", facts.Select(f => $"- {f.Key}: {f.Value}"));
+        const string sys = """
+            You decide whether a stored FACT directly answers a question. You are given the question and
+            a list of known facts ("key: value"). If EXACTLY ONE fact is itself the answer, return its
+            key. If none directly answers it, return "none". Be conservative: only match when the fact IS
+            the answer — never match a vaguely related fact, and never match a question that asks to
+            compute/transform something. Output ONLY JSON: {"key":"<fact-key-or-none>"}
+            """;
+        string picked;
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(StripFences(await _client.CompleteAsync(sys, $"Facts:\n{list}\n\nQuestion: \"{question}\"\nJSON:", ct)));
+            picked = (doc.RootElement.TryGetProperty("key", out var k) ? k.GetString() : null)?.Trim() ?? "none";
+        }
+        catch { return null; }
+
+        return facts.FirstOrDefault(f => string.Equals(f.Key, picked, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
@@ -581,6 +676,11 @@ public sealed record AnswerResult(AnswerKind Kind, string Text, string? Capabili
 }
 
 // ── rung 5a deliberation types (shared by AgentCore + SwarmAgent, sent over the wire as JSON) ──
+
+/// <summary>A stored piece of hive knowledge: an identifier <see cref="Key"/>, its stored
+/// <see cref="Value"/>, and the declared <see cref="Type"/> (so a fact can later feed a typed
+/// handler input — not built this bite). The hive's "noun", distinct from a handler's "verb".</summary>
+public sealed record Fact(string Key, string Value, CapType Type);
 
 /// <summary>The coordinator's one-call deliberation setup: the declared input/output types every
 /// candidate must target, plus the test cases (consistent with those types) to score them on.</summary>

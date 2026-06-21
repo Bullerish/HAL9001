@@ -89,6 +89,7 @@ Identical instances launched with `swarm` form a full mesh and add coordination 
 - **In-flight work recovery** — if the coordinator dies mid-request, the asker re-drives the request to the newly-elected coordinator, with dedup so the answer is delivered once and the handler generated once.
 - **Assign-to-one routing** — `<question>` is round-robin assigned to one node, answered, and routed home.
 - **Competitive deliberation** — `deliberate <question>` fans the question out to *every* node; each writes its **own** implementation (held locally, not pushed), runs it against coordinator-generated test cases, and returns a candidate. The coordinator collects the slate, **scores** it (test pass-rate, tie-broken by source parsimony), enforces a **quality floor** (must pass a majority), and **pushes only the winner** so the best implementation becomes the swarm's canonical shared handler.
+- **Knowledge (facts)** — the hive holds two kinds of thing: **behaviors** (handlers — verbs that compute) and **knowledge** (facts — nouns it knows). `remember the capital of Ohio is Columbus` stores an explicit typed fact (`capital-of-ohio` → `Columbus`, type `String`) in a shared **Turso** table, so every node knows it and it persists across restarts. When a question arrives, routing first does a conservative **knowledge-lookup** (does a stored fact directly answer this?); if so it returns the fact's value with no handler run and no generation, otherwise it falls through to the normal handler / generate / compose flow. Explicit storage only this bite — no auto-derived, updated, or inferred facts yet.
 - **Composition** — `compose <question>` answers a multi-step question by chaining typed capabilities: an LLM decomposes it against the live catalog (names + declared types) into an ordered chain, the plan is **displayed before running**, each **seam is type-checked** (step N's output type must equal step N+1's input type), and the chain executes step→step feeding output into input. Up to **two** missing links are **auto-generated** — each type-constrained by its seam position (two adjacent missing links share a consistent invented seam) and validated to the same quality floor as competitive generation — with **all-or-nothing adoption**: only if *every* missing link validates are they all pushed and the chain run; if any fails, nothing is adopted and the catalog is left untouched. **Three or more** missing links fail cleanly with no generation, and a simple question is answered as a single capability rather than being decomposed. (Runs locally on the asking node; every node shares the catalog via GitHub.)
 
 ---
@@ -101,6 +102,7 @@ Identical instances launched with `swarm` form a full mesh and add coordination 
 - **git** on your `PATH` (handler sharing shells out to git).
 - An **Anthropic API key** for any mode that generates capabilities (the swarm coordination/transport can be exercised without one — keyless nodes return stubs).
 - *(Optional, for cross-instance sharing)* an **SSH deploy key** configured for your GitHub handler repo so `git push`/`pull` run non-interactively. No token or key is ever stored in code.
+- *(Optional, for the hive's shared knowledge / facts)* a **Turso (libSQL) database** — set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`. Without them the swarm runs exactly as before, just without the stored-facts feature.
 
 ### Build
 
@@ -136,6 +138,21 @@ The model is configured in `AnthropicClient` (`AnthropicClient.Model`).
 ### Handler sharing (optional)
 
 To share generated handlers across instances/machines, point the repo's `origin` remote at a GitHub repo reachable via an SSH deploy key (read-write). On startup each instance pulls `handlers/` and loads them; on a successful generation it commits+pushes the one new handler. With no remote (or no repo), the agent still works fully — handlers just stay local to the session.
+
+### Hive knowledge / facts (optional)
+
+To enable the hive's shared **facts** store, set the Turso credentials in each node's environment. **Never commit them.**
+
+```powershell
+$env:TURSO_DATABASE_URL = "libsql://<db>-<org>.turso.io"
+$env:TURSO_AUTH_TOKEN   = "<token>"
+```
+```bash
+export TURSO_DATABASE_URL=libsql://<db>-<org>.turso.io
+export TURSO_AUTH_TOKEN=<token>
+```
+
+Every node points at the *same* Turso database, so a fact stored by one node is known to all and persists across restarts. On startup each node bootstraps the `facts` table (`CREATE TABLE IF NOT EXISTS`). Without these vars the swarm runs unchanged — the `remember` command and fact-lookup are simply off (`[hive knowledge: off]` in the banner). The client talks Turso's HTTP API directly (no native dependency).
 
 ---
 
@@ -177,6 +194,7 @@ dotnet bin/Debug/net8.0/HAL9001.dll swarm 5003 5001 5002
 | `<question>` | **Assign-to-one**: the coordinator routes it to one node, which answers (using or commissioning a capability); the answer is routed back to you. |
 | `deliberate <question>` | **Fan-out**: every node writes its own implementation, runs it against generated tests; the coordinator scores the slate, picks the winner, pushes only the winner, and returns the winning answer. |
 | `compose <question>` | **Compose**: decompose a composite question into a linear chain of typed capabilities, display the plan, type-check each seam, then execute step→step. Up to **two** missing links are auto-generated (type-constrained, validated to the quality floor) and adopted **all-or-nothing** (all validate or nothing is kept); **three or more** missing fails cleanly; a simple question is answered as a single capability. |
+| `remember <fact>` | **Store knowledge**: write an explicit typed fact to the shared hive (Turso), e.g. `remember the capital of Ohio is Columbus`. Parsed into a key + value; the value's type is inferred. A later question that a stored fact answers is resolved by **knowledge-lookup** — returned directly, with no handler run and no generation. |
 | `peers` | Show currently connected peers. |
 | `coordinator` | Show the believed coordinator and election term. |
 | `pause <secs>` | Test affordance: stop sending heartbeats for N seconds (simulate a hung coordinator). |
@@ -212,11 +230,12 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 | `RuntimeCompiler.cs` | Compile a C# source string to an in-memory assembly with Roslyn, load it, register the handler (with its declared types). |
 | `HandlerRegistry.cs` | In-memory catalog of capabilities (name, description, example, handler, **input/output type**). |
 | `AnthropicClient.cs` | Minimal HTTP client for the Anthropic Messages API. |
+| `TursoClient.cs` | Minimal HTTP client for the hive's shared knowledge store (Turso/libSQL `/v2/pipeline`). Connects via env credentials. |
 | `CapabilityRouter.cs` | The three-way classifier: use existing / commission new / decline. |
 | `HandlerGenerator.cs` | Asks the LLM for the general capability, compiles, trial-runs, persists+pushes (or holds locally). |
 | `HandlerLoader.cs` | On startup, compile+register every handler in `handlers/`. |
 | `GitSync.cs` | Thin, bounded wrapper over the `git` CLI (pull / commit / push), never blocks the agent. |
-| `AgentCore.cs` | **The one shared answer path** + deliberation support (test-case generation, no-push candidate generation, winner push) + **composition** (decompose → type-check seams → execute a chain; auto-generate + validate up to two missing links, all-or-nothing). |
+| `AgentCore.cs` | **The one shared answer path** + deliberation support (test-case generation, no-push candidate generation, winner push) + **composition** (decompose → type-check seams → execute a chain; auto-generate + validate up to two missing links, all-or-nothing) + **knowledge** (store/lookup typed facts in the Turso hive). |
 | `AgentRepl.cs` | Single-instance and two-node (host/join) agent REPL. |
 | `PeerNode.cs` / `PeerMessage.cs` / `PeerDemo.cs` | Two-node TCP transport and the Step-2 chat demo. |
 | `SwarmNode.cs` | N-peer mesh transport (dialing, gossip, churn recovery). |
@@ -229,7 +248,7 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 
 ## Safety & keys
 
-- The Anthropic API key is read **only** from the environment and never written to disk or committed. If a key is ever exposed, rotate it.
+- The Anthropic API key and the Turso credentials (`TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`) are read **only** from the environment and never written to disk or committed. If any is ever exposed, rotate it.
 - Generated handlers are arbitrary C# compiled and run in-process. They are trial-run before being trusted and executed under a timeout, and runtime errors are caught — but this is a research tool: **run it where executing model-written code is acceptable**, and review what lands in `handlers/`.
 - Generated code is allowed to access the network (by design). Be aware of that when reviewing handlers.
 
@@ -241,16 +260,24 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 - **Typed capabilities (small version) — done.** Capabilities declare an input/output type from a fixed set; types guide generation and catch obvious input mismatches.
 - **Composition (linear) — done.** Decompose a composite question into a chain of typed capabilities, display the plan, type-check each seam, execute step→step.
 - **Auto-generate a single missing link — done.** When a chain needs exactly one capability that doesn't exist, generate it (type-constrained by the seam), validate it to the quality floor, adopt it, and complete the chain.
-- **Bounded multi-link generation (cap 2, all-or-nothing) — done.** A chain may have up to two missing links; each is generated + validated, and both are adopted atomically — or, if either fails, nothing is adopted and the catalog is left unchanged. Three or more still fails clean (this release).
-- **Next (capability expressiveness track):** general-N missing links (lift the cap-2), then nested/recursive composition (chains of chains), then stored knowledge, then stateful capabilities — each its own rung. Type inference/generics/coercion and branching remain out of scope.
-- **Separate track (set aside for now): hive-memory.** A shared persistent memory layer (Turso) for capabilities/knowledge — credentials exist but the layer is not built yet.
-- **Also planned:** cloud (swarm beyond loopback); collapsing the two-node `PeerNode` transport onto the N-peer `SwarmNode` (the deferred half of the answer-path consolidation); and further out, self-reflection and guarded goal-setting.
+- **Bounded multi-link generation (cap 2, all-or-nothing) — done.** A chain may have up to two missing links; each is generated + validated, and both are adopted atomically — or, if either fails, nothing is adopted and the catalog is left unchanged. Three or more still fails clean.
+- **Stored knowledge — typed facts in the Turso hive — done.** The hive holds knowledge (facts), not just behaviors: `remember` stores an explicit typed fact in a shared Turso table; routing resolves a matching question by a conservative knowledge-lookup. Cross-node and persistent. Explicit storage only (this release).
+- **Next (knowledge track):** auto-deriving facts (cache a handler's output as a fact — pulls in staleness), then fact-in-composition (a fact's typed value feeding a handler's input), then fact updating/invalidation — each its own bite.
+- **Also planned:** general-N missing links (lift the cap-2); nested/recursive composition (chains of chains); stateful capabilities; cloud (swarm beyond loopback); collapsing the two-node `PeerNode` transport onto the N-peer `SwarmNode`; further out, self-reflection and guarded goal-setting. Type inference/generics/coercion and branching remain out of scope.
 
 ---
 
 ## Release notes
 
 > Newest first. Each rung was verified before the next was built. Commit hashes are on `main`.
+
+### Stored knowledge — typed facts in the Turso hive
+The hive can now **know**, not just **do**. A **fact** is a noun (a stored piece of knowledge, `capital-of-ohio` → `Columbus`); a **handler** is a verb (it computes). Facts live in a shared **Turso** table — the first use of Turso — so a fact stored by any node is known to all and persists across restarts (the hive-memory property, realized for facts). This bite is explicit storage + retrieval + routing only — no auto-derived facts, no updating/staleness, no inference.
+- **Facts schema:** `facts (key TEXT PRIMARY KEY, value TEXT, type TEXT, updated_at TEXT)`, bootstrapped by any node with `CREATE TABLE IF NOT EXISTS`. The Turso client (`TursoClient`) talks the HTTP `/v2/pipeline` API directly, connecting via `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` from the environment (never hardcoded/committed) — same discipline as the Anthropic key.
+- **Explicit storage:** `remember <statement>` → an LLM parse yields the **key** (a short kebab-case identifier of what the fact is about) and **value** (the bare knowledge); the **type** is inferred from the value (`CapTypes.InferFromValue`: "Columbus" → String, "42" → Int, "true" → Bool, a date → Date). `INSERT OR REPLACE` upserts. Explicit only — facts are stored because a node stored them, never auto-derived from handler runs.
+- **Routing recognizes knowledge-lookup (3 kinds):** when a question reaches the coordinator, it first runs a **conservative** knowledge-lookup — it lists the hive's fact keys and (only if any exist) asks the LLM whether exactly one fact *is* the answer. On a real match it returns the fact's value directly, with **no handler run and no generation** (the answer is marked `handled by knowledge`). On no match it falls through to the existing **handler → generate → compose** flow, so a question that should run a handler is never stolen by a vaguely related fact. Lookup order: stored fact → existing handler → generate/compose.
+- **Typed facts:** a fact carries a declared type (so a fact's typed value can later feed a handler's typed input — not built this bite).
+- *Verified (3 nodes, real key + Turso):* a fact stored on **node B** (`remember the capital of Ohio is Columbus` → stored typed `String`) was retrieved by **coordinator A** for a question asked on **node C** (`what is the capital of Ohio` → `[knowledge] retrieved fact 'capital-of-ohio' = Columbus — no handler, no generation`, delivered to C as `handled by knowledge`) — written, read, and asked on three different nodes through the one shared hive. A no-fact question (`is 7 a prime number`) flowed normally to the handler. The fact persisted in Turso after every node was killed. Regression: in-flight recovery after a coordinator kill, election by quorum, and generation all still hold with the knowledge-lookup on the path.
 
 ### Bounded multi-link generation (cap 2, all-or-nothing)
 Composition can now fill **up to two** missing links in one chain — atomically. The cap is hard at two; general-N is a later rung.

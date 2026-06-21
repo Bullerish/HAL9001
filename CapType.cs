@@ -60,6 +60,20 @@ public static class CapTypes
         _ => true,              // String accepts anything
     };
 
+    /// <summary>Infer a stored fact's type from its VALUE (the storage-side type machinery):
+    /// "true"/"no" → Bool, "42" → Int, "98.6" → Number, a parseable date → Date, else String.
+    /// Checked in this order so a value lands in the most specific type that fits.</summary>
+    public static CapType InferFromValue(string value)
+    {
+        string v = value.Trim();
+        string lower = v.ToLowerInvariant();
+        if (lower is "true" or "false" or "yes" or "no") return CapType.Bool;
+        if (int.TryParse(v, out _)) return CapType.Int;
+        if (double.TryParse(v, out _)) return CapType.Number;
+        if (DateTime.TryParse(v, out _)) return CapType.Date;
+        return CapType.String;
+    }
+
     /// <summary>The clean, typed error returned when input doesn't match the declared input type.</summary>
     public static string Mismatch(CapType t, string input) =>
         $"(type mismatch: this capability expects {Name(t)} input, but found no {Name(t).ToLowerInvariant()} in \"{input}\")";
