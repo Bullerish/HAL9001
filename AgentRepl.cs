@@ -1,5 +1,3 @@
-using System.Text;
-
 namespace HAL9001;
 
 /// <summary>
@@ -37,6 +35,7 @@ public static class AgentRepl
 
             GitSync? git = GitSync.Discover();
             var generator = new HandlerGenerator(client, registry, git);
+            var router = new CapabilityRouter(client, registry);
 
             PeerNode? peer = null;
 
@@ -46,23 +45,34 @@ public static class AgentRepl
             // shared state or interleave a half-built handler.
             var requestGate = new SemaphoreSlim(1, 1);
 
-            // ── Shared answer path ───────────────────────────────────────────────────────
-            // registry-check → (on a miss: generate + compile + register + push) → answer.
-            // Returns the answer text, or null if we couldn't produce one. Used identically
-            // by a locally-typed request AND a question received from the peer.
+            // ── Shared answer path (Rung 1a) ─────────────────────────────────────────────
+            // ROUTE (which capability is this?) → use the existing one OR commission a new
+            // general one → RUN it to get the answer. The LLM recognizes/commissions; it
+            // never answers — the answer is always the output of running compiled code.
+            // Used identically by a locally-typed request AND a peer question.
             async Task<string?> ProduceAnswerAsync(string request)
             {
                 await requestGate.WaitAsync();
                 try
                 {
-                    string name = DeriveName(request);
+                    RouteDecision decision = await router.RouteAsync(request);
 
-                    if (!registry.TryGet(name, out IHandler? handler))
+                    IHandler? handler;
+                    if (decision.Action == RouteAction.UseExisting &&
+                        registry.TryGet(decision.Name, out handler))
                     {
-                        Console.WriteLine($"  (no handler '{name}' yet — generating one with the LLM...)");
+                        Console.WriteLine($"  (using capability '{decision.Name}')");
+                    }
+                    else
+                    {
+                        // CreateNew — or UseExisting that named something we don't actually
+                        // have (LLM slip): commission a general capability either way.
+                        string capName = decision.Name.Length > 0 ? decision.Name : "capability";
+                        string capDesc = decision.Description.Length > 0 ? decision.Description : request;
+                        Console.WriteLine($"  (no capability yet — commissioning '{capName}': {capDesc})");
                         try
                         {
-                            handler = await generator.GenerateAsync(name, request);
+                            handler = await generator.GenerateAsync(capName, capDesc, request);
                         }
                         catch (Exception ex)
                         {
@@ -72,12 +82,19 @@ public static class AgentRepl
                         if (handler is null)
                             return null; // didn't compile even after the retry; details already printed
                     }
-                    else
-                    {
-                        Console.WriteLine($"  (reusing handler '{name}')");
-                    }
 
-                    return handler.Handle(request);
+                    // Run the compiled capability with a timeout, so a hung network call in
+                    // generated code can't freeze the agent. (We can't cancel synchronous
+                    // code mid-run, but we stop waiting and report.)
+                    try
+                    {
+                        return await Task.Run(() => handler!.Handle(request))
+                                         .WaitAsync(TimeSpan.FromSeconds(30));
+                    }
+                    catch (TimeoutException)
+                    {
+                        return "(the capability took too long to run and was cancelled)";
+                    }
                 }
                 finally
                 {
@@ -230,27 +247,6 @@ public static class AgentRepl
         }
     }
 
-    /// <summary>
-    /// Derive a tidy registry name from a request: first few words, lowercased, with
-    /// anything that isn't a letter/digit turned into a hyphen. e.g.
-    /// "Reverse this string please" -> "reverse-this-string-please".
-    /// </summary>
-    private static string DeriveName(string request)
-    {
-        string[] words = request.ToLowerInvariant()
-            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-
-        var slug = new StringBuilder();
-        foreach (string word in words.Take(4))
-        {
-            if (slug.Length > 0) slug.Append('-');
-            foreach (char c in word)
-                if (char.IsLetterOrDigit(c)) slug.Append(c);
-        }
-
-        string name = slug.ToString().Trim('-');
-        return name.Length == 0 ? "handler" : name;
-    }
 }
 
 /// <summary>

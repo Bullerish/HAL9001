@@ -1,46 +1,59 @@
 namespace HAL9001;
 
 /// <summary>
-/// An in-memory lookup table of live handlers, keyed by a name.
+/// One registered capability: a name, a one-line description of the GENERAL class of
+/// requests it handles, and the compiled handler that does the work. The description is
+/// what the <see cref="CapabilityRouter"/> reads to decide whether an incoming request is
+/// already covered.
+/// </summary>
+public sealed record Capability(string Name, string Description, IHandler Handler);
+
+/// <summary>
+/// In-memory catalog of live capabilities, keyed by name.
 ///
-/// In this step there's only one handler (the runtime-compiled string reverser),
-/// but the registry is the seam the whole project grows around: when a question
-/// arrives we'll look here first, and when we compile a new capability we'll drop
-/// it in here so it's instantly available.
+/// As of Rung 1a this is no longer "one handler per literal question." Each entry is a
+/// general capability (e.g. "state-capitals": answers the capital of any US state), and the
+/// router matches a request to one of these by MEANING rather than by exact string.
 /// </summary>
 public sealed class HandlerRegistry
 {
-    // The actual store. Case-insensitive so "Reverse" and "reverse" find the same
-    // handler — handy once names come from user input or an LLM.
-    private readonly Dictionary<string, IHandler> _handlers =
+    // Case-insensitive so names from the LLM / user resolve consistently.
+    private readonly Dictionary<string, Capability> _capabilities =
         new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>How many handlers are currently loaded.</summary>
-    public int Count => _handlers.Count;
+    /// <summary>How many capabilities are loaded.</summary>
+    public int Count => _capabilities.Count;
 
-    /// <summary>The names of all registered handlers.</summary>
-    public IEnumerable<string> Names => _handlers.Keys;
+    /// <summary>The names of all registered capabilities.</summary>
+    public IEnumerable<string> Names => _capabilities.Keys;
 
     /// <summary>
-    /// Add (or replace) a handler under the given name. Replacing matters later:
-    /// when a newer, better version of a capability is compiled, it overwrites the old.
+    /// Add (or replace) a capability. Replacing matters later: when a better version of a
+    /// capability is compiled, it overwrites the old one under the same name.
     /// </summary>
-    public void Register(string name, IHandler handler)
+    public void Register(string name, string description, IHandler handler)
     {
-        _handlers[name] = handler;
+        _capabilities[name] = new Capability(name, description, handler);
+    }
+
+    /// <summary>Try to find a handler by capability name.</summary>
+    public bool TryGet(string name, out IHandler handler)
+    {
+        if (_capabilities.TryGetValue(name, out Capability? capability))
+        {
+            handler = capability.Handler;
+            return true;
+        }
+        handler = null!;
+        return false;
     }
 
     /// <summary>
-    /// Try to find a handler by name. Returns false (no exception) if it's missing —
-    /// "no handler for this" is the normal trigger that will later kick off code
-    /// generation, not an error.
+    /// The catalog the router reasons over: every capability's name + description. This is
+    /// how the agent "knows what it can already do" before deciding to build something new.
     /// </summary>
-    public bool TryGet(string name, out IHandler handler) =>
-        _handlers.TryGetValue(name, out handler!);
+    public IReadOnlyList<Capability> Catalog() => _capabilities.Values.ToList();
 
-    /// <summary>
-    /// Convenience for this early step: grab the single handler we've loaded so the
-    /// REPL has something to route to. Returns null if the registry is empty.
-    /// </summary>
-    public IHandler? First() => _handlers.Values.FirstOrDefault();
+    /// <summary>Convenience: the first handler (used by the Step 1 demo's single-handler REPL).</summary>
+    public IHandler? First() => _capabilities.Values.Select(c => c.Handler).FirstOrDefault();
 }

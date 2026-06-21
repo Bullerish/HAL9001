@@ -22,24 +22,25 @@ public static class HandlerLoader
         {
             string source = File.ReadAllText(file);
 
-            // The registry name must match what a request would hash to, so prefer the
-            // embedded "// hal9001:name=<slug>" header the generator writes. Files pushed
-            // before that header existed fall back to the filename (minus the _<guid> suffix).
-            string name = ExtractName(source) ?? NameFromFileName(file);
+            // Prefer the embedded headers the generator writes. The name keys the registry;
+            // the description is what the router reads to recognize/reuse this capability.
+            // Files pushed before these headers existed fall back to the filename / blank.
+            string name = ExtractField(source, "name") ?? NameFromFileName(file);
+            string description = ExtractField(source, "description") ?? "";
 
-            // RuntimeCompiler registers the handler on success; on failure it prints the
+            // RuntimeCompiler registers the capability on success; on failure it prints the
             // CS#### errors itself. A bad file is skipped, never fatal.
-            if (RuntimeCompiler.TryCompileAndLoad(name, source, registry, out _))
+            if (RuntimeCompiler.TryCompileAndLoad(name, description, source, registry, out _))
                 Console.WriteLine($"  [load] {Path.GetFileName(file)} -> '{name}'");
             else
                 Console.WriteLine($"  [load] skipped {Path.GetFileName(file)} (did not compile)");
         }
     }
 
-    // Pull the slug out of "// hal9001:name=<slug>" if present.
-    private static string? ExtractName(string source)
+    // Pull a "// hal9001:<field>=<value>" header value out of the source, if present.
+    private static string? ExtractField(string source, string field)
     {
-        Match m = Regex.Match(source, @"//\s*hal9001:name=([^\r\n]+)");
+        Match m = Regex.Match(source, $@"//\s*hal9001:{field}=([^\r\n]+)");
         return m.Success ? m.Groups[1].Value.Trim() : null;
     }
 

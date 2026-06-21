@@ -4,15 +4,15 @@ using System.Text.RegularExpressions;
 namespace HAL9001;
 
 /// <summary>
-/// Turns a natural-language request into a working, compiled <see cref="IHandler"/> by:
-///   1. asking the LLM to write a C# class,
-///   2. cleaning + validating the response,
-///   3. compiling it through <see cref="RuntimeCompiler"/>,
-///   4. and, if that fails, sending the compiler errors back for ONE fix-up attempt.
-///
-/// Step 4 adds one thing on success: the compiled handler's source is written to
-/// handlers/ and pushed to GitHub (via <see cref="GitSync"/>) so another instance can
-/// later pull it. Generation/compilation is unchanged; the socket is still not involved.
+/// Commissions a GENERAL, reusable capability (Rung 1a): given a capability name +
+/// description (chosen by the <see cref="CapabilityRouter"/>) and an example request, it
+///   1. asks the LLM to write the C# class — the reusable method, never the answer,
+///   2. cleans + validates the response,
+///   3. compiles it through <see cref="RuntimeCompiler"/> (registering it under the name +
+///      description so the router can reuse it),
+///   4. on a compile failure, sends the errors back for ONE fix-up attempt, and
+///   5. on success, writes the source to handlers/ and pushes it (via <see cref="GitSync"/>)
+///      so other instances can pull and reuse the same capability.
 /// </summary>
 public sealed class HandlerGenerator
 {
@@ -42,30 +42,45 @@ public sealed class HandlerGenerator
     // system prompt (not the per-request prompt) means they're stated once, consistently.
     // =====================================================================================
     private const string SystemPrompt = """
-        You generate C# source code for a plugin system. You output CODE ONLY.
+        You generate C# source code for a plugin system. You output CODE ONLY — you never
+        answer the user's question yourself; you write the reusable METHOD that finds the
+        answer when run.
 
         STRICT output rules:
-        - Output ONLY raw C# source. No markdown, no ``` fences, no comments-as-explanation,
-          no prose before or after. The very first character must begin the C# code.
+        - Output ONLY raw C# source. No markdown, no ``` fences, no prose. The first
+          character must begin the C# code.
         - Define exactly ONE public class with a public parameterless constructor.
-        - The class MUST implement this interface, which already exists in the host program:
+        - It MUST implement this interface (already in the host program):
               namespace HAL9001 { public interface IHandler { string Handle(string input); } }
-        - Start the file with `using System;` and `using HAL9001;` plus any other System.*
-          usings you need.
-        - Use ONLY the .NET base class library (System.*). No NuGet packages, no file system,
-          no network, no Console output. Handle(input) must just compute and return a string.
-        - `input` is the user's request text. Return a helpful string answer for it.
+        - Start with `using System;` and `using HAL9001;` plus any usings you need
+          (System.Collections.Generic, System.Linq, System.Net.Http, System.Text.Json, ...).
+
+        Build the GENERAL, reusable capability — not a one-off:
+        - Handle the WHOLE CLASS of such requests, not just the one example. Parse the
+          specific item out of `input` (be tolerant of phrasing and casing).
+        - Get the data whichever way fits: BAKE IN a dataset when it's small and stable
+          (e.g. US state capitals), OR QUERY an appropriate web source when it's large or
+          changes over time. If you call the network, use HttpClient with a short timeout
+          (a few seconds) and return a clear message if the call fails.
+        - Handle(input) returns the answer as a string. Be robust to missing/unknown input.
         """;
 
     /// <summary>
-    /// Generate, compile, and register a handler named <paramref name="name"/> for
-    /// <paramref name="request"/>. Returns the live handler, or null if it never compiled.
+    /// Commission a GENERAL capability: ask the LLM to write the reusable method for
+    /// <paramref name="description"/>, compile it, register it under <paramref name="name"/>
+    /// with that description, and push it. <paramref name="exampleRequest"/> is the request
+    /// that triggered this — passed to the model as a concrete example it must handle.
+    /// Returns the live handler, or null if it never compiled.
     /// </summary>
-    public async Task<IHandler?> GenerateAsync(string name, string request, CancellationToken ct = default)
+    public async Task<IHandler?> GenerateAsync(
+        string name, string description, string exampleRequest, CancellationToken ct = default)
     {
-        // The USER prompt carries the specific, volatile part: the actual request.
+        // The USER prompt carries the specific, volatile part: the capability to build plus
+        // a concrete example. The "general, not one-off" rules live in the system prompt.
         string userPrompt =
-            $"Write a handler whose Handle(input) answers requests like this:\n\n\"{request}\"\n\n" +
+            $"Build this capability:\n  name: {name}\n  description: {description}\n\n" +
+            $"It must handle the whole class of such requests, not just this example.\n" +
+            $"Example request it must answer: \"{exampleRequest}\"\n\n" +
             "Output only the raw C# class.";
 
         string source = CleanSource(await _client.CompleteAsync(SystemPrompt, userPrompt, ct));
@@ -82,10 +97,10 @@ public sealed class HandlerGenerator
         PrintSource("generated source", source);
 
         // First compile attempt. We capture the diagnostics so we can feed them back.
-        if (RuntimeCompiler.TryCompileAndLoad(name, source, _registry, out IHandler? handler, out string? errors))
+        if (RuntimeCompiler.TryCompileAndLoad(name, description, source, _registry, out IHandler? handler, out string? errors))
         {
             // Compiled + registered → persist the exact source that compiled, then push.
-            PersistAndPush(name, request, source);
+            PersistAndPush(name, description, exampleRequest, source);
             return handler;
         }
 
@@ -102,9 +117,9 @@ public sealed class HandlerGenerator
         string fixedSource = CleanSource(await _client.CompleteAsync(SystemPrompt, fixPrompt, ct));
         PrintSource("regenerated source", fixedSource);
 
-        if (RuntimeCompiler.TryCompileAndLoad(name, fixedSource, _registry, out handler, out _))
+        if (RuntimeCompiler.TryCompileAndLoad(name, description, fixedSource, _registry, out handler, out _))
         {
-            PersistAndPush(name, request, fixedSource);
+            PersistAndPush(name, description, exampleRequest, fixedSource);
             return handler;
         }
 
@@ -120,7 +135,7 @@ public sealed class HandlerGenerator
     // handlers/, then commits + pushes just that file. A push failure is reported but never
     // fatal: the handler is already live in memory for this session.
     // =====================================================================================
-    private void PersistAndPush(string name, string request, string source)
+    private void PersistAndPush(string name, string description, string exampleRequest, string source)
     {
         if (_git is null)
         {
@@ -142,13 +157,14 @@ public sealed class HandlerGenerator
             string fileName = $"{fileBase}_{unique}.cs";
             string fullPath = Path.Combine(_git.HandlersDirectory, fileName);
 
-            // Embed the registry name (and original request) as a header so the OTHER
-            // instance can register this handler under the SAME key when it pulls — that's
-            // what lets it answer the identical request without regenerating. Comments are
+            // Embed the capability's name AND description as a header so the OTHER instance
+            // can register it under the same name with the same description when it pulls —
+            // that's what lets its router recognize and reuse the capability. Comments are
             // ignored by the compiler, so the loaded handler is byte-for-byte equivalent.
             string header =
                 $"// hal9001:name={name}\n" +
-                $"// hal9001:request={OneLine(request)}\n";
+                $"// hal9001:description={OneLine(description)}\n" +
+                $"// hal9001:request={OneLine(exampleRequest)}\n";
             File.WriteAllText(fullPath, header + source);
             Console.WriteLine($"  [sync] wrote handlers/{fileName}");
 

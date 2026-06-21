@@ -27,23 +27,33 @@ public static class RuntimeCompiler
     /// in this project, not a crash.
     /// </summary>
     /// <summary>
-    /// Convenience overload for callers that don't need the error text (e.g. the Step 1
-    /// demo). Delegates to the full version and discards the diagnostics string.
+    /// Convenience overload for the Step 1 demo: no description, no error text.
     /// </summary>
     public static bool TryCompileAndLoad(
         string name,
         string sourceCode,
         HandlerRegistry registry,
         out IHandler? handler)
-        => TryCompileAndLoad(name, sourceCode, registry, out handler, out _);
+        => TryCompileAndLoad(name, description: "", sourceCode, registry, out handler, out _);
+
+    /// <summary>Convenience overload: with description, without the error text.</summary>
+    public static bool TryCompileAndLoad(
+        string name,
+        string description,
+        string sourceCode,
+        HandlerRegistry registry,
+        out IHandler? handler)
+        => TryCompileAndLoad(name, description, sourceCode, registry, out handler, out _);
 
     /// <summary>
-    /// Full version. On compile failure, <paramref name="diagnostics"/> receives the same
-    /// CS#### error text that gets printed — so the caller (Step 3's generator) can feed
-    /// the errors back to the LLM and ask it to fix its own code. Null on success.
+    /// Full version. Registers the compiled capability under <paramref name="name"/> with
+    /// <paramref name="description"/> (the router reads that description later). On compile
+    /// failure, <paramref name="diagnostics"/> receives the CS#### error text that's also
+    /// printed — so the generator can feed it back to the LLM for a fix-up. Null on success.
     /// </summary>
     public static bool TryCompileAndLoad(
         string name,
+        string description,
         string sourceCode,
         HandlerRegistry registry,
         out IHandler? handler,
@@ -208,9 +218,9 @@ public static class RuntimeCompiler
             var instance = (IHandler)Activator.CreateInstance(handlerType)!;
 
             // ----------------------------------------------------------------
-            // STEP 8 — REGISTER it. The new capability is now live.
+            // STEP 8 — REGISTER it (with its description). The capability is now live.
             // ----------------------------------------------------------------
-            registry.Register(name, instance);
+            registry.Register(name, description, instance);
             handler = instance;
 
             Console.WriteLine($"  [ok] Compiled '{handlerType.FullName}' and registered it as '{name}'.");
