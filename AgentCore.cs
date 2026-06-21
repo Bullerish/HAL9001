@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace HAL9001;
 
 /// <summary>
@@ -22,6 +24,7 @@ namespace HAL9001;
 /// </summary>
 public sealed class AgentCore
 {
+    private readonly AnthropicClient? _client;
     private readonly CapabilityRouter? _router;
     private readonly HandlerGenerator? _generator;
 
@@ -41,6 +44,7 @@ public sealed class AgentCore
 
     public AgentCore(AnthropicClient? client)
     {
+        _client = client;
         Git = GitSync.Discover();
         if (client is not null)
         {
@@ -131,6 +135,116 @@ public sealed class AgentCore
             _gate.Release();
         }
     }
+
+    // ── rung 5a: deliberation support ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Ask the LLM for a few small test cases for the capability a question implies — input →
+    /// expected-substring pairs the correct answer must contain. Used by the coordinator when it
+    /// fans a novel question out to the swarm, so each candidate can be checked the same way (5b
+    /// will score with them). Best-effort: returns an empty list if there's no key or the reply
+    /// doesn't parse — candidates are still collected, just without test results.
+    /// </summary>
+    public async Task<IReadOnlyList<TestCase>> GenerateTestCasesAsync(string question, CancellationToken ct = default)
+    {
+        if (_client is null) return Array.Empty<TestCase>();
+
+        const string sys = """
+            You write a few SMALL test cases for a tool that answers questions like the one given.
+            Output ONLY a JSON array (no prose, no fences) of 2-3 objects, each:
+              {"input":"<a concrete request the tool should handle>",
+               "expected":"<the key substring the correct answer MUST contain — a number, a word, or yes/no>"}
+            Choose inputs with clear, unambiguous answers and keep "expected" short and exact.
+            """;
+        try
+        {
+            string raw = await _client.CompleteAsync(sys, $"Question: \"{question}\"\nJSON:", ct);
+            string json = StripFences(raw);
+            using JsonDocument doc = JsonDocument.Parse(json);
+            var list = new List<TestCase>();
+            foreach (JsonElement e in doc.RootElement.EnumerateArray())
+            {
+                string input = e.TryGetProperty("input", out var i) ? i.GetString() ?? "" : "";
+                string expected = e.TryGetProperty("expected", out var x) ? x.GetString() ?? "" : "";
+                if (input.Length > 0 && expected.Length > 0) list.Add(new TestCase(input, expected));
+                if (list.Count == 4) break;
+            }
+            return list;
+        }
+        catch { return Array.Empty<TestCase>(); }
+    }
+
+    /// <summary>
+    /// Produce a COMPETING candidate (rung 5a): route the request, reuse a matching handler or
+    /// commission a fresh one — but NEVER push it (persist:false), so N nodes generating rivals
+    /// don't spam the repo. Then run the chosen handler on the question for the candidate answer,
+    /// and on each test case for a pass/fail (output contains the expected substring). Held
+    /// locally; the winner's push is a 5b concern.
+    /// </summary>
+    public async Task<Candidate> ProduceCandidateAsync(string request, IReadOnlyList<TestCase> tests, CancellationToken ct = default)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            RouteDecision decision = await _router!.RouteAsync(request, ct);
+            if (decision.Action == RouteAction.Decline)
+                return new Candidate(CandidateStatus.Declined, decision.Reply, null, Array.Empty<TestResult>());
+
+            IHandler? handler;
+            string usedName;
+            if (decision.Action == RouteAction.UseExisting && Registry.TryGet(decision.Name, out handler))
+            {
+                usedName = decision.Name;
+                Console.WriteLine($"  (candidate: using capability '{usedName}')");
+            }
+            else
+            {
+                string capName = decision.Name.Length > 0 ? decision.Name : "capability";
+                string capDesc = decision.Description.Length > 0 ? decision.Description : request;
+                usedName = capName;
+                Console.WriteLine($"  (candidate: commissioning '{capName}' — held locally, not pushed)");
+                try { handler = await _generator!.GenerateAsync(capName, capDesc, request, ct, persist: false); }
+                catch (Exception ex) { return new Candidate(CandidateStatus.GenerationFailed, $"(generation failed: {ex.Message})", capName, Array.Empty<TestResult>()); }
+                if (handler is null) return new Candidate(CandidateStatus.GenerationFailed, "(couldn't build a working handler)", capName, Array.Empty<TestResult>());
+            }
+
+            string answer = await RunHandlerAsync(handler!, request);
+            var results = new List<TestResult>(tests.Count);
+            foreach (TestCase tc in tests)
+            {
+                string got = await RunHandlerAsync(handler!, tc.Input);
+                bool pass = got.Contains(tc.Expected, StringComparison.OrdinalIgnoreCase);
+                results.Add(new TestResult(tc.Input, tc.Expected, got, pass));
+            }
+            return new Candidate(CandidateStatus.Ok, answer, usedName, results);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    // Run a handler under the same 30s guard used everywhere, turning any throw/timeout into a
+    // string so a bad candidate never crashes the node.
+    private static async Task<string> RunHandlerAsync(IHandler handler, string input)
+    {
+        try { return await Task.Run(() => handler.Handle(input)).WaitAsync(TimeSpan.FromSeconds(30)); }
+        catch (TimeoutException) { return "(the capability took too long to run)"; }
+        catch (Exception ex) { return $"(the capability errored at runtime: {ex.GetBaseException().Message})"; }
+    }
+
+    private static string StripFences(string s)
+    {
+        s = s.Trim();
+        if (s.StartsWith("```"))
+        {
+            int nl = s.IndexOf('\n');
+            if (nl >= 0) s = s[(nl + 1)..];
+            int fence = s.LastIndexOf("```", StringComparison.Ordinal);
+            if (fence >= 0) s = s[..fence];
+        }
+        return s.Trim();
+    }
 }
 
 /// <summary>Which of the three outcomes the answer path produced.</summary>
@@ -152,3 +266,19 @@ public sealed record AnswerResult(AnswerKind Kind, string Text, string? Capabili
     public static AnswerResult Answered(string text, string capability) => new(AnswerKind.Answered, text, capability);
     public static AnswerResult GenerationFailed(string text) => new(AnswerKind.GenerationFailed, text, null);
 }
+
+// ── rung 5a deliberation types (shared by AgentCore + SwarmAgent, sent over the wire as JSON) ──
+
+/// <summary>A test for a capability: run the tool on <see cref="Input"/>; the correct answer must
+/// contain <see cref="Expected"/> (case-insensitive substring). Generated by the coordinator.</summary>
+public sealed record TestCase(string Input, string Expected);
+
+/// <summary>The outcome of running one candidate handler against one <see cref="TestCase"/>.</summary>
+public sealed record TestResult(string Input, string Expected, string Got, bool Pass);
+
+/// <summary>How a node's candidate turned out.</summary>
+public enum CandidateStatus { Ok, Declined, GenerationFailed }
+
+/// <summary>One node's competing candidate: its answer, the capability it used/built, and how it
+/// did on the test cases. Collected by the coordinator during a fan-out (no winner picked in 5a).</summary>
+public sealed record Candidate(CandidateStatus Status, string Answer, string? Capability, IReadOnlyList<TestResult> TestResults);

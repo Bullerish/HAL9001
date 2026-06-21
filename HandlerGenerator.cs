@@ -73,7 +73,8 @@ public sealed class HandlerGenerator
     /// Returns the live handler, or null if it never compiled.
     /// </summary>
     public async Task<IHandler?> GenerateAsync(
-        string name, string description, string exampleRequest, CancellationToken ct = default)
+        string name, string description, string exampleRequest, CancellationToken ct = default,
+        bool persist = true)
     {
         // The "general, not one-off" rules live in the system prompt; this carries the
         // specific capability to build plus a concrete example.
@@ -129,8 +130,12 @@ public sealed class HandlerGenerator
                 continue;
             }
 
-            // Compiles AND runs → persist + push only now.
-            PersistAndPush(name, description, exampleRequest, source);
+            // Compiles AND runs. Persist + push ONLY for the real answer path; a rung-5a
+            // candidate (persist:false) is generated and held locally — NOT pushed — so N
+            // competing nodes don't spam the repo with rival implementations (only 5b's winner
+            // should propagate).
+            if (persist)
+                PersistAndPush(name, description, exampleRequest, source);
             return handler;
         }
 

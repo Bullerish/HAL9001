@@ -53,7 +53,27 @@ public static class SwarmAgent
         string Type, string ReqId = "",
         string? Question = null, string? Origin = null,
         string? Answer = null, string? AnsweredBy = null, string? Coordinator = null,
-        int Term = 0, string? Candidate = null, string? Voter = null);
+        int Term = 0, string? Candidate = null, string? Voter = null,
+        // rung 5a fan-out fields:
+        string? TestCases = null,    // candreq: JSON array of TestCase the coordinator generated
+        string? TestResults = null,  // candidate: JSON array of TestResult the member produced
+        string? CapName = null,      // candidate: the capability the member used/built
+        string? Status = null);      // candidate: Ok / Declined / GenerationFailed
+
+    // rung 5a: the coordinator's in-progress fan-out — collecting competing candidates for one reqId.
+    private sealed class Competition
+    {
+        public readonly string Origin;
+        public readonly string Question;
+        public readonly int Expected;             // members at fan-out time (how many candidates we hope for)
+        public readonly List<CollectedCandidate> Collected = new();
+        public bool Finalized;
+        public Competition(string origin, string question, int expected)
+        { Origin = origin; Question = question; Expected = expected; }
+    }
+
+    private sealed record CollectedCandidate(
+        string Member, string Status, string? Capability, string Answer, IReadOnlyList<TestResult> TestResults);
 
     // rung 4b-ii: an asker's record of a question it has sent but not yet seen answered.
     private sealed class Outstanding
@@ -99,6 +119,16 @@ public static class SwarmAgent
         // work is in progress, and by `doneAnswers` once it has finished.
         const double ReAskTimeoutSeconds = 30.0;
         const int MaxAttempts = 4;                        // initial send + up to 3 re-asks, then give up
+
+        // ── rung 5a fan-out (deliberation) state ──────────────────────────────────────────
+        // The coordinator's open competitions, keyed by reqId. Each gathers competing candidates
+        // until all expected arrive OR the collection window elapses (whichever first), then the
+        // full slate is shown — no winner is picked (that's 5b).
+        var competitions = new ConcurrentDictionary<string, Competition>();
+        // Must comfortably exceed a candidate's generate-time. Candidates DON'T push (persist:false),
+        // so they're faster than the answer path; 60s collects the typical slate while capping the
+        // wait so one slow/dead node can't block the deliberation forever.
+        const double CollectionWindowSeconds = 60.0;
 
         // ── Heartbeat + election timing (rung 4a/4b) ──────────────────────────────────────
         const int HeartbeatIntervalMs = 1000;
@@ -222,6 +252,95 @@ public static class SwarmAgent
             await DispatchAskAsync(reqId, question);
         }
 
+        // ── rung 5a: fan-out and collect (DELIBERATION) ──────────────────────────────────
+        // Kept ALONGSIDE assign-to-one (above): `<question>` still assigns to one node; the new
+        // `deliberate <question>` fans out so every node generates its OWN candidate. Keeping both
+        // means rungs 1–4b-ii (which all run through assign-to-one) are completely untouched.
+
+        // Add a collected candidate; finalize early once every expected member has reported.
+        void AddCandidate(string reqId, string member, string status, string? cap, string answer, IReadOnlyList<TestResult> results)
+        {
+            bool finalizeNow = false;
+            if (competitions.TryGetValue(reqId, out Competition? comp))
+            {
+                lock (comp)
+                {
+                    if (comp.Finalized) return; // window already closed — a late straggler, ignore
+                    comp.Collected.Add(new CollectedCandidate(member, status, cap, answer, results));
+                    Console.WriteLine($"[deliberate] req {reqId}: candidate {comp.Collected.Count}/{comp.Expected} from {member} ({status})");
+                    Console.Write("> ");
+                    if (comp.Collected.Count >= comp.Expected) finalizeNow = true;
+                }
+            }
+            if (finalizeNow) FinalizeCompetition(reqId, "all candidates in");
+        }
+
+        // Close a competition exactly once: show the full slate and deliver it to the asker.
+        void FinalizeCompetition(string reqId, string why)
+        {
+            if (!competitions.TryGetValue(reqId, out Competition? comp)) return;
+            List<CollectedCandidate> slate;
+            lock (comp)
+            {
+                if (comp.Finalized) return;
+                comp.Finalized = true;
+                slate = comp.Collected.ToList();
+            }
+            competitions.TryRemove(reqId, out _);
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"[deliberation {reqId}] \"{comp.Question}\" — collected {slate.Count}/{comp.Expected} candidate(s) ({why}); no winner yet (that's rung 5b):");
+            for (int i = 0; i < slate.Count; i++)
+            {
+                CollectedCandidate c = slate[i];
+                int passed = c.TestResults.Count(r => r.Pass);
+                sb.AppendLine($"  {i + 1}. {c.Member} via '{c.Capability ?? "—"}' [{c.Status}] — tests {passed}/{c.TestResults.Count} passed — answer: {c.Answer}");
+            }
+            string text = sb.ToString().TrimEnd();
+            Console.WriteLine("\n" + text);
+            Console.Write("> ");
+            // Deliver the slate to the asker too (if it's a different node).
+            if (comp.Origin != node.Id) _ = SendSwarm(comp.Origin, new SwarmMsg("slate", reqId, Answer: text));
+        }
+
+        // The coordinator's own candidate (it's a member too), produced concurrently with the peers'.
+        async Task ProduceOwnCandidateAsync(string reqId, string question, IReadOnlyList<TestCase> tests)
+        {
+            if (!core.HasLlm)
+            { AddCandidate(reqId, node.Id, "Declined", null, $"(node {node.Id} has no API key)", Array.Empty<TestResult>()); return; }
+            Candidate cand = await core.ProduceCandidateAsync(question, tests);
+            AddCandidate(reqId, node.Id, cand.Status.ToString(), cand.Capability, cand.Answer, cand.TestResults);
+        }
+
+        // Close the competition when the collection window elapses (whatever arrived, we proceed).
+        async Task FinalizeAfterWindowAsync(string reqId)
+        {
+            try { await Task.Delay(TimeSpan.FromSeconds(CollectionWindowSeconds), loopCts.Token); } catch { return; }
+            FinalizeCompetition(reqId, $"collection window {CollectionWindowSeconds:0}s elapsed");
+        }
+
+        // Coordinator side of a deliberation: generate test cases, broadcast the question to every
+        // member as a candidate-request, gather candidates within the window, then show the slate.
+        async Task RunCompetitionAsync(string reqId, string question, string origin)
+        {
+            Console.WriteLine($"\n[deliberate] req {reqId}: fanning \"{question}\" out to the swarm");
+            Console.Write("> ");
+            IReadOnlyList<TestCase> tests = await core.GenerateTestCasesAsync(question);
+            string testsJson = JsonSerializer.Serialize(tests);
+
+            var members = LiveMembers();
+            competitions[reqId] = new Competition(origin, question, members.Count);
+
+            // Fan out to peers; the coordinator produces its OWN candidate locally (concurrently).
+            foreach (string peer in members.Where(m => m != node.Id))
+                await SendSwarm(peer, new SwarmMsg("candreq", reqId, Question: question, Origin: origin, TestCases: testsJson));
+            _ = ProduceOwnCandidateAsync(reqId, question, tests);
+            _ = FinalizeAfterWindowAsync(reqId);
+            // >>> rung 4b-ii-style recovery would attach HERE: if the coordinator dies mid-collection
+            //     the asker could re-issue `deliberate` to the new coordinator. For 5a this in-flight
+            //     fan-out is simply lost on coordinator death (acceptable, by spec). <<<
+        }
+
         // ── Election ──
         async Task BeginCampaignAsync(int t)
         {
@@ -299,6 +418,43 @@ public static class SwarmAgent
                         Console.WriteLine($"\n[swarm answer ← coordinator {m.Coordinator}, handled by {m.AnsweredBy}] {m.Answer}");
                         Console.Write("> ");
                     }
+                    break;
+
+                // ── rung 5a fan-out ──
+                case "compete": // asker → coordinator: run a deliberation for this question
+                    await RunCompetitionAsync(m.ReqId, m.Question ?? "", m.Origin ?? from);
+                    break;
+                case "candreq": // coordinator → member: produce your own candidate + test results
+                {
+                    Console.WriteLine($"\n[candidate] {from} asked me to compete on: \"{m.Question}\"");
+                    Console.Write("> ");
+                    IReadOnlyList<TestCase> tests;
+                    try { tests = JsonSerializer.Deserialize<List<TestCase>>(m.TestCases ?? "[]", JsonOpts) ?? new(); }
+                    catch { tests = Array.Empty<TestCase>(); }
+                    string status, answer; string? cap; IReadOnlyList<TestResult> results;
+                    if (!core.HasLlm)
+                    { status = "Declined"; cap = null; answer = $"(node {node.Id} has no API key)"; results = Array.Empty<TestResult>(); }
+                    else
+                    {
+                        Candidate cand = await core.ProduceCandidateAsync(m.Question ?? "", tests);
+                        status = cand.Status.ToString(); cap = cand.Capability; answer = cand.Answer; results = cand.TestResults;
+                    }
+                    await SendSwarm(from, new SwarmMsg("candidate", m.ReqId, Answer: answer, AnsweredBy: node.Id,
+                        CapName: cap, Status: status, TestResults: JsonSerializer.Serialize(results), Origin: m.Origin));
+                    Console.Write("> ");
+                    break;
+                }
+                case "candidate": // member → coordinator: a competing candidate has arrived
+                {
+                    IReadOnlyList<TestResult> results;
+                    try { results = JsonSerializer.Deserialize<List<TestResult>>(m.TestResults ?? "[]", JsonOpts) ?? new(); }
+                    catch { results = Array.Empty<TestResult>(); }
+                    AddCandidate(m.ReqId, m.AnsweredBy ?? from, m.Status ?? "Ok", m.CapName, m.Answer ?? "", results);
+                    break;
+                }
+                case "slate": // coordinator → asker: the full collected slate (no winner yet)
+                    Console.WriteLine("\n" + (m.Answer ?? "(empty slate)"));
+                    Console.Write("> ");
                     break;
 
                 case "elect": // a candidate is running for term m.Term
@@ -455,7 +611,8 @@ public static class SwarmAgent
 
         Console.WriteLine();
         Console.WriteLine($"Swarm-agent {node.Id}." + (client is null ? " (no API key — answers with stubs.)" : ""));
-        Console.WriteLine("Commands:  <question>   ask the swarm   |   @<port> <msg>  direct   |   peers   |   coordinator   |   pause <secs>   |   exit");
+        Console.WriteLine("Commands:  <question>   ask the swarm (assign-to-one)   |   deliberate <question>  fan-out: every node competes");
+        Console.WriteLine("           @<port> <msg>  direct   |   peers   |   coordinator   |   pause <secs>   |   exit");
         Console.WriteLine();
 
         while (true)
@@ -477,6 +634,19 @@ public static class SwarmAgent
                 int sp = line.IndexOf(' ');
                 if (sp > 1 && int.TryParse(line[1..sp], out int tp)) await node.SendToAsync($"127.0.0.1:{tp}", PeerMessageKind.Chat, line[(sp + 1)..]);
                 else Console.WriteLine("usage: @<port> <message>");
+                continue;
+            }
+            if (line.StartsWith("deliberate ", StringComparison.OrdinalIgnoreCase))
+            {
+                string q = line[("deliberate ".Length)..].Trim();
+                if (q.Length == 0) { Console.WriteLine("usage: deliberate <question>"); continue; }
+                // Route the deliberation through the elected coordinator (it orchestrates the fan-out).
+                string reqId = Guid.NewGuid().ToString("N")[..8];
+                string c; lock (stateLock) c = coordinator;
+                Console.WriteLine($"[deliberate] req {reqId} → coordinator {c}");
+                if (c == node.Id) await RunCompetitionAsync(reqId, q, node.Id);
+                else if (node.Peers.Contains(c)) await SendSwarm(c, new SwarmMsg("compete", reqId, Question: q, Origin: node.Id));
+                else Console.WriteLine($"[deliberate] coordinator {c} not reachable yet — try again in a moment.");
                 continue;
             }
             await AskSwarmAsync(line);
