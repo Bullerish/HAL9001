@@ -59,6 +59,15 @@ public static class AgentRepl
                 {
                     RouteDecision decision = await router.RouteAsync(request);
 
+                    // NOT A TASK → reply conversationally and touch NOTHING in the
+                    // handler/compile/push pipeline. capabilityUsed stays null, so no
+                    // follow-up fires either. Works for local input and peer input alike.
+                    if (decision.Action == RouteAction.Decline)
+                    {
+                        Console.WriteLine("  (not a task — replying conversationally; nothing generated)");
+                        return (decision.Reply, null);
+                    }
+
                     IHandler? handler;
                     string usedName;
                     if (decision.Action == RouteAction.UseExisting &&
@@ -140,12 +149,14 @@ public static class AgentRepl
                             // Sub-step B: route the peer's question into our own agent path,
                             // then send the result back as an Answer.
                             Console.WriteLine($"\n[peer asks] {message.Text}");
-                            Console.WriteLine("  routing peer question into my agent...");
+                            Console.WriteLine("  routing peer input through my agent...");
+                            // Same 3-way path as local input: a peer "hello" classifies as a
+                            // decline and gets a conversational reply — not a forced handler.
                             var (peerAns, _) = await ProduceAnswerAsync(message.Text);
-                            string answer = peerAns ?? "(sorry — I couldn't generate an answer for that)";
-                            Console.WriteLine($"  answering peer: {answer}");
-                            await peer!.SendAsync(PeerMessageKind.Answer, answer);
-                            Console.WriteLine("  [sent answer to peer]");
+                            string reply = peerAns ?? "(sorry — I couldn't produce a reply for that)";
+                            Console.WriteLine($"  replying to peer: {reply}");
+                            await peer!.SendAsync(PeerMessageKind.Answer, reply);
+                            Console.WriteLine("  [sent reply to peer]");
                             Console.Write("> ");
                             break;
 
@@ -224,33 +235,38 @@ public static class AgentRepl
                 string request = line.Trim();
                 if (request.Length == 0) continue;
 
-                // Same answer path a peer question uses.
+                // Same path a peer input uses.
                 var (answer, usedCapability) = await ProduceAnswerAsync(request);
                 if (answer is null)
                 {
                     Console.WriteLine();
                     continue;
                 }
-                Console.WriteLine($"  answer: {answer}");
 
-                // APP-generated follow-up (no LLM): pick a different capability we have and
-                // replay its example. Print it AND send it to the peer (sub-step A). Only for
-                // locally-typed requests — answering a peer's question never follows up (loop
-                // guard). Null when we don't have a second capability to ask about yet.
-                string? followUp = BuildFollowUp(usedCapability);
-                if (followUp is not null)
+                // usedCapability == null means it was a conversational decline; print the
+                // reply plainly. Otherwise it's a capability result.
+                Console.WriteLine(usedCapability is null ? $"  {answer}" : $"  answer: {answer}");
+
+                // Follow-up ONLY after we actually used/built a capability — never after a
+                // conversational decline. App-generated (no LLM): replay a different
+                // capability's example. Null until we have a second capability to ask about.
+                if (usedCapability is not null)
                 {
-                    Console.WriteLine($"  follow-up (from what I can do): {followUp}");
-                    if (peer is not null)
+                    string? followUp = BuildFollowUp(usedCapability);
+                    if (followUp is not null)
                     {
-                        try
+                        Console.WriteLine($"  follow-up (from what I can do): {followUp}");
+                        if (peer is not null)
                         {
-                            await peer.SendAsync(PeerMessageKind.Question, followUp);
-                            Console.WriteLine("  [sent follow-up to peer]");
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"  [could not send to peer: {ex.Message}]");
+                            try
+                            {
+                                await peer.SendAsync(PeerMessageKind.Question, followUp);
+                                Console.WriteLine("  [sent follow-up to peer]");
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"  [could not send to peer: {ex.Message}]");
+                            }
                         }
                     }
                 }
