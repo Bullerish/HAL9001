@@ -58,6 +58,30 @@ public static class SwarmAgent
         var pending = new ConcurrentDictionary<string, string>(); // reqId -> origin asker id
         int roundRobin = 0;
 
+        // ── Rung 4a: heartbeat failure detection (NO election yet) ───────────────────────
+        // Interval 1s, death timeout 4s (= 4 missed beats). Why 4×: we measure "time since the
+        // last beat heard," which already includes up to ~1 interval of pre-existing age, so a
+        // deliberate 2s stall can mean ~3s of measured silence. At 3× that trips on a mere 2s
+        // transient hiccup (GC pause, scheduler lag, a busy socket) — a false positive, which
+        // is the expensive mistake (in 4b it would depose a live coordinator → split-brain). 4×
+        // gives a clear ~1s margin over a 2-3s transient stall while still detecting a real
+        // death within ~4s. The interval:timeout ratio is the whole knob: lower = faster but
+        // more false positives; higher = fewer false positives but slower. 4× is the balance.
+        const int HeartbeatIntervalMs = 1000;
+        const double DeathTimeoutSeconds = 4.0;
+
+        var hbLock = new object();
+        string? watched = null;                    // the coordinator we monitor — STICKY: it does
+                                                   // NOT change when a peer merely drops (TCP), only
+                                                   // when a lower-port coordinator appears or (4b) an
+                                                   // election runs. That stickiness is what lets a
+                                                   // hard-killed coordinator be detected by heartbeat
+                                                   // rather than silently masked by the rung-3 recompute.
+        DateTime lastBeat = DateTime.UtcNow;       // last heartbeat heard from `watched` (grace at start)
+        bool suspected = false;                    // are we currently suspecting `watched` is dead
+        DateTime pausedUntil = DateTime.MinValue;  // test affordance: simulate a hung coordinator
+        using var hbCts = new CancellationTokenSource();
+
         // ── Coordinator selection + assignment (pure functions over current membership) ───
         List<string> Members() => node.Peers.Append(node.Id).Distinct().OrderBy(PortOf).ToList();
         string Coordinator() => Members()[0]; // lowest port
@@ -187,12 +211,91 @@ public static class SwarmAgent
                 Console.WriteLine($"[ask] coordinator {c} not reachable yet — try again in a moment.");
         }
 
+        // ── Rung 4a: heartbeat send / receive / monitor ──────────────────────────────────
+        // The lowest-port-among-the-currently-believed-successor would be (used only for the
+        // "next would be" print on death; 4b's election will use this).
+        string SuccessorOf(string deadCoord)
+        {
+            var alive = Members().Where(m => m != deadCoord).OrderBy(PortOf).ToList();
+            return alive.Count > 0 ? alive[0] : "(none)";
+        }
+
+        // A heartbeat arrived from `from` (synchronous state update).
+        void OnHeartbeat(string from)
+        {
+            lock (hbLock)
+            {
+                if (watched is null || PortOf(from) < PortOf(watched))
+                {
+                    // A (new/lower-port) coordinator we should follow.
+                    watched = from;
+                    lastBeat = DateTime.UtcNow;
+                    suspected = false;
+                }
+                else if (from == watched)
+                {
+                    lastBeat = DateTime.UtcNow;
+                    if (suspected)
+                    {
+                        suspected = false;
+                        Console.WriteLine($"\n[detect] coordinator {watched} RECOVERED — heartbeat resumed (was slow, not dead).");
+                        Console.Write("> ");
+                    }
+                }
+                // Heartbeat from a higher-port node that isn't our coordinator → ignore.
+            }
+        }
+
+        // Coordinator beats once per interval. The "current coordinator" is the lowest-port
+        // live node, so after a death the new lowest-port node naturally starts beating.
+        async Task HeartbeatSenderLoop()
+        {
+            while (!hbCts.IsCancellationRequested)
+            {
+                try { await Task.Delay(HeartbeatIntervalMs, hbCts.Token); } catch { break; }
+                bool paused;
+                lock (hbLock) paused = DateTime.UtcNow < pausedUntil;
+                if (paused) continue;                                   // simulated hang: skip beats
+                if (Coordinator() == node.Id)
+                    await node.BroadcastAsync(PeerMessageKind.Heartbeat, node.Id);
+            }
+        }
+
+        // Watch the coordinator's heartbeats; declare it suspected-dead past the timeout.
+        // DETECTION ONLY — we announce and name the successor, but take NO action (no election,
+        // no failover, no in-flight recovery). >>> rung 4b's election hooks in right here. <<<
+        async Task MonitorLoop()
+        {
+            while (!hbCts.IsCancellationRequested)
+            {
+                try { await Task.Delay(1000, hbCts.Token); } catch { break; }
+                string me = node.Id;
+                string current = Coordinator();
+                lock (hbLock)
+                {
+                    watched ??= current; // lazy init (a fresh lone node watches itself; corrected on first lower beat)
+                    if (watched != me)
+                    {
+                        double silence = (DateTime.UtcNow - lastBeat).TotalSeconds;
+                        if (!suspected && silence > DeathTimeoutSeconds)
+                        {
+                            suspected = true;
+                            Console.WriteLine($"\n[detect] coordinator {watched} SUSPECTED DEAD — no heartbeat for ~{silence:F0}s. " +
+                                              $"Next by lowest-port would be {SuccessorOf(watched)}. (rung 4b would elect here — no action taken.)");
+                            Console.Write("> ");
+                        }
+                    }
+                }
+            }
+        }
+
         // ── Wire up + run ──
         node.MessageReceived += (from, msg) =>
         {
             switch (msg.Kind)
             {
                 case PeerMessageKind.Swarm: _ = SafeOnSwarm(from, msg.Text); break;
+                case PeerMessageKind.Heartbeat: OnHeartbeat(from); break;
                 case PeerMessageKind.Chat: Console.WriteLine($"\n[from {from}] {msg.Text}"); Console.Write("> "); break;
             }
         };
@@ -206,6 +309,8 @@ public static class SwarmAgent
         }
 
         await node.StartAsync(peerPorts);
+        _ = HeartbeatSenderLoop();
+        _ = MonitorLoop();
 
         Console.WriteLine();
         Console.WriteLine($"Swarm-agent {node.Id}. Coordinator (computed): {Coordinator()}." +
@@ -214,6 +319,7 @@ public static class SwarmAgent
         Console.WriteLine("           @<port> <msg>  — message one peer directly (rung 1)");
         Console.WriteLine("           peers          — my peer list");
         Console.WriteLine("           coordinator    — who I think the coordinator is");
+        Console.WriteLine("           pause <secs>   — stop my heartbeats briefly (simulate a hung coordinator)");
         Console.WriteLine("           exit           — quit");
         Console.WriteLine();
 
@@ -228,6 +334,12 @@ public static class SwarmAgent
 
             if (line.Equals("peers", StringComparison.OrdinalIgnoreCase)) { node.PrintPeers(); continue; }
             if (line.Equals("coordinator", StringComparison.OrdinalIgnoreCase)) { Console.WriteLine($"coordinator = {Coordinator()}"); continue; }
+            if (line.StartsWith("pause ", StringComparison.OrdinalIgnoreCase) && int.TryParse(line[6..].Trim(), out int secs))
+            {
+                lock (hbLock) pausedUntil = DateTime.UtcNow.AddSeconds(secs);
+                Console.WriteLine($"[test] pausing my heartbeats for {secs}s (simulating a hung coordinator)");
+                continue;
+            }
             if (line.StartsWith('@'))
             {
                 int space = line.IndexOf(' ');
@@ -241,6 +353,7 @@ public static class SwarmAgent
             await AskSwarmAsync(line); // anything else = ask the swarm
         }
 
+        hbCts.Cancel(); // stop heartbeat + monitor loops before tearing the node down
         Console.WriteLine("Goodbye.");
     }
 

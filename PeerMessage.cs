@@ -17,6 +17,7 @@ public enum PeerMessageKind : byte
     Membership = 4,   // swarm gossip: "here are the members I know" (rung 2)
     Goodbye = 5,      // swarm: "I'm leaving cleanly — don't try to reconnect to me" (rung 2)
     Swarm = 6,        // swarm coordination envelope (JSON: ask/assign/result/deliver) (rung 3)
+    Heartbeat = 7,    // coordinator liveness beat for failure detection (rung 4a)
 }
 
 /// <summary>One message received from a peer: its kind plus its text.</summary>
