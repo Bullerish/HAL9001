@@ -70,13 +70,12 @@ public static class SwarmAgent
 
     public static async Task RunAsync(int myPort, IReadOnlyList<int> peerPorts)
     {
+        // The answer path (route/use/commission/compile/push/run, registry, git sync) is the
+        // SHARED AgentCore — the same one the two-node agent uses. The swarm layer below adds only
+        // coordination (election, quorum, heartbeats, assignment, in-flight recovery).
         AnthropicClient? client = AnthropicClient.FromEnvironment();
-        var registry = new HandlerRegistry();
-        GitSync? git = GitSync.Discover();
-        if (git is not null) { git.Pull(); HandlerLoader.LoadAll(git.HandlersDirectory, registry); }
-        HandlerGenerator? generator = client is null ? null : new HandlerGenerator(client, registry, git);
-        CapabilityRouter? router = client is null ? null : new CapabilityRouter(client, registry);
-        var answerGate = new SemaphoreSlim(1, 1);
+        var core = new AgentCore(client);
+        core.LoadSharedHandlers();
 
         await using var node = new SwarmNode(myPort);
         var pending = new ConcurrentDictionary<string, string>(); // reqId -> origin asker (coordinator role: in-progress guard)
@@ -131,34 +130,15 @@ public static class SwarmAgent
         Task SendSwarm(string to, SwarmMsg m) => node.SendToAsync(to, PeerMessageKind.Swarm, JsonSerializer.Serialize(m));
         Task BroadcastSwarm(SwarmMsg m) => node.BroadcastAsync(PeerMessageKind.Swarm, JsonSerializer.Serialize(m));
 
-        // ── The agent answer path (route → use/commission/decline → run). Stub if no key. ──
+        // ── The agent answer path — now the SHARED AgentCore. Stub if this node has no key. ──
+        // A keyless node still participates in coordination; it just returns a routed stub so the
+        // swarm's routing/election/recovery stay testable without an API key on every node.
         async Task<string> AnswerAsync(string question)
         {
-            if (router is null || generator is null)
+            if (!core.HasLlm)
                 return $"(node {node.Id} has no API key — routed stub; would answer: \"{question}\")";
-            await answerGate.WaitAsync();
-            try
-            {
-                RouteDecision decision = await router.RouteAsync(question);
-                if (decision.Action == RouteAction.Decline) return decision.Reply;
-
-                IHandler? handler;
-                if (decision.Action == RouteAction.UseExisting && registry.TryGet(decision.Name, out handler))
-                    Console.WriteLine($"  (using capability '{decision.Name}')");
-                else
-                {
-                    string name = decision.Name.Length > 0 ? decision.Name : "capability";
-                    string desc = decision.Description.Length > 0 ? decision.Description : question;
-                    Console.WriteLine($"  (commissioning '{name}': {desc})");
-                    try { handler = await generator.GenerateAsync(name, desc, question); }
-                    catch (Exception ex) { return $"(generation failed: {ex.Message})"; }
-                    if (handler is null) return "(couldn't build a working handler)";
-                }
-                try { return await Task.Run(() => handler!.Handle(question)).WaitAsync(TimeSpan.FromSeconds(30)); }
-                catch (TimeoutException) { return "(the capability took too long)"; }
-                catch (Exception ex) { return $"(runtime error: {ex.GetBaseException().Message})"; }
-            }
-            finally { answerGate.Release(); }
+            AnswerResult r = await core.AnswerAsync(question);
+            return r.Text; // decline reply, capability answer, or generation-failure note — all deliverable
         }
 
         // ── Routing (rung 3), now targeting the ELECTED coordinator ──

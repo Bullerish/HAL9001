@@ -31,93 +31,32 @@ public static class AgentRepl
 
         using (client)
         {
-            var registry = new HandlerRegistry();
-
-            GitSync? git = GitSync.Discover();
-            var generator = new HandlerGenerator(client, registry, git);
-            var router = new CapabilityRouter(client, registry);
+            // The whole answer path — routing, generation, compilation, registry, push — now
+            // lives in the SHARED AgentCore (same implementation the swarm uses). This REPL keeps
+            // only its own concerns: the peer link, the one-round loop guard, and follow-ups.
+            var core = new AgentCore(client);
 
             PeerNode? peer = null;
 
-            // Local requests (the REPL thread) and peer questions (the socket's background
-            // receive thread) both run through ProduceAnswerAsync, which touches the shared
-            // registry + generator. This gate serializes the two so they never corrupt that
-            // shared state or interleave a half-built handler.
-            var requestGate = new SemaphoreSlim(1, 1);
-
-            // ── Shared answer path (Rung 1a) ─────────────────────────────────────────────
-            // ROUTE (which capability is this?) → use the existing one OR commission a new
-            // general one → RUN it to get the answer. The LLM recognizes/commissions; it
-            // never answers — the answer is always the output of running compiled code.
-            // Used identically by a locally-typed request AND a peer question.
-            // Returns the answer plus the NAME of the capability used (so the app can pick a
-            // *different* capability for the follow-up). Both null if nothing could be produced.
+            // Thin wrapper over the shared answer path that preserves this REPL's contract:
+            // returns (answer, capabilityUsed). A decline returns the reply with a null capability
+            // (so no follow-up fires); a generation failure returns (null, null) so the loop just
+            // moves on; an answer returns the text plus the capability's name. Local requests (the
+            // REPL thread) and peer questions (the socket's receive thread) both come through here;
+            // AgentCore's internal gate serializes them over the shared registry/generator.
             async Task<(string? Answer, string? Capability)> ProduceAnswerAsync(string request)
             {
-                await requestGate.WaitAsync();
-                try
+                AnswerResult r = await core.AnswerAsync(request);
+                switch (r.Kind)
                 {
-                    RouteDecision decision = await router.RouteAsync(request);
-
-                    // NOT A TASK → reply conversationally and touch NOTHING in the
-                    // handler/compile/push pipeline. capabilityUsed stays null, so no
-                    // follow-up fires either. Works for local input and peer input alike.
-                    if (decision.Action == RouteAction.Decline)
-                    {
+                    case AnswerKind.Declined:
                         Console.WriteLine("  (not a task — replying conversationally; nothing generated)");
-                        return (decision.Reply, null);
-                    }
-
-                    IHandler? handler;
-                    string usedName;
-                    if (decision.Action == RouteAction.UseExisting &&
-                        registry.TryGet(decision.Name, out handler))
-                    {
-                        usedName = decision.Name;
-                        Console.WriteLine($"  (using capability '{usedName}')");
-                    }
-                    else
-                    {
-                        // CreateNew — or UseExisting that named something we don't actually
-                        // have (LLM slip): commission a general capability either way.
-                        string capName = decision.Name.Length > 0 ? decision.Name : "capability";
-                        string capDesc = decision.Description.Length > 0 ? decision.Description : request;
-                        usedName = capName;
-                        Console.WriteLine($"  (no capability yet — commissioning '{capName}': {capDesc})");
-                        try
-                        {
-                            handler = await generator.GenerateAsync(capName, capDesc, request);
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"  generation failed: {ex.Message}");
-                            return (null, null);
-                        }
-                        if (handler is null)
-                            return (null, null); // didn't compile even after the retry; details printed
-                    }
-
-                    // Run the compiled capability with a timeout, so a hung network call in
-                    // generated code can't freeze the agent, and catch any runtime throw.
-                    try
-                    {
-                        string result = await Task.Run(() => handler!.Handle(request))
-                                                  .WaitAsync(TimeSpan.FromSeconds(30));
-                        return (result, usedName);
-                    }
-                    catch (TimeoutException)
-                    {
-                        return ("(the capability took too long to run and was cancelled)", usedName);
-                    }
-                    catch (Exception ex)
-                    {
-                        // Surface the runtime error and stay alive — never crash the agent.
-                        return ($"(the capability errored at runtime: {ex.GetBaseException().Message})", usedName);
-                    }
-                }
-                finally
-                {
-                    requestGate.Release();
+                        return (r.Text, null);
+                    case AnswerKind.GenerationFailed:
+                        Console.WriteLine($"  {r.Text}");
+                        return (null, null);
+                    default: // Answered
+                        return (r.Text, r.Capability);
                 }
             }
 
@@ -127,7 +66,7 @@ public static class AgentRepl
             // (e.g. it only has the one capability it just used).
             string? BuildFollowUp(string? justUsed)
             {
-                var candidates = registry.Catalog()
+                var candidates = core.Registry.Catalog()
                     .Where(c => c.ExampleRequest.Length > 0)
                     .Where(c => !string.Equals(c.Name, justUsed, StringComparison.OrdinalIgnoreCase))
                     .ToList();
@@ -185,14 +124,13 @@ public static class AgentRepl
                 : "HAL9001 — self-extending agent (peer-linked)");
             Console.WriteLine($"Model: {AnthropicClient.Model}");
 
-            if (git is not null)
+            if (core.Git is not null)
             {
                 Console.WriteLine("Generated handlers will be pushed to:");
-                git.PrintRemoteAndBranch();
+                core.Git.PrintRemoteAndBranch();
                 Console.WriteLine("Syncing existing handlers from GitHub...");
-                git.Pull();
-                HandlerLoader.LoadAll(git.HandlersDirectory, registry);
-                Console.WriteLine($"  {registry.Count} handler(s) loaded and ready.");
+                int loaded = core.LoadSharedHandlers();
+                Console.WriteLine($"  {loaded} handler(s) loaded and ready.");
             }
             else
             {
