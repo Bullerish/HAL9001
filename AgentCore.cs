@@ -278,6 +278,124 @@ public sealed class AgentCore
         catch (Exception ex) { return $"(the capability errored at runtime: {ex.GetBaseException().Message})"; }
     }
 
+    // ── composition rung: linear chains of EXISTING typed capabilities ───────────────────
+
+    /// <summary>
+    /// Answer a possibly-COMPOSITE question by chaining EXISTING typed capabilities. Steps:
+    ///   1. DECOMPOSE (LLM, given the real catalog with types): single / chain / none.
+    ///   2. If not a chain → answer it as a single capability (unchanged path), labeled.
+    ///   3. RESOLVE every named step against the registry — existing-only, NEVER generate.
+    ///   4. DISPLAY the plan before running anything.
+    ///   5. TYPE-CHECK every seam (step N's output type == step N+1's input type) — reject hard.
+    ///   6. EXECUTE in order, feeding output→input with a per-step boundary check; any step that
+    ///      fails (missing/type-mismatch/runtime) fails the WHOLE composition, naming the step.
+    /// Linear + existing-only this rung: no auto-generation of missing links, no nested chains.
+    /// </summary>
+    public async Task<CompositionResult> ComposeAsync(string question, CancellationToken ct = default)
+    {
+        if (!HasLlm) return CompositionResult.Failed("(no API key — cannot decompose)");
+
+        IReadOnlyList<Capability> catalog = Registry.Catalog();
+        DecompositionPlan plan = await DecomposeAsync(question, catalog, ct);
+
+        // Not genuinely composite → answer as a single capability via the normal (unchanged) path.
+        // This is how a simple question is NOT spuriously decomposed: a 0/1-step plan falls through.
+        if (plan.Mode != "chain" || plan.Steps.Count < 2)
+        {
+            if (plan.Mode == "none" && plan.Steps.Count == 0)
+                return CompositionResult.Failed($"cannot compose: {(plan.Reason.Length > 0 ? plan.Reason : "no suitable capabilities")}");
+            AnswerResult single = await AnswerAsync(question, ct);
+            return CompositionResult.NotComposite(single.Text);
+        }
+
+        // RESOLVE each step against the registry. A named-but-missing capability is a CLEAN failure
+        // — we do NOT generate it. >>> auto-generating a missing link would attach HERE (later rung). <<<
+        var caps = new List<Capability>(plan.Steps.Count);
+        foreach (string name in plan.Steps)
+        {
+            if (!Registry.TryGetCapability(name, out Capability c))
+                return CompositionResult.Failed($"cannot compose: no capability '{name}' available");
+            // >>> nested composition (a step that is itself a chain) would attach HERE (later rung). <<<
+            caps.Add(c);
+        }
+
+        // DISPLAY the plan BEFORE executing — so decomposition and execution are separately observable.
+        string planLine = "[composition] plan: " +
+            string.Join(" → ", caps.Select(c => $"{c.Name} [{CapTypes.Name(c.InputType)}→{CapTypes.Name(c.OutputType)}]"));
+        Console.WriteLine(planLine);
+
+        // TYPE-CHECK every seam BEFORE running anything. Exact match (no coercion this rung).
+        for (int i = 0; i + 1 < caps.Count; i++)
+            if (caps[i].OutputType != caps[i + 1].InputType)
+                return CompositionResult.Failed(
+                    $"cannot compose: '{caps[i].Name}' outputs {CapTypes.Name(caps[i].OutputType)} " +
+                    $"but '{caps[i + 1].Name}' expects {CapTypes.Name(caps[i + 1].InputType)}");
+
+        // EXECUTE: step 1 reads the raw question; each step's output feeds the next.
+        string current = question;
+        for (int i = 0; i < caps.Count; i++)
+        {
+            Capability c = caps[i];
+            if (!CapTypes.Matches(c.InputType, current))
+                return CompositionResult.Failed($"composition failed at step {i + 1} ('{c.Name}'): {CapTypes.Mismatch(c.InputType, current)}");
+            (bool ok, string outp) = await RunStepAsync(c.Handler, current);
+            if (!ok)
+                return CompositionResult.Failed($"composition failed at step {i + 1} ('{c.Name}'): {outp}");
+            Console.WriteLine($"[composition] step {i + 1} {c.Name}: \"{Trunc(current)}\" → \"{Trunc(outp)}\"");
+            current = outp;
+        }
+        return CompositionResult.Chain(current, caps.Select(c => c.Name).ToList());
+    }
+
+    // The judgment step: classify the question against the REAL catalog (names + declared types),
+    // so it can only pick capabilities that exist. Strongly biased to "single" to avoid over-decomposing.
+    private async Task<DecompositionPlan> DecomposeAsync(string question, IReadOnlyList<Capability> catalog, CancellationToken ct)
+    {
+        string catalogText = catalog.Count == 0
+            ? "(none)"
+            : string.Join("\n", catalog.Select(c => $"- {c.Name} [{CapTypes.Name(c.InputType)}→{CapTypes.Name(c.OutputType)}]: {c.Description}"));
+
+        const string sys = """
+            You plan how to answer a question using ONLY the listed capabilities. Choose one mode:
+              "single" — one capability (or none of these) handles it. This is the common case.
+              "chain"  — it genuinely needs SEVERAL capabilities run in order, where one capability's
+                         OUTPUT becomes the next capability's INPUT. Return the ordered capability
+                         names, chosen EXACTLY from the list.
+              "none"   — it needs a capability that is not in the list.
+            Bias strongly to "single": only choose "chain" when the question truly has multiple
+            sequential steps that feed each other. Never invent capability names.
+            Output ONLY JSON (no prose, no fences), one of:
+              {"mode":"single"}
+              {"mode":"chain","steps":["name1","name2"]}
+              {"mode":"none","reason":"<short reason>"}
+            """;
+        try
+        {
+            string raw = await _client!.CompleteAsync(sys, $"Capabilities:\n{catalogText}\n\nQuestion: \"{question}\"\nJSON:", ct);
+            using JsonDocument doc = JsonDocument.Parse(StripFences(raw));
+            JsonElement root = doc.RootElement;
+            string mode = root.TryGetProperty("mode", out var m) ? m.GetString() ?? "single" : "single";
+            var steps = new List<string>();
+            if (root.TryGetProperty("steps", out var s) && s.ValueKind == JsonValueKind.Array)
+                foreach (JsonElement e in s.EnumerateArray())
+                { string? n = e.GetString(); if (!string.IsNullOrWhiteSpace(n)) steps.Add(n.Trim()); }
+            string reason = root.TryGetProperty("reason", out var r) ? r.GetString() ?? "" : "";
+            return new DecompositionPlan(mode, steps, reason);
+        }
+        catch { return new DecompositionPlan("single", new List<string>(), ""); }
+    }
+
+    // Run one chain step, distinguishing a real failure (exception/timeout) from a normal answer
+    // so a mid-chain failure stops the whole composition instead of being passed on as input.
+    private static async Task<(bool Ok, string Output)> RunStepAsync(IHandler handler, string input)
+    {
+        try { string r = await Task.Run(() => handler.Handle(input)).WaitAsync(TimeSpan.FromSeconds(30)); return (true, r); }
+        catch (TimeoutException) { return (false, "the capability took too long to run"); }
+        catch (Exception ex) { return (false, ex.GetBaseException().Message); }
+    }
+
+    private static string Trunc(string s) => s.Length <= 80 ? s : s[..77] + "...";
+
     private static string StripFences(string s)
     {
         s = s.Trim();
@@ -334,3 +452,20 @@ public enum CandidateStatus { Ok, Declined, GenerationFailed }
 public sealed record Candidate(
     CandidateStatus Status, string Answer, string? Capability, string? Description, string Source,
     IReadOnlyList<TestResult> TestResults);
+
+// ── composition types ──
+
+/// <summary>The decomposition step's verdict: "single" / "chain" (ordered capability names) / "none".</summary>
+internal sealed record DecompositionPlan(string Mode, IReadOnlyList<string> Steps, string Reason);
+
+/// <summary>How a <see cref="AgentCore.ComposeAsync"/> turned out.</summary>
+public enum CompositionKind { Chain, NotComposite, Failed }
+
+/// <summary>The outcome of a composition attempt: a chained answer (+ the steps used), a single-
+/// capability answer (it wasn't composite), or a clean failure with the reason.</summary>
+public sealed record CompositionResult(CompositionKind Kind, string Text, IReadOnlyList<string> Steps)
+{
+    public static CompositionResult Chain(string text, IReadOnlyList<string> steps) => new(CompositionKind.Chain, text, steps);
+    public static CompositionResult NotComposite(string text) => new(CompositionKind.NotComposite, text, Array.Empty<string>());
+    public static CompositionResult Failed(string text) => new(CompositionKind.Failed, text, Array.Empty<string>());
+}

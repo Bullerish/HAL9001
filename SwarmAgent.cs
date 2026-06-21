@@ -680,7 +680,8 @@ public static class SwarmAgent
         Console.WriteLine();
         Console.WriteLine($"Swarm-agent {node.Id}." + (client is null ? " (no API key — answers with stubs.)" : ""));
         Console.WriteLine("Commands:  <question>   ask the swarm (assign-to-one)   |   deliberate <question>  fan-out: every node competes");
-        Console.WriteLine("           @<port> <msg>  direct   |   peers   |   coordinator   |   pause <secs>   |   exit");
+        Console.WriteLine("           compose <question>  chain existing typed capabilities   |   @<port> <msg>  direct");
+        Console.WriteLine("           peers   |   coordinator   |   pause <secs>   |   exit");
         Console.WriteLine();
 
         while (true)
@@ -702,6 +703,28 @@ public static class SwarmAgent
                 int sp = line.IndexOf(' ');
                 if (sp > 1 && int.TryParse(line[1..sp], out int tp)) await node.SendToAsync($"127.0.0.1:{tp}", PeerMessageKind.Chat, line[(sp + 1)..]);
                 else Console.WriteLine("usage: @<port> <message>");
+                continue;
+            }
+            if (line.StartsWith("compose ", StringComparison.OrdinalIgnoreCase))
+            {
+                // Composition is a LOCAL registry operation: every node shares the catalog (pulled
+                // from GitHub), so this node can decompose + chain its own capabilities. No fan-out.
+                string q = line[("compose ".Length)..].Trim();
+                if (q.Length == 0) { Console.WriteLine("usage: compose <question>"); continue; }
+                if (!core.HasLlm) { Console.WriteLine("[compose] this node has no API key — can't decompose."); continue; }
+                CompositionResult cr = await core.ComposeAsync(q);
+                switch (cr.Kind)
+                {
+                    case CompositionKind.Chain:
+                        Console.WriteLine($"[composition] answer (via {string.Join(" → ", cr.Steps)}): {cr.Text}");
+                        break;
+                    case CompositionKind.NotComposite:
+                        Console.WriteLine($"[composition] not a composite — single capability handled it: {cr.Text}");
+                        break;
+                    case CompositionKind.Failed:
+                        Console.WriteLine($"[composition] {cr.Text}");
+                        break;
+                }
                 continue;
             }
             if (line.StartsWith("deliberate ", StringComparison.OrdinalIgnoreCase))

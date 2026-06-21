@@ -89,6 +89,7 @@ Identical instances launched with `swarm` form a full mesh and add coordination 
 - **In-flight work recovery** — if the coordinator dies mid-request, the asker re-drives the request to the newly-elected coordinator, with dedup so the answer is delivered once and the handler generated once.
 - **Assign-to-one routing** — `<question>` is round-robin assigned to one node, answered, and routed home.
 - **Competitive deliberation** — `deliberate <question>` fans the question out to *every* node; each writes its **own** implementation (held locally, not pushed), runs it against coordinator-generated test cases, and returns a candidate. The coordinator collects the slate, **scores** it (test pass-rate, tie-broken by source parsimony), enforces a **quality floor** (must pass a majority), and **pushes only the winner** so the best implementation becomes the swarm's canonical shared handler.
+- **Composition** — `compose <question>` answers a multi-step question by chaining *existing* typed capabilities: an LLM decomposes it against the live catalog (names + declared types) into an ordered chain, the plan is **displayed before running**, each **seam is type-checked** (step N's output type must equal step N+1's input type), and the chain executes step→step feeding output into input. Existing-only — a missing link is a clean failure, never auto-generated — and a simple question is answered as a single capability rather than being decomposed. (Runs locally on the asking node; every node shares the catalog via GitHub.)
 
 ---
 
@@ -175,6 +176,7 @@ dotnet bin/Debug/net8.0/HAL9001.dll swarm 5003 5001 5002
 |---|---|
 | `<question>` | **Assign-to-one**: the coordinator routes it to one node, which answers (using or commissioning a capability); the answer is routed back to you. |
 | `deliberate <question>` | **Fan-out**: every node writes its own implementation, runs it against generated tests; the coordinator scores the slate, picks the winner, pushes only the winner, and returns the winning answer. |
+| `compose <question>` | **Compose**: decompose a composite question into a linear chain of *existing* typed capabilities, display the plan, type-check each seam, then execute step→step. Existing-only (a missing link fails cleanly, no generation); a simple question is answered as a single capability. |
 | `peers` | Show currently connected peers. |
 | `coordinator` | Show the believed coordinator and election term. |
 | `pause <secs>` | Test affordance: stop sending heartbeats for N seconds (simulate a hung coordinator). |
@@ -214,11 +216,11 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 | `HandlerGenerator.cs` | Asks the LLM for the general capability, compiles, trial-runs, persists+pushes (or holds locally). |
 | `HandlerLoader.cs` | On startup, compile+register every handler in `handlers/`. |
 | `GitSync.cs` | Thin, bounded wrapper over the `git` CLI (pull / commit / push), never blocks the agent. |
-| `AgentCore.cs` | **The one shared answer path** + deliberation support (test-case generation, no-push candidate generation, winner push). |
+| `AgentCore.cs` | **The one shared answer path** + deliberation support (test-case generation, no-push candidate generation, winner push) + **composition** (decompose → type-check seams → execute a chain of existing capabilities). |
 | `AgentRepl.cs` | Single-instance and two-node (host/join) agent REPL. |
 | `PeerNode.cs` / `PeerMessage.cs` / `PeerDemo.cs` | Two-node TCP transport and the Step-2 chat demo. |
 | `SwarmNode.cs` | N-peer mesh transport (dialing, gossip, churn recovery). |
-| `SwarmAgent.cs` | The swarm layer: coordinator election/quorum, heartbeats, assignment, in-flight recovery, fan-out deliberation. |
+| `SwarmAgent.cs` | The swarm layer: coordinator election/quorum, heartbeats, assignment, in-flight recovery, fan-out deliberation, the `compose` command. |
 | `RoslynDemo.cs` | The Step-1 compile-and-load demonstration. |
 | `Program.cs` | CLI mode dispatch. |
 | `handlers/` | Generated, runtime-compiled capabilities (shared via GitHub; excluded from the static build). |
@@ -236,8 +238,9 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 ## Roadmap
 
 - **Competitive swarm (rungs 1–5b) — done.** Mesh, churn recovery, quorum election, in-flight recovery, competitive generate/score/adopt with GitHub propagation.
-- **Typed capabilities (small version) — done.** Capabilities declare an input/output type from a fixed set; types guide generation and catch obvious input mismatches (this release).
-- **Next (capability expressiveness track):** composition (typed capabilities calling each other), then stored knowledge, then stateful capabilities — each its own rung. Type inference/generics/coercion remain out of scope.
+- **Typed capabilities (small version) — done.** Capabilities declare an input/output type from a fixed set; types guide generation and catch obvious input mismatches.
+- **Composition (linear, existing-only) — done.** Decompose a composite question into a chain of existing typed capabilities, display the plan, type-check each seam, execute step→step (this release).
+- **Next (capability expressiveness track):** auto-generating a missing link in a chain, then nested/recursive composition (chains of chains), then stored knowledge, then stateful capabilities — each its own rung. Type inference/generics/coercion and branching remain out of scope.
 - **Separate track (set aside for now): hive-memory.** A shared persistent memory layer (Turso) for capabilities/knowledge — credentials exist but the layer is not built yet.
 - **Also planned:** cloud (swarm beyond loopback); collapsing the two-node `PeerNode` transport onto the N-peer `SwarmNode` (the deferred half of the answer-path consolidation); and further out, self-reflection and guarded goal-setting.
 
@@ -246,6 +249,15 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 ## Release notes
 
 > Newest first. Each rung was verified before the next was built. Commit hashes are on `main`.
+
+### Composition (linear chains of existing typed capabilities)
+A new `compose <question>` path answers a multi-step question by chaining capabilities that **already exist** — it never auto-generates a missing link, and it doesn't do nested/recursive chains or branching (those are later rungs).
+- **Decomposition (the judgment step):** an LLM is given the question and the live catalog — every capability's name **and declared input/output types** — and returns `single` / `chain` (ordered names, chosen only from the list) / `none`. It's biased strongly to `single`, so simple questions aren't over-decomposed; a 0/1-step result falls through to the normal single-capability answer path.
+- **Plan displayed before execution:** the chosen chain is printed with its types — `[composition] plan: temperature-converter [Number→Number] → freezing-check [Number→Bool]` — *before* anything runs, so decomposition and execution are separately observable.
+- **Existing-only:** each named step is resolved against the registry; a name with no capability fails cleanly (`cannot compose: no capability 'X' available`) — it is **not** generated.
+- **Type-checked seams (the core safety property):** before executing, every seam is verified — step N's output type must equal step N+1's input type (exact match, no coercion). A mismatch is rejected with a clear error (`'X' outputs String but 'Y' expects Number`) instead of running and producing garbage.
+- **Execution + clean partial failure:** the chain runs in order, each step's output fed as the next step's input (with the typed boundary check); if any step errors, the whole composition fails as a unit, naming the step — no half-result is returned as an answer.
+- *Verified (3 nodes, real key, two pre-seeded typed capabilities):* `compose convert 100F to celsius and tell me if that's below freezing` decomposed to `temperature-converter [Number→Number] → freezing-check [Number→Bool]`, displayed the plan, ran it (`37.78°C` → "above freezing") with the seam type-checked, and returned the correct answer; a simple question (`capital of Ohio`) was **not** decomposed (answered as a single capability); a composite naming a non-existent capability failed cleanly with **no generation** (handler count unchanged); and re-typing the converter to `Number→String` made the same chain **reject at the seam** (`outputs String but freezing-check expects Number`) before executing. Regression: assign-to-one still answers; rungs 1–5b + typing intact.
 
 ### Typed capabilities (small version)
 Capabilities are no longer blindly string→string. Each one now declares an **input type** and an **output type** from a fixed, minimal set — `String, Int, Number, Bool, Date` (no custom types, generics, or coercion; those are later rungs).
