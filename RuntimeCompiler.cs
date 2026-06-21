@@ -59,7 +59,9 @@ public static class RuntimeCompiler
         string sourceCode,
         HandlerRegistry registry,
         out IHandler? handler,
-        out string? diagnostics)
+        out string? diagnostics,
+        CapType inputType = CapType.String,
+        CapType outputType = CapType.String)
     {
         handler = null;
         diagnostics = null;
@@ -222,7 +224,7 @@ public static class RuntimeCompiler
             // ----------------------------------------------------------------
             // STEP 8 — REGISTER it (with its description). The capability is now live.
             // ----------------------------------------------------------------
-            registry.Register(name, description, exampleRequest, instance);
+            registry.Register(name, description, exampleRequest, instance, inputType, outputType);
             handler = instance;
 
             Console.WriteLine($"  [ok] Compiled '{handlerType.FullName}' and registered it as '{name}'.");

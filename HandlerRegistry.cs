@@ -7,7 +7,9 @@ namespace HAL9001;
 /// incoming request is already covered; the example is what the app replays when it
 /// generates its own follow-up question.
 /// </summary>
-public sealed record Capability(string Name, string Description, string ExampleRequest, IHandler Handler);
+public sealed record Capability(
+    string Name, string Description, string ExampleRequest, IHandler Handler,
+    CapType InputType = CapType.String, CapType OutputType = CapType.String);
 
 /// <summary>
 /// In-memory catalog of live capabilities, keyed by name.
@@ -32,9 +34,10 @@ public sealed class HandlerRegistry
     /// Add (or replace) a capability. Replacing matters later: when a better version of a
     /// capability is compiled, it overwrites the old one under the same name.
     /// </summary>
-    public void Register(string name, string description, string exampleRequest, IHandler handler)
+    public void Register(string name, string description, string exampleRequest, IHandler handler,
+        CapType inputType = CapType.String, CapType outputType = CapType.String)
     {
-        _capabilities[name] = new Capability(name, description, exampleRequest, handler);
+        _capabilities[name] = new Capability(name, description, exampleRequest, handler, inputType, outputType);
     }
 
     /// <summary>Try to find a handler by capability name.</summary>
@@ -48,6 +51,11 @@ public sealed class HandlerRegistry
         handler = null!;
         return false;
     }
+
+    /// <summary>Try to find the full capability record (name, types, handler) by name —
+    /// used to read a capability's declared input type for the boundary parse-check.</summary>
+    public bool TryGetCapability(string name, out Capability capability)
+        => _capabilities.TryGetValue(name, out capability!);
 
     /// <summary>
     /// The catalog the router reasons over: every capability's name + description. This is

@@ -74,13 +74,20 @@ public sealed class HandlerGenerator
     /// </summary>
     public async Task<GeneratedHandler?> GenerateAsync(
         string name, string description, string exampleRequest, CancellationToken ct = default,
-        bool persist = true)
+        bool persist = true,
+        CapType inputType = CapType.String, CapType outputType = CapType.String)
     {
         // The "general, not one-off" rules live in the system prompt; this carries the
-        // specific capability to build plus a concrete example.
+        // specific capability to build plus a concrete example AND its declared types. The types
+        // tell the LLM exactly what to parse from the input and what to produce — this is what
+        // makes a handler robust to phrasing (e.g. an Int handler copes with "7th").
         string basePrompt =
-            $"Build this capability:\n  name: {name}\n  description: {description}\n\n" +
+            $"Build this capability:\n  name: {name}\n  description: {description}\n" +
+            $"  input type: {CapTypes.Name(inputType)} — {CapTypes.Hint(inputType)}\n" +
+            $"  output type: {CapTypes.Name(outputType)} — {CapTypes.Hint(outputType)}\n\n" +
             $"It must handle the whole class of such requests, not just this example.\n" +
+            $"Parse the input as {CapTypes.Name(inputType)} robustly; if the input has no valid " +
+            $"{CapTypes.Name(inputType)}, return a short, clear message saying so.\n" +
             $"Example request it must answer: \"{exampleRequest}\"\n\n" +
             "Output only the raw C# class.";
 
@@ -113,7 +120,7 @@ public sealed class HandlerGenerator
             PrintSource(attempt == 1 ? "generated source" : "regenerated source", source);
 
             // 1) Must compile.
-            if (!RuntimeCompiler.TryCompileAndLoad(name, description, exampleRequest, source, _registry, out IHandler? handler, out string? compileErrors))
+            if (!RuntimeCompiler.TryCompileAndLoad(name, description, exampleRequest, source, _registry, out IHandler? handler, out string? compileErrors, inputType, outputType))
             {
                 Console.WriteLine("  [generate] didn't compile — feeding the errors back for a fix...");
                 priorFailure = compileErrors;
@@ -136,7 +143,7 @@ public sealed class HandlerGenerator
             // should propagate). We return the SOURCE alongside the handler so the swarm can push
             // the exact winning implementation later (rung 5b) without regenerating it.
             if (persist)
-                PersistAndPush(name, description, exampleRequest, source);
+                PersistAndPush(name, description, exampleRequest, source, inputType, outputType);
             return new GeneratedHandler(handler!, source);
         }
 
@@ -169,8 +176,9 @@ public sealed class HandlerGenerator
     /// commit + push as the normal answer path — used by the coordinator to propagate exactly the
     /// one winning candidate's source, after the losers were generated locally and discarded.
     /// </summary>
-    public void PersistShared(string name, string description, string exampleRequest, string source)
-        => PersistAndPush(name, description, exampleRequest, source);
+    public void PersistShared(string name, string description, string exampleRequest, string source,
+        CapType inputType = CapType.String, CapType outputType = CapType.String)
+        => PersistAndPush(name, description, exampleRequest, source, inputType, outputType);
 
     // =====================================================================================
     // PERSIST + PUSH (Step 4, push-half)
@@ -180,7 +188,8 @@ public sealed class HandlerGenerator
     // handlers/, then commits + pushes just that file. A push failure is reported but never
     // fatal: the handler is already live in memory for this session.
     // =====================================================================================
-    private void PersistAndPush(string name, string description, string exampleRequest, string source)
+    private void PersistAndPush(string name, string description, string exampleRequest, string source,
+        CapType inputType = CapType.String, CapType outputType = CapType.String)
     {
         if (_git is null)
         {
@@ -209,7 +218,9 @@ public sealed class HandlerGenerator
             string header =
                 $"// hal9001:name={name}\n" +
                 $"// hal9001:description={OneLine(description)}\n" +
-                $"// hal9001:request={OneLine(exampleRequest)}\n";
+                $"// hal9001:request={OneLine(exampleRequest)}\n" +
+                $"// hal9001:intype={CapTypes.Name(inputType)}\n" +
+                $"// hal9001:outtype={CapTypes.Name(outputType)}\n";
             File.WriteAllText(fullPath, header + source);
             Console.WriteLine($"  [sync] wrote handlers/{fileName}");
 

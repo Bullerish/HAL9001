@@ -60,7 +60,9 @@ public static class SwarmAgent
         string? CapName = null,      // candidate: the capability the member used/built
         string? CapDesc = null,      // candidate: that capability's description (for the winner push)
         string? Source = null,       // candidate: the generated source (only the winner's is pushed, 5b)
-        string? Status = null);      // candidate: Ok / Declined / GenerationFailed
+        string? Status = null,       // candidate: Ok / Declined / GenerationFailed
+        string? InType = null,       // candreq: declared input type every candidate must target (typed rung)
+        string? OutType = null);     // candreq: declared output type
 
     // rung 5a: the coordinator's in-progress fan-out — collecting competing candidates for one reqId.
     private sealed class Competition
@@ -68,10 +70,12 @@ public static class SwarmAgent
         public readonly string Origin;
         public readonly string Question;
         public readonly int Expected;             // members at fan-out time (how many candidates we hope for)
+        public readonly CapType InputType;        // declared types fixed for this deliberation (typed rung)
+        public readonly CapType OutputType;
         public readonly List<CollectedCandidate> Collected = new();
         public bool Finalized;
-        public Competition(string origin, string question, int expected)
-        { Origin = origin; Question = question; Expected = expected; }
+        public Competition(string origin, string question, int expected, CapType inputType, CapType outputType)
+        { Origin = origin; Question = question; Expected = expected; InputType = inputType; OutputType = outputType; }
     }
 
     private sealed record CollectedCandidate(
@@ -295,7 +299,7 @@ public static class SwarmAgent
 
             // ── slate (5a display, kept for visibility) ──
             var sb = new System.Text.StringBuilder();
-            sb.AppendLine($"[deliberation {reqId}] \"{comp.Question}\" — collected {slate.Count}/{comp.Expected} candidate(s) ({why}):");
+            sb.AppendLine($"[deliberation {reqId}] \"{comp.Question}\" [{CapTypes.Name(comp.InputType)}→{CapTypes.Name(comp.OutputType)}] — collected {slate.Count}/{comp.Expected} candidate(s) ({why}):");
             for (int i = 0; i < slate.Count; i++)
             {
                 CollectedCandidate c = slate[i];
@@ -339,8 +343,8 @@ public static class SwarmAgent
 
                 if (clearsFloor && winner.Source.Length > 0)
                 {
-                    Console.WriteLine($"[deliberation {reqId}] winner: {winner.Member} ({passed}/{total}) — pushing '{winner.Capability}' to the swarm.");
-                    bool pushed = core.TryPersistWinner(winner.Capability ?? "capability", winner.Description ?? comp.Question, comp.Question, winner.Source);
+                    Console.WriteLine($"[deliberation {reqId}] winner: {winner.Member} ({passed}/{total}) — pushing '{winner.Capability}' [{CapTypes.Name(comp.InputType)}→{CapTypes.Name(comp.OutputType)}] to the swarm.");
+                    bool pushed = core.TryPersistWinner(winner.Capability ?? "capability", winner.Description ?? comp.Question, comp.Question, winner.Source, comp.InputType, comp.OutputType);
                     outcome = pushed
                         ? $"WINNER {winner.Member} via '{winner.Capability}' ({passed}/{total} tests) — ADOPTED + propagated to the swarm.\n  answer: {winner.Answer}"
                         : $"WINNER {winner.Member} via '{winner.Capability}' ({passed}/{total} tests) — selected (push unavailable here).\n  answer: {winner.Answer}";
@@ -363,11 +367,11 @@ public static class SwarmAgent
         }
 
         // The coordinator's own candidate (it's a member too), produced concurrently with the peers'.
-        async Task ProduceOwnCandidateAsync(string reqId, string question, IReadOnlyList<TestCase> tests)
+        async Task ProduceOwnCandidateAsync(string reqId, string question, CapType inType, CapType outType, IReadOnlyList<TestCase> tests)
         {
             if (!core.HasLlm)
             { AddCandidate(reqId, node.Id, "Declined", null, null, "", $"(node {node.Id} has no API key)", Array.Empty<TestResult>()); return; }
-            Candidate cand = await core.ProduceCandidateAsync(question, tests);
+            Candidate cand = await core.ProduceCandidateAsync(question, inType, outType, tests);
             AddCandidate(reqId, node.Id, cand.Status.ToString(), cand.Capability, cand.Description, cand.Source, cand.Answer, cand.TestResults);
         }
 
@@ -384,16 +388,20 @@ public static class SwarmAgent
         {
             Console.WriteLine($"\n[deliberate] req {reqId}: fanning \"{question}\" out to the swarm");
             Console.Write("> ");
-            IReadOnlyList<TestCase> tests = await core.GenerateTestCasesAsync(question);
-            string testsJson = JsonSerializer.Serialize(tests);
+            // ONE LLM call: infer the declared input/output types + generate type-consistent tests.
+            DeliberationSpec spec = await core.PrepareDeliberationAsync(question);
+            string testsJson = JsonSerializer.Serialize(spec.Tests);
+            Console.WriteLine($"[deliberate] req {reqId}: types {CapTypes.Name(spec.InputType)}→{CapTypes.Name(spec.OutputType)}, {spec.Tests.Count} test case(s)");
+            Console.Write("> ");
 
             var members = LiveMembers();
-            competitions[reqId] = new Competition(origin, question, members.Count);
+            competitions[reqId] = new Competition(origin, question, members.Count, spec.InputType, spec.OutputType);
 
-            // Fan out to peers; the coordinator produces its OWN candidate locally (concurrently).
+            // Fan out to peers (all targeting the SAME declared types); coordinator competes too.
             foreach (string peer in members.Where(m => m != node.Id))
-                await SendSwarm(peer, new SwarmMsg("candreq", reqId, Question: question, Origin: origin, TestCases: testsJson));
-            _ = ProduceOwnCandidateAsync(reqId, question, tests);
+                await SendSwarm(peer, new SwarmMsg("candreq", reqId, Question: question, Origin: origin,
+                    TestCases: testsJson, InType: CapTypes.Name(spec.InputType), OutType: CapTypes.Name(spec.OutputType)));
+            _ = ProduceOwnCandidateAsync(reqId, question, spec.InputType, spec.OutputType, spec.Tests);
             _ = FinalizeAfterWindowAsync(reqId);
             // >>> rung 4b-ii-style recovery would attach HERE: if the coordinator dies mid-collection
             //     the asker could re-issue `deliberate` to the new coordinator. For 5a this in-flight
@@ -490,12 +498,13 @@ public static class SwarmAgent
                     IReadOnlyList<TestCase> tests;
                     try { tests = JsonSerializer.Deserialize<List<TestCase>>(m.TestCases ?? "[]", JsonOpts) ?? new(); }
                     catch { tests = Array.Empty<TestCase>(); }
+                    CapType inT = CapTypes.Parse(m.InType), outT = CapTypes.Parse(m.OutType);   // coordinator-fixed types
                     string status, answer, source; string? cap, desc; IReadOnlyList<TestResult> results;
                     if (!core.HasLlm)
                     { status = "Declined"; cap = null; desc = null; source = ""; answer = $"(node {node.Id} has no API key)"; results = Array.Empty<TestResult>(); }
                     else
                     {
-                        Candidate cand = await core.ProduceCandidateAsync(m.Question ?? "", tests);
+                        Candidate cand = await core.ProduceCandidateAsync(m.Question ?? "", inT, outT, tests);
                         status = cand.Status.ToString(); cap = cand.Capability; desc = cand.Description; source = cand.Source; answer = cand.Answer; results = cand.TestResults;
                     }
                     await SendSwarm(from, new SwarmMsg("candidate", m.ReqId, Answer: answer, AnsweredBy: node.Id,

@@ -88,23 +88,27 @@ public sealed class AgentCore
 
             IHandler? handler;
             string usedName;
-            if (decision.Action == RouteAction.UseExisting && Registry.TryGet(decision.Name, out handler))
+            CapType inType;   // declared input type of the chosen capability — for the boundary check
+            if (decision.Action == RouteAction.UseExisting && Registry.TryGetCapability(decision.Name, out Capability cap))
             {
+                handler = cap.Handler;
                 usedName = decision.Name;
-                Console.WriteLine($"  (using capability '{usedName}')");
+                inType = cap.InputType;
+                Console.WriteLine($"  (using capability '{usedName}' [{CapTypes.Name(cap.InputType)}→{CapTypes.Name(cap.OutputType)}])");
             }
             else
             {
                 // CreateNew — or a UseExisting that named something we don't actually have
-                // (an LLM slip): commission a general capability either way.
+                // (an LLM slip): commission a general capability either way, with declared types.
                 string capName = decision.Name.Length > 0 ? decision.Name : "capability";
                 string capDesc = decision.Description.Length > 0 ? decision.Description : request;
                 usedName = capName;
-                Console.WriteLine($"  (commissioning '{capName}': {capDesc})");
+                inType = decision.InputType;
+                Console.WriteLine($"  (commissioning '{capName}' [{CapTypes.Name(decision.InputType)}→{CapTypes.Name(decision.OutputType)}]: {capDesc})");
                 GeneratedHandler? gen;
                 try
                 {
-                    gen = await _generator!.GenerateAsync(capName, capDesc, request, ct);
+                    gen = await _generator!.GenerateAsync(capName, capDesc, request, ct, persist: true, decision.InputType, decision.OutputType);
                 }
                 catch (Exception ex)
                 {
@@ -114,6 +118,11 @@ public sealed class AgentCore
                     return AnswerResult.GenerationFailed("(couldn't build a working handler)");
                 handler = gen.Handler;
             }
+
+            // Boundary parse-check (typed-capabilities rung): if the input can't possibly hold the
+            // declared input type, return a clean typed error instead of running the handler on garbage.
+            if (!CapTypes.Matches(inType, request))
+                return AnswerResult.Answered(CapTypes.Mismatch(inType, request), usedName);
 
             // Run the compiled capability with a timeout so a hung network call in generated
             // code can't freeze the agent, and catch any runtime throw — never crash.
@@ -141,49 +150,58 @@ public sealed class AgentCore
     // ── rung 5a: deliberation support ────────────────────────────────────────────────────
 
     /// <summary>
-    /// Ask the LLM for a few small test cases for the capability a question implies — input →
-    /// expected-substring pairs the correct answer must contain. Used by the coordinator when it
-    /// fans a novel question out to the swarm, so each candidate can be checked the same way (5b
-    /// will score with them). Best-effort: returns an empty list if there's no key or the reply
-    /// doesn't parse — candidates are still collected, just without test results.
+    /// Prepare a deliberation (rungs 5a/5b + typing): in ONE LLM call, infer the capability's
+    /// declared INPUT and OUTPUT types from the question AND generate a few test cases consistent
+    /// with those types. The coordinator does this once, then fixes the same types + tests for every
+    /// competing member — so candidates are comparable and the tests match the declared types.
+    /// Best-effort: String→String with no tests if there's no key or the reply doesn't parse.
     /// </summary>
-    public async Task<IReadOnlyList<TestCase>> GenerateTestCasesAsync(string question, CancellationToken ct = default)
+    public async Task<DeliberationSpec> PrepareDeliberationAsync(string question, CancellationToken ct = default)
     {
-        if (_client is null) return Array.Empty<TestCase>();
+        if (_client is null) return new DeliberationSpec(CapType.String, CapType.String, Array.Empty<TestCase>());
 
         const string sys = """
-            You write a few SMALL test cases for a tool that answers questions like the one given.
-            Output ONLY a JSON array (no prose, no fences) of 2-3 objects, each:
-              {"input":"<a concrete request the tool should handle>",
-               "expected":"<the key substring the correct answer MUST contain — a number, a word, or yes/no>"}
-            Choose inputs with clear, unambiguous answers and keep "expected" short and exact.
+            You set up a competition to build a tool that answers questions like the one given.
+            First decide the tool's INPUT and OUTPUT types from this fixed set:
+              String (free-form text), Int (a whole number), Number (integer or decimal),
+              Bool (yes/no), Date (a calendar date).
+            Then write 2-3 SMALL test cases consistent with those types.
+            Output ONLY this JSON (no prose, no fences):
+              {"inputType":"<String|Int|Number|Bool|Date>",
+               "outputType":"<String|Int|Number|Bool|Date>",
+               "tests":[{"input":"<a concrete request>","expected":"<key substring the right answer must contain>"}]}
+            Keep each "expected" short and exact.
             """;
         try
         {
             string raw = await _client.CompleteAsync(sys, $"Question: \"{question}\"\nJSON:", ct);
-            string json = StripFences(raw);
-            using JsonDocument doc = JsonDocument.Parse(json);
+            using JsonDocument doc = JsonDocument.Parse(StripFences(raw));
+            JsonElement root = doc.RootElement;
+            CapType inT = CapTypes.Parse(root.TryGetProperty("inputType", out var i) ? i.GetString() : null);
+            CapType outT = CapTypes.Parse(root.TryGetProperty("outputType", out var o) ? o.GetString() : null);
             var list = new List<TestCase>();
-            foreach (JsonElement e in doc.RootElement.EnumerateArray())
-            {
-                string input = e.TryGetProperty("input", out var i) ? i.GetString() ?? "" : "";
-                string expected = e.TryGetProperty("expected", out var x) ? x.GetString() ?? "" : "";
-                if (input.Length > 0 && expected.Length > 0) list.Add(new TestCase(input, expected));
-                if (list.Count == 4) break;
-            }
-            return list;
+            if (root.TryGetProperty("tests", out JsonElement tests) && tests.ValueKind == JsonValueKind.Array)
+                foreach (JsonElement e in tests.EnumerateArray())
+                {
+                    string input = e.TryGetProperty("input", out var ii) ? ii.GetString() ?? "" : "";
+                    string expected = e.TryGetProperty("expected", out var xx) ? xx.GetString() ?? "" : "";
+                    if (input.Length > 0 && expected.Length > 0) list.Add(new TestCase(input, expected));
+                    if (list.Count == 4) break;
+                }
+            return new DeliberationSpec(inT, outT, list);
         }
-        catch { return Array.Empty<TestCase>(); }
+        catch { return new DeliberationSpec(CapType.String, CapType.String, Array.Empty<TestCase>()); }
     }
 
     /// <summary>
     /// Produce a COMPETING candidate (rung 5a): route the request, reuse a matching handler or
     /// commission a fresh one — but NEVER push it (persist:false), so N nodes generating rivals
-    /// don't spam the repo. Then run the chosen handler on the question for the candidate answer,
-    /// and on each test case for a pass/fail (output contains the expected substring). Held
-    /// locally; the winner's push is a 5b concern.
+    /// don't spam the repo. The declared input/output types are FIXED by the coordinator so every
+    /// candidate targets the same contract. Then run the chosen handler on the question (the
+    /// candidate answer) and on each test case (pass/fail), with the boundary type-check applied.
     /// </summary>
-    public async Task<Candidate> ProduceCandidateAsync(string request, IReadOnlyList<TestCase> tests, CancellationToken ct = default)
+    public async Task<Candidate> ProduceCandidateAsync(
+        string request, CapType inputType, CapType outputType, IReadOnlyList<TestCase> tests, CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct);
         try
@@ -208,20 +226,25 @@ public sealed class AgentCore
                 string capDesc = decision.Description.Length > 0 ? decision.Description : request;
                 usedName = capName;
                 usedDesc = capDesc;
-                Console.WriteLine($"  (candidate: commissioning '{capName}' — held locally, not pushed)");
+                Console.WriteLine($"  (candidate: commissioning '{capName}' [{CapTypes.Name(inputType)}→{CapTypes.Name(outputType)}] — held locally, not pushed)");
                 GeneratedHandler? gen;
-                try { gen = await _generator!.GenerateAsync(capName, capDesc, request, ct, persist: false); }
+                try { gen = await _generator!.GenerateAsync(capName, capDesc, request, ct, persist: false, inputType, outputType); }
                 catch (Exception ex) { return new Candidate(CandidateStatus.GenerationFailed, $"(generation failed: {ex.Message})", capName, capDesc, "", Array.Empty<TestResult>()); }
                 if (gen is null) return new Candidate(CandidateStatus.GenerationFailed, "(couldn't build a working handler)", capName, capDesc, "", Array.Empty<TestResult>());
                 handler = gen.Handler;
                 source = gen.Source;
             }
 
-            string answer = await RunHandlerAsync(handler!, request);
+            // Boundary type-check on the question itself; a clean typed error if it doesn't fit.
+            string answer = CapTypes.Matches(inputType, request)
+                ? await RunHandlerAsync(handler!, request)
+                : CapTypes.Mismatch(inputType, request);
             var results = new List<TestResult>(tests.Count);
             foreach (TestCase tc in tests)
             {
-                string got = await RunHandlerAsync(handler!, tc.Input);
+                string got = CapTypes.Matches(inputType, tc.Input)
+                    ? await RunHandlerAsync(handler!, tc.Input)
+                    : CapTypes.Mismatch(inputType, tc.Input);
                 bool pass = got.Contains(tc.Expected, StringComparison.OrdinalIgnoreCase);
                 results.Add(new TestResult(tc.Input, tc.Expected, got, pass));
             }
@@ -235,12 +258,14 @@ public sealed class AgentCore
 
     /// <summary>
     /// Push the deliberation WINNER (rung 5b): persist + commit + push exactly the one winning
-    /// candidate's source so it becomes the swarm's canonical handler. No-op without a key/generator.
+    /// candidate's source — with its declared types in the header — so it becomes the swarm's
+    /// canonical handler. No-op without a key/generator.
     /// </summary>
-    public bool TryPersistWinner(string name, string description, string exampleRequest, string source)
+    public bool TryPersistWinner(string name, string description, string exampleRequest, string source,
+        CapType inputType, CapType outputType)
     {
         if (_generator is null || source.Length == 0) return false;
-        _generator.PersistShared(name, description, exampleRequest, source);
+        _generator.PersistShared(name, description, exampleRequest, source, inputType, outputType);
         return true;
     }
 
@@ -288,6 +313,10 @@ public sealed record AnswerResult(AnswerKind Kind, string Text, string? Capabili
 }
 
 // ── rung 5a deliberation types (shared by AgentCore + SwarmAgent, sent over the wire as JSON) ──
+
+/// <summary>The coordinator's one-call deliberation setup: the declared input/output types every
+/// candidate must target, plus the test cases (consistent with those types) to score them on.</summary>
+public sealed record DeliberationSpec(CapType InputType, CapType OutputType, IReadOnlyList<TestCase> Tests);
 
 /// <summary>A test for a capability: run the tool on <see cref="Input"/>; the correct answer must
 /// contain <see cref="Expected"/> (case-insensitive substring). Generated by the coordinator.</summary>

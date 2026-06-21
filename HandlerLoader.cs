@@ -28,10 +28,14 @@ public static class HandlerLoader
             string name = ExtractField(source, "name") ?? NameFromFileName(file);
             string description = ExtractField(source, "description") ?? "";
             string example = ExtractField(source, "request") ?? "";
+            // Declared types from the header; absent (pre-typing handlers) → String, so older
+            // handlers are grandfathered as String -> String and keep working unchanged.
+            CapType inType = CapTypes.Parse(ExtractField(source, "intype"));
+            CapType outType = CapTypes.Parse(ExtractField(source, "outtype"));
 
             // RuntimeCompiler registers the capability on success; on failure it prints the
             // CS#### errors itself. A bad file is skipped, never fatal.
-            if (RuntimeCompiler.TryCompileAndLoad(name, description, example, source, registry, out _))
+            if (RuntimeCompiler.TryCompileAndLoad(name, description, example, source, registry, out _, out _, inType, outType))
                 Console.WriteLine($"  [load] {Path.GetFileName(file)} -> '{name}'");
             else
                 Console.WriteLine($"  [load] skipped {Path.GetFileName(file)} (did not compile)");

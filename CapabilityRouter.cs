@@ -16,7 +16,9 @@ public enum RouteAction
 ///   CreateNew   → Name is a proposed id, Description the one-line spec of the GENERAL capability.
 ///   Decline     → Reply is a short conversational response; nothing is built.
 /// </summary>
-public sealed record RouteDecision(RouteAction Action, string Name, string Description, string Reply);
+public sealed record RouteDecision(
+    RouteAction Action, string Name, string Description, string Reply,
+    CapType InputType = CapType.String, CapType OutputType = CapType.String);
 
 /// <summary>
 /// The "recognize, don't match" step. Instead of slug-matching a request's literal text,
@@ -61,9 +63,16 @@ public sealed class CapabilityRouter
           - When you genuinely can't find an actionable task in the input, prefer "decline".
             Building a tool for a non-task is the expensive mistake this rule exists to stop.
 
+        For a "new" capability, also declare its INPUT and OUTPUT types from this fixed set:
+          String (free-form text), Int (a whole number), Number (integer or decimal),
+          Bool (yes/no), Date (a calendar date).
+        Pick the types the capability fundamentally works on — e.g. "is N prime" is Int -> Bool;
+        "convert C to F" is Number -> Number; "capital of a state" is String -> String. These types
+        make the generated handler parse its input robustly. Use String when unsure.
+
         Respond with ONLY JSON — no prose, no markdown fences — in one of these shapes:
           {"action":"use","name":"<existing-capability-name>"}
-          {"action":"new","name":"<short-kebab-case-id>","description":"<one line: the general capability>"}
+          {"action":"new","name":"<short-kebab-case-id>","description":"<one line: the general capability>","inputType":"<String|Int|Number|Bool|Date>","outputType":"<String|Int|Number|Bool|Date>"}
           {"action":"decline","reply":"<one short, friendly sentence>"}
         """;
 
@@ -106,7 +115,10 @@ public sealed class CapabilityRouter
             // "new" (or anything else that named/described a task): commission a capability.
             if (name.Length == 0) name = Slug(request);
             if (description.Length == 0) description = request;
-            return new RouteDecision(RouteAction.CreateNew, name, description, "");
+            string inType = root.TryGetProperty("inputType", out JsonElement it) ? it.GetString() ?? "" : "";
+            string outType = root.TryGetProperty("outputType", out JsonElement ot) ? ot.GetString() ?? "" : "";
+            return new RouteDecision(RouteAction.CreateNew, name, description, "",
+                CapTypes.Parse(inType), CapTypes.Parse(outType));
         }
         catch
         {

@@ -77,6 +77,8 @@ question ─▶ router (LLM classifies: use / commission / decline)
 
 A generated capability is an `IHandler { string Handle(string input); }`. It's compiled to a real in-memory assembly (`RuntimeCompiler`), registered in a `HandlerRegistry`, trial-run before it's trusted, and — on success — written to `handlers/` and pushed to a shared GitHub repo so other instances can pull and gain the same skill. All of this is consolidated in **`AgentCore`**, the single answer path shared by every mode.
 
+**Typed capabilities.** Each capability also declares an **input type** and an **output type** from a small fixed set (`String, Int, Number, Bool, Date`). The type is inferred when the capability is commissioned (folded into the existing router/deliberation LLM calls — no extra round-trips), passed into the generation prompt so the handler parses its input robustly (an `Int` capability copes with "7th"), recorded in the registry and the handler file header, and used for a lightweight **boundary check** that returns a clean typed error if a capability is invoked with the wrong kind of input. The handler stays string-based under the hood; types are metadata + a generation guide + a parse-check. Handlers without a declared type are grandfathered as `String → String`.
+
 ### The swarm (many instances)
 
 Identical instances launched with `swarm` form a full mesh and add coordination on top of `AgentCore`:
@@ -204,8 +206,9 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 | File | Responsibility |
 |---|---|
 | `IHandler.cs` | The capability contract: `string Handle(string input)`. |
-| `RuntimeCompiler.cs` | Compile a C# source string to an in-memory assembly with Roslyn, load it, register the handler. |
-| `HandlerRegistry.cs` | In-memory catalog of capabilities (name, description, example, handler). |
+| `CapType.cs` | The fixed capability type set (`String/Int/Number/Bool/Date`) + parse, prompt-hint, and boundary parse-check helpers. |
+| `RuntimeCompiler.cs` | Compile a C# source string to an in-memory assembly with Roslyn, load it, register the handler (with its declared types). |
+| `HandlerRegistry.cs` | In-memory catalog of capabilities (name, description, example, handler, **input/output type**). |
 | `AnthropicClient.cs` | Minimal HTTP client for the Anthropic Messages API. |
 | `CapabilityRouter.cs` | The three-way classifier: use existing / commission new / decline. |
 | `HandlerGenerator.cs` | Asks the LLM for the general capability, compiles, trial-runs, persists+pushes (or holds locally). |
@@ -232,16 +235,27 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 
 ## Roadmap
 
-- **Rung 5b — done.** Scoring + winner selection + winner-only propagation (this release).
-- **Next: cloud.** Move the swarm beyond loopback to real hosts.
-- **Standing follow-up:** collapse the two-node `PeerNode` transport onto the N-peer `SwarmNode` (the deferred half of the answer-path consolidation).
-- **Further out (the original "upstream ladder"):** capability templates, persistent knowledge/memory, self-reflection on its own capabilities, and guarded goal-setting / recursive self-improvement.
+- **Competitive swarm (rungs 1–5b) — done.** Mesh, churn recovery, quorum election, in-flight recovery, competitive generate/score/adopt with GitHub propagation.
+- **Typed capabilities (small version) — done.** Capabilities declare an input/output type from a fixed set; types guide generation and catch obvious input mismatches (this release).
+- **Next (capability expressiveness track):** composition (typed capabilities calling each other), then stored knowledge, then stateful capabilities — each its own rung. Type inference/generics/coercion remain out of scope.
+- **Separate track (set aside for now): hive-memory.** A shared persistent memory layer (Turso) for capabilities/knowledge — credentials exist but the layer is not built yet.
+- **Also planned:** cloud (swarm beyond loopback); collapsing the two-node `PeerNode` transport onto the N-peer `SwarmNode` (the deferred half of the answer-path consolidation); and further out, self-reflection and guarded goal-setting.
 
 ---
 
 ## Release notes
 
 > Newest first. Each rung was verified before the next was built. Commit hashes are on `main`.
+
+### Typed capabilities (small version)
+Capabilities are no longer blindly string→string. Each one now declares an **input type** and an **output type** from a fixed, minimal set — `String, Int, Number, Bool, Date` (no custom types, generics, or coercion; those are later rungs).
+- **Inference (no extra LLM calls):** the router returns `inputType`/`outputType` when it commissions a `new` capability; a deliberation infers the types *and* generates type-consistent test cases in one combined `PrepareDeliberationAsync` call at the coordinator.
+- **Types guide generation:** the generation prompt tells the LLM exactly what to parse and produce (e.g. "input is an Int — parse the integer tolerantly, even from '7th'"), fixing the old parsing fragility.
+- **Recorded everywhere:** types live on the in-memory `Capability`, are written into the handler file header (`// hal9001:intype=…/outtype=…`), and are restored on pull. The handler stays string-based under the hood; types are metadata + a generation guide + a boundary check.
+- **Boundary parse-check:** before running a handler, if the input can't hold the declared input type (e.g. an `Int` capability invoked with no number), a clean typed error is returned instead of garbage.
+- **Coexistence:** existing/older handlers have no type header, so they're grandfathered as `String → String` (their boundary check is a no-op) and keep working unchanged.
+- **Deliberation carries types:** every competing candidate for a question targets the *same* coordinator-declared types (so they're comparable), the test cases match those types, and the winner is pushed with its types in the header.
+- *Verified (3 nodes, real key):* `deliberate is 12 a perfect number` inferred `Int→Bool`, generated each candidate under those types, and pushed the winner with `intype=Int/outtype=Bool` in its header; `is twelve a perfect number` (no digit) was caught as a clean type mismatch; the grandfathered `get-us-state-capital` (String→String) still answered "Columbus". Regression: assign-to-one in-flight recovery after a coordinator kill still delivered, election by quorum and one-handler push intact.
 
 ### Rung 5b — Scoring & winner selection · competitive deliberation complete
 The coordinator now **judges** the candidate slate from 5a and adopts the best:
