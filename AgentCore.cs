@@ -165,7 +165,8 @@ public sealed class AgentCore
             First decide the tool's INPUT and OUTPUT types from this fixed set:
               String (free-form text), Int (a whole number), Number (integer or decimal),
               Bool (yes/no), Date (a calendar date).
-            Then write 2-3 SMALL test cases consistent with those types.
+            Then write 2-3 SMALL test cases consistent with those types. If the output type is Bool,
+            each test's "expected" MUST be exactly "yes" or "no".
             Output ONLY this JSON (no prose, no fences):
               {"inputType":"<String|Int|Number|Bool|Date>",
                "outputType":"<String|Int|Number|Bool|Date>",
@@ -308,21 +309,57 @@ public sealed class AgentCore
             return CompositionResult.NotComposite(single.Text);
         }
 
-        // RESOLVE each step against the registry. A named-but-missing capability is a CLEAN failure
-        // — we do NOT generate it. >>> auto-generating a missing link would attach HERE (later rung). <<<
-        var caps = new List<Capability>(plan.Steps.Count);
-        foreach (string name in plan.Steps)
+        // RESOLVE each step against the registry; note which are missing.
+        var resolved = new Capability?[plan.Steps.Count];
+        var missing = new List<int>();
+        for (int i = 0; i < plan.Steps.Count; i++)
         {
-            if (!Registry.TryGetCapability(name, out Capability c))
-                return CompositionResult.Failed($"cannot compose: no capability '{name}' available");
+            if (Registry.TryGetCapability(plan.Steps[i], out Capability c)) resolved[i] = c;
+            else missing.Add(i);
             // >>> nested composition (a step that is itself a chain) would attach HERE (later rung). <<<
-            caps.Add(c);
         }
 
-        // DISPLAY the plan BEFORE executing — so decomposition and execution are separately observable.
-        string planLine = "[composition] plan: " +
-            string.Join(" → ", caps.Select(c => $"{c.Name} [{CapTypes.Name(c.InputType)}→{CapTypes.Name(c.OutputType)}]"));
+        // MISSING-LINK-COUNT GATE: 0 → run as before; exactly 1 → generate that one link (below);
+        // MORE than 1 → clean failure, generate NOTHING (multi-link generation is a later rung).
+        if (missing.Count > 1)
+            return CompositionResult.Failed(
+                $"cannot compose: {missing.Count} capabilities missing " +
+                $"({string.Join(", ", missing.Select(i => $"'{plan.Steps[i]}'"))}) — " +
+                "only single-missing-link generation is supported");
+
+        // Derive the missing link's required types from its CHAIN POSITION: input = the previous
+        // step's output type (or the chain's overall input type if it's first); output = the next
+        // step's input type (or the chain's overall output type if it's last). With only one link
+        // missing, its neighbors are always resolved, so the inner edges are pinned by the seam.
+        int k = missing.Count == 1 ? missing[0] : -1;
+        CapType linkIn = CapType.String, linkOut = CapType.String;
+        if (k >= 0)
+        {
+            linkIn = k > 0 ? resolved[k - 1]!.OutputType : plan.InputType;
+            linkOut = k < plan.Steps.Count - 1 ? resolved[k + 1]!.InputType : plan.OutputType;
+        }
+
+        // DISPLAY the plan BEFORE executing/generating — marking the link to be generated.
+        string planLine = "[composition] plan: " + string.Join(" → ", plan.Steps.Select((name, i) =>
+            resolved[i] is Capability rc
+                ? $"{name} [{CapTypes.Name(rc.InputType)}→{CapTypes.Name(rc.OutputType)}]"
+                : $"{name} [{CapTypes.Name(linkIn)}→{CapTypes.Name(linkOut)}] (MISSING — will generate)"));
         Console.WriteLine(planLine);
+
+        // GENERATE the single missing link, type-constrained by the seam, validated to the 5b floor,
+        // then adopt it (register + push exactly once). Only a link that passes the floor is used.
+        if (k >= 0)
+        {
+            GeneratedLink? link = await GenerateValidatedLinkAsync(question, plan.Steps[k], linkIn, linkOut, ct);
+            if (link is null)
+                return CompositionResult.Failed($"cannot compose: couldn't generate a working '{plan.Steps[k]}' that passes validation");
+            Console.WriteLine($"[composition] generated + validated '{plan.Steps[k]}' [{CapTypes.Name(linkIn)}→{CapTypes.Name(linkOut)}] ({link.Passed}/{link.Total} tests) — adopting (push to swarm).");
+            TryPersistWinner(plan.Steps[k], link.Description, link.Example, link.Source, linkIn, linkOut); // exactly one push
+            Registry.TryGetCapability(plan.Steps[k], out Capability newCap); // registered by generation
+            resolved[k] = newCap;
+        }
+
+        var caps = resolved.Select(c => c!).ToList();
 
         // TYPE-CHECK every seam BEFORE running anything. Exact match (no coercion this rung).
         for (int i = 0; i + 1 < caps.Count; i++)
@@ -356,17 +393,22 @@ public sealed class AgentCore
             : string.Join("\n", catalog.Select(c => $"- {c.Name} [{CapTypes.Name(c.InputType)}→{CapTypes.Name(c.OutputType)}]: {c.Description}"));
 
         const string sys = """
-            You plan how to answer a question using ONLY the listed capabilities. Choose one mode:
-              "single" — one capability (or none of these) handles it. This is the common case.
-              "chain"  — it genuinely needs SEVERAL capabilities run in order, where one capability's
-                         OUTPUT becomes the next capability's INPUT. Return the ordered capability
-                         names, chosen EXACTLY from the list.
-              "none"   — it needs a capability that is not in the list.
-            Bias strongly to "single": only choose "chain" when the question truly has multiple
-            sequential steps that feed each other. Never invent capability names.
+            You plan how to answer a question. Decide the MODE from the QUESTION'S STRUCTURE — how many
+            sequential sub-tasks it has — NOT from what already exists:
+              "single" — the question is ONE operation (a single lookup, computation, or transformation).
+              "chain"  — the question has SEVERAL sequential sub-tasks where one sub-task's RESULT feeds
+                         the next (e.g. "convert X to Y, then check the result"). List the ordered steps.
+                         For each step, use the EXACT name of an existing capability if one fits; if a
+                         step has NO matching capability in the list, give it a clear kebab-case name —
+                         it will be generated. Also give the chain's overall input and output types
+                         from: String, Int, Number, Bool, Date.
+              "none"   — it cannot be answered by computation at all.
+            Choose "chain" whenever the question genuinely has multiple sequential steps that feed each
+            other — EVEN IF a needed capability is not in the list (name it; it will be built). Use
+            "single" only for a truly one-step question; never pad a simple question with extra steps.
             Output ONLY JSON (no prose, no fences), one of:
               {"mode":"single"}
-              {"mode":"chain","steps":["name1","name2"]}
+              {"mode":"chain","steps":["name1","name2"],"inputType":"<type>","outputType":"<type>"}
               {"mode":"none","reason":"<short reason>"}
             """;
         try
@@ -380,9 +422,90 @@ public sealed class AgentCore
                 foreach (JsonElement e in s.EnumerateArray())
                 { string? n = e.GetString(); if (!string.IsNullOrWhiteSpace(n)) steps.Add(n.Trim()); }
             string reason = root.TryGetProperty("reason", out var r) ? r.GetString() ?? "" : "";
-            return new DecompositionPlan(mode, steps, reason);
+            CapType inT = CapTypes.Parse(root.TryGetProperty("inputType", out var it) ? it.GetString() : null);
+            CapType outT = CapTypes.Parse(root.TryGetProperty("outputType", out var ot) ? ot.GetString() : null);
+            return new DecompositionPlan(mode, steps, reason, inT, outT);
         }
         catch { return new DecompositionPlan("single", new List<string>(), ""); }
+    }
+
+    /// <summary>The 5b quality floor, shared by competitive deliberation and missing-link generation:
+    /// a candidate must pass a MAJORITY of its test cases to be adopted.</summary>
+    public static bool ClearsQualityFloor(int passed, int total) => total > 0 && passed * 2 > total;
+
+    // Generate the ONE missing chain link, type-constrained by the seam, and VALIDATE it against
+    // generated test cases to the same 5b quality floor before it may be used/adopted. Registers the
+    // link locally on success (caller pushes it); removes a failed link so it's not later mistaken
+    // for an existing capability. One capped retry, same spirit as normal generation.
+    private async Task<GeneratedLink?> GenerateValidatedLinkAsync(
+        string question, string name, CapType inputType, CapType outputType, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            (string desc, string example, IReadOnlyList<TestCase> tests) = await PrepareLinkAsync(question, name, inputType, outputType, ct);
+            for (int attempt = 1; attempt <= 2; attempt++)
+            {
+                GeneratedHandler? gen;
+                try { gen = await _generator!.GenerateAsync(name, desc, example, ct, persist: false, inputType, outputType); }
+                catch (Exception ex) { Console.WriteLine($"  [composition] link generation error: {ex.Message}"); gen = null; }
+                if (gen is null) continue;
+
+                int passed = 0, total = tests.Count;
+                foreach (TestCase tc in tests)
+                {
+                    string got = CapTypes.Matches(inputType, tc.Input) ? await RunHandlerAsync(gen.Handler, tc.Input) : "";
+                    if (got.Contains(tc.Expected, StringComparison.OrdinalIgnoreCase)) passed++;
+                }
+                Console.WriteLine($"  [composition] link '{name}' attempt {attempt}: validation {passed}/{total}");
+                if (ClearsQualityFloor(passed, total))
+                    return new GeneratedLink(gen.Source, desc, example, passed, total);
+            }
+            Registry.Remove(name); // don't leave a failed/unvalidated link registered as if it existed
+            return null;
+        }
+        finally { _gate.Release(); }
+    }
+
+    // Prepare a missing link for generation: given the overall question and the link's FIXED name +
+    // input/output types, ask for a one-line description, an example request, and type-consistent
+    // test cases. Best-effort with sensible fallbacks.
+    private async Task<(string Description, string Example, IReadOnlyList<TestCase> Tests)> PrepareLinkAsync(
+        string question, string name, CapType inputType, CapType outputType, CancellationToken ct)
+    {
+        string fallbackDesc = $"a '{name}' capability that takes {CapTypes.Name(inputType)} and returns {CapTypes.Name(outputType)}";
+        if (_client is null) return (fallbackDesc, question, Array.Empty<TestCase>());
+
+        const string sys = """
+            A multi-step question is being answered by chaining tools, and ONE tool in the chain must
+            be built. Given the overall question and that tool's NAME and FIXED input/output types,
+            produce: a one-line description of what THAT tool does, one example request for it, and
+            2-3 test cases (input -> the key substring the correct answer must contain) consistent
+            with its types. If the output type is Bool, each test's "expected" MUST be exactly "yes"
+            or "no". Output ONLY JSON (no prose/fences):
+              {"description":"...","example":"...","tests":[{"input":"...","expected":"..."}]}
+            """;
+        string user = $"Overall question: \"{question}\"\nTool to build: \"{name}\"\n" +
+                      $"Input type: {CapTypes.Name(inputType)}\nOutput type: {CapTypes.Name(outputType)}\nJSON:";
+        try
+        {
+            string raw = await _client.CompleteAsync(sys, user, ct);
+            using JsonDocument doc = JsonDocument.Parse(StripFences(raw));
+            JsonElement root = doc.RootElement;
+            string desc = root.TryGetProperty("description", out var d) ? d.GetString() ?? "" : "";
+            string example = root.TryGetProperty("example", out var e) ? e.GetString() ?? "" : "";
+            var tests = new List<TestCase>();
+            if (root.TryGetProperty("tests", out var t) && t.ValueKind == JsonValueKind.Array)
+                foreach (JsonElement el in t.EnumerateArray())
+                {
+                    string ip = el.TryGetProperty("input", out var ii) ? ii.GetString() ?? "" : "";
+                    string ex = el.TryGetProperty("expected", out var xx) ? xx.GetString() ?? "" : "";
+                    if (ip.Length > 0 && ex.Length > 0) tests.Add(new TestCase(ip, ex));
+                    if (tests.Count == 4) break;
+                }
+            return (desc.Length > 0 ? desc : fallbackDesc, example.Length > 0 ? example : question, tests);
+        }
+        catch { return (fallbackDesc, question, Array.Empty<TestCase>()); }
     }
 
     // Run one chain step, distinguishing a real failure (exception/timeout) from a normal answer
@@ -455,8 +578,16 @@ public sealed record Candidate(
 
 // ── composition types ──
 
-/// <summary>The decomposition step's verdict: "single" / "chain" (ordered capability names) / "none".</summary>
-internal sealed record DecompositionPlan(string Mode, IReadOnlyList<string> Steps, string Reason);
+/// <summary>The decomposition step's verdict: "single" / "chain" (ordered capability names; a step
+/// may name a not-yet-existing capability to be generated) / "none". For a chain it also carries the
+/// chain's overall input/output types (used to pin a first/last missing link's outer type).</summary>
+internal sealed record DecompositionPlan(
+    string Mode, IReadOnlyList<string> Steps, string Reason,
+    CapType InputType = CapType.String, CapType OutputType = CapType.String);
+
+/// <summary>A generated-and-validated missing chain link: its source (to push), description +
+/// example (for the header/adoption), and its validation score.</summary>
+internal sealed record GeneratedLink(string Source, string Description, string Example, int Passed, int Total);
 
 /// <summary>How a <see cref="AgentCore.ComposeAsync"/> turned out.</summary>
 public enum CompositionKind { Chain, NotComposite, Failed }

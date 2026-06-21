@@ -89,7 +89,7 @@ Identical instances launched with `swarm` form a full mesh and add coordination 
 - **In-flight work recovery** — if the coordinator dies mid-request, the asker re-drives the request to the newly-elected coordinator, with dedup so the answer is delivered once and the handler generated once.
 - **Assign-to-one routing** — `<question>` is round-robin assigned to one node, answered, and routed home.
 - **Competitive deliberation** — `deliberate <question>` fans the question out to *every* node; each writes its **own** implementation (held locally, not pushed), runs it against coordinator-generated test cases, and returns a candidate. The coordinator collects the slate, **scores** it (test pass-rate, tie-broken by source parsimony), enforces a **quality floor** (must pass a majority), and **pushes only the winner** so the best implementation becomes the swarm's canonical shared handler.
-- **Composition** — `compose <question>` answers a multi-step question by chaining *existing* typed capabilities: an LLM decomposes it against the live catalog (names + declared types) into an ordered chain, the plan is **displayed before running**, each **seam is type-checked** (step N's output type must equal step N+1's input type), and the chain executes step→step feeding output into input. Existing-only — a missing link is a clean failure, never auto-generated — and a simple question is answered as a single capability rather than being decomposed. (Runs locally on the asking node; every node shares the catalog via GitHub.)
+- **Composition** — `compose <question>` answers a multi-step question by chaining typed capabilities: an LLM decomposes it against the live catalog (names + declared types) into an ordered chain, the plan is **displayed before running**, each **seam is type-checked** (step N's output type must equal step N+1's input type), and the chain executes step→step feeding output into input. If **exactly one** link is missing, it is **auto-generated** — type-constrained by its seam position, validated against test cases to the same quality floor as competitive generation, and adopted (pushed) — then the chain completes; **two or more** missing links fail cleanly with no generation, and a simple question is answered as a single capability rather than being decomposed. (Runs locally on the asking node; every node shares the catalog via GitHub.)
 
 ---
 
@@ -176,7 +176,7 @@ dotnet bin/Debug/net8.0/HAL9001.dll swarm 5003 5001 5002
 |---|---|
 | `<question>` | **Assign-to-one**: the coordinator routes it to one node, which answers (using or commissioning a capability); the answer is routed back to you. |
 | `deliberate <question>` | **Fan-out**: every node writes its own implementation, runs it against generated tests; the coordinator scores the slate, picks the winner, pushes only the winner, and returns the winning answer. |
-| `compose <question>` | **Compose**: decompose a composite question into a linear chain of *existing* typed capabilities, display the plan, type-check each seam, then execute step→step. Existing-only (a missing link fails cleanly, no generation); a simple question is answered as a single capability. |
+| `compose <question>` | **Compose**: decompose a composite question into a linear chain of typed capabilities, display the plan, type-check each seam, then execute step→step. If exactly **one** link is missing it is auto-generated (type-constrained, validated to the quality floor, adopted); **two or more** missing fails cleanly; a simple question is answered as a single capability. |
 | `peers` | Show currently connected peers. |
 | `coordinator` | Show the believed coordinator and election term. |
 | `pause <secs>` | Test affordance: stop sending heartbeats for N seconds (simulate a hung coordinator). |
@@ -216,7 +216,7 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 | `HandlerGenerator.cs` | Asks the LLM for the general capability, compiles, trial-runs, persists+pushes (or holds locally). |
 | `HandlerLoader.cs` | On startup, compile+register every handler in `handlers/`. |
 | `GitSync.cs` | Thin, bounded wrapper over the `git` CLI (pull / commit / push), never blocks the agent. |
-| `AgentCore.cs` | **The one shared answer path** + deliberation support (test-case generation, no-push candidate generation, winner push) + **composition** (decompose → type-check seams → execute a chain of existing capabilities). |
+| `AgentCore.cs` | **The one shared answer path** + deliberation support (test-case generation, no-push candidate generation, winner push) + **composition** (decompose → type-check seams → execute a chain; auto-generate + validate a single missing link). |
 | `AgentRepl.cs` | Single-instance and two-node (host/join) agent REPL. |
 | `PeerNode.cs` / `PeerMessage.cs` / `PeerDemo.cs` | Two-node TCP transport and the Step-2 chat demo. |
 | `SwarmNode.cs` | N-peer mesh transport (dialing, gossip, churn recovery). |
@@ -239,8 +239,9 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 
 - **Competitive swarm (rungs 1–5b) — done.** Mesh, churn recovery, quorum election, in-flight recovery, competitive generate/score/adopt with GitHub propagation.
 - **Typed capabilities (small version) — done.** Capabilities declare an input/output type from a fixed set; types guide generation and catch obvious input mismatches.
-- **Composition (linear, existing-only) — done.** Decompose a composite question into a chain of existing typed capabilities, display the plan, type-check each seam, execute step→step (this release).
-- **Next (capability expressiveness track):** auto-generating a missing link in a chain, then nested/recursive composition (chains of chains), then stored knowledge, then stateful capabilities — each its own rung. Type inference/generics/coercion and branching remain out of scope.
+- **Composition (linear) — done.** Decompose a composite question into a chain of typed capabilities, display the plan, type-check each seam, execute step→step.
+- **Auto-generate a single missing link — done.** When a chain needs exactly one capability that doesn't exist, generate it (type-constrained by the seam), validate it to the quality floor, adopt it, and complete the chain (this release).
+- **Next (capability expressiveness track):** multi-link generation (more than one missing), then nested/recursive composition (chains of chains), then stored knowledge, then stateful capabilities — each its own rung. Type inference/generics/coercion and branching remain out of scope.
 - **Separate track (set aside for now): hive-memory.** A shared persistent memory layer (Turso) for capabilities/knowledge — credentials exist but the layer is not built yet.
 - **Also planned:** cloud (swarm beyond loopback); collapsing the two-node `PeerNode` transport onto the N-peer `SwarmNode` (the deferred half of the answer-path consolidation); and further out, self-reflection and guarded goal-setting.
 
@@ -249,6 +250,14 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 ## Release notes
 
 > Newest first. Each rung was verified before the next was built. Commit hashes are on `main`.
+
+### Auto-generate a single missing chain link
+Composition no longer fails the moment a needed capability is absent — if a chain needs **exactly one** capability that doesn't exist, it's generated, validated, adopted, and the chain completes. Multi-link generation and nested composition remain later rungs.
+- **Missing-link-count gate:** after decomposition, steps are resolved against the registry and the missing ones counted. **Zero** → run as before; **exactly one** → generate it (below); **more than one** → clean failure (`cannot compose: N capabilities missing … only single-missing-link generation is supported`) generating **nothing**.
+- **Type-constrained by the seam:** the missing link's required types are fixed by its chain position — input = the previous step's output type (or the chain's overall input type if it's first), output = the next step's input type (or the chain's overall output type if it's last). With only one link missing, its neighbors are always present, so the inner edges are pinned exactly. The plan shows it before anything runs: `… → check-if-below-freezing [Number→Bool] (MISSING — will generate)`.
+- **Validated to the 5b quality floor:** the generated link is run against freshly generated, type-consistent test cases and must pass a **majority** (the shared `ClearsQualityFloor`, identical to competitive deliberation) before it may be used. It is generated **without pushing** first; only a link that passes the floor is adopted. If it can't pass (capped at one retry), the whole composition fails cleanly (`couldn't generate a working '…' that passes validation`) and the failed link is discarded — never completing the chain with a bad link.
+- **Adopted + propagated exactly once:** a validated link is registered and pushed to GitHub **once**, with its declared types in the header — so the next composite (on any node) that needs it finds it in the catalog and does not regenerate it.
+- *Verified (3 nodes, real key; converter seeded, freezing-check absent):* `compose convert 100F to celsius and tell me if it's below freezing` displayed the chain with the missing link marked, generated `check-if-below-freezing [Number→Bool]` (types derived from the seam), validated it **3/3**, adopted it (one commit, `intype=Number/outtype=Bool` header), and completed the chain (`37.78°C` → "no — above freezing"); a second similar composite **reused** it with no regeneration; a chain needing **two** missing links failed cleanly with **no generation**; and an earlier link that scored 0/3 failed the composition cleanly without adoption. Regression: assign-to-one, simple-not-decomposed, and competitive deliberation all intact.
 
 ### Composition (linear chains of existing typed capabilities)
 A new `compose <question>` path answers a multi-step question by chaining capabilities that **already exist** — it never auto-generates a missing link, and it doesn't do nested/recursive chains or branching (those are later rungs).

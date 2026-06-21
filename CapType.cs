@@ -40,7 +40,7 @@ public static class CapTypes
     {
         CapType.Int => "an integer — parse the integer out of the request, tolerant of phrasing like \"7th\", \"number 7\", or \"the seventh\"",
         CapType.Number => "a number (integer or decimal) — parse it tolerantly out of the request",
-        CapType.Bool => "a yes/no boolean — answer clearly yes or no",
+        CapType.Bool => "a yes/no boolean — START the answer with the word \"yes\" or \"no\" (you may add a brief explanation after)",
         CapType.Date => "a date — parse a date out of the request, accepting common formats",
         _ => "free-form text",
     };

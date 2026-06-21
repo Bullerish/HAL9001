@@ -336,10 +336,11 @@ public static class SwarmAgent
             {
                 int passed = winner.TestResults.Count(r => r.Pass);
                 int total = winner.TestResults.Count;
-                // Quality floor: must pass a MAJORITY of tests to be eligible to propagate. Strict
-                // "all" is too brittle given fallible LLM tests (one bad test would block a good
-                // handler); a majority tolerates one wrong test yet still demands broad correctness.
-                bool clearsFloor = total > 0 && passed * 2 > total;
+                // Quality floor (shared with composition's link validation): must pass a MAJORITY of
+                // tests to be eligible to propagate. Strict "all" is too brittle given fallible LLM
+                // tests (one bad test would block a good handler); a majority tolerates one wrong
+                // test yet still demands broad correctness.
+                bool clearsFloor = AgentCore.ClearsQualityFloor(passed, total);
 
                 if (clearsFloor && winner.Source.Length > 0)
                 {

@@ -57,6 +57,10 @@ public sealed class HandlerRegistry
     public bool TryGetCapability(string name, out Capability capability)
         => _capabilities.TryGetValue(name, out capability!);
 
+    /// <summary>Remove a capability by name (e.g. a generated chain link that failed validation,
+    /// so it isn't later mistaken for an existing capability). No-op if absent.</summary>
+    public void Remove(string name) => _capabilities.Remove(name);
+
     /// <summary>
     /// The catalog the router reasons over: every capability's name + description. This is
     /// how the agent "knows what it can already do" before deciding to build something new.
