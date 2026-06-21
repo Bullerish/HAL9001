@@ -7,37 +7,51 @@ using System.Text;
 namespace HAL9001;
 
 /// <summary>
-/// The N-peer transport — rung one of the swarm. Where <see cref="PeerNode"/> holds exactly
-/// one connection, a SwarmNode keeps a *collection* of peers: it never stops accepting inbound
-/// connections AND dials out to others, holding all of them at once.
+/// The N-peer swarm transport, now churn-survivable (rung 2). It keeps a *collection* of
+/// peers and actively maintains the full mesh as nodes drop, restart, and join late.
 ///
-/// TOPOLOGY (full mesh via explicit addresses + a "dial-higher" rule):
-///   Each instance is launched with its own listen port and the ports of the other nodes.
-///   It listens, and it dials only the peers whose port is GREATER than its own. Every node
-///   accepts inbound from the lower-numbered ones. That single rule gives exactly one
-///   connection per pair — a full mesh with no duplicates — without any coordinator.
-///   e.g. 5001 dials 5002,5003 · 5002 dials 5003 · 5003 dials nobody → all three meshed.
+/// MEMBERSHIP (_known) vs CONNECTIONS (_peers):
+///   _known = endpoints we believe are swarm members and should be connected to (seeded from
+///            the CLI roster, grown by gossip). _peers = the live connections we currently
+///            hold. A background MAINTENANCE LOOP continuously tries to make _peers match the
+///            part of _known it's responsible for dialing.
 ///
-/// IDENTITY: a peer is identified by its listen endpoint ("127.0.0.1:PORT"), which is stable
-///   across the session. The dialer already knows whom it dialed; the ACCEPTOR can't tell
-///   (the inbound socket's source port is ephemeral), so the dialer's first frame is a Hello
-///   carrying its listen identity. Peers are tracked in a dictionary keyed by that identity.
+/// DIAL DIRECTION (how we avoid duplicate connections):
+///   For each pair, only the LOWER-port node dials; the higher only accepts. So two nodes
+///   never dial each other at the same time — a simultaneous mutual reconnect can't happen by
+///   construction. As a safety net for stale-link races, _peers is keyed by identity and a
+///   second connection for an identity atomically REPLACES the stale one (match-on-remove so
+///   the dead link's cleanup can't evict the fresh one). Net result: exactly one live
+///   connection per pair, always.
 ///
-/// This is transport only: it can send to one peer or broadcast to all, but makes NO swarm
-/// decisions — coordinator/election/routing are later rungs.
+/// REJOIN / LATE JOIN:
+///   The maintenance loop never gives up early (retries every couple seconds, up to a cap),
+///   so a peer that dropped or started late is reconnected whenever it comes back. A newcomer
+///   learns members beyond its own CLI roster via gossip: on connect, peers exchange their
+///   known sets, so the mesh closes even if a node was only told about one bootstrap peer.
+///
+/// CLEAN EXIT vs UNEXPECTED DROP:
+///   On a deliberate exit the node BROADCASTS a Goodbye first; receivers remove it from
+///   _known and never redial it. A process that's killed sends no Goodbye, so its read loop
+///   just hits EOF — that's an unexpected drop, the peer stays in _known, and we reconnect.
+///   The presence/absence of a Goodbye is exactly how the two are told apart.
+///
+/// Still transport only — no coordinator/election (those are later rungs).
 /// </summary>
 public sealed class SwarmNode : IAsyncDisposable
 {
+    private const int RetryIntervalMs = 2000;   // maintenance loop cadence
+    private const int MaxDialAttempts = 60;     // ~2 min of retries, then presume that peer gone (cap)
+
     private readonly int _listenPort;
     private readonly string _myId;
     private readonly CancellationTokenSource _cts = new();
     private TcpListener? _listener;
 
-    // The peer collection, keyed by identity. ConcurrentDictionary because connections are
-    // added/removed from multiple background threads (the accept loop + each receive loop).
-    private readonly ConcurrentDictionary<string, PeerLink> _peers = new();
+    private readonly ConcurrentDictionary<string, PeerLink> _peers = new();   // live connections, by identity
+    private readonly ConcurrentDictionary<string, byte> _known = new();       // members to stay connected to (excl self)
+    private readonly ConcurrentDictionary<string, int> _dialFailures = new(); // consecutive dial failures per endpoint
 
-    /// <summary>Raised (on a background thread) when a peer message arrives: who it's from + the message.</summary>
     public event Action<string, PeerMessage>? MessageReceived;
 
     public SwarmNode(int listenPort)
@@ -49,56 +63,67 @@ public sealed class SwarmNode : IAsyncDisposable
     public string Id => _myId;
     public IReadOnlyList<string> Peers => _peers.Keys.OrderBy(k => k).ToList();
 
-    /// <summary>Start listening and dial the higher-numbered peers (so each pair connects once).</summary>
     public Task StartAsync(IReadOnlyList<int> peerPorts)
     {
+        foreach (int port in peerPorts.Where(p => p != _listenPort))
+            _known.TryAdd($"127.0.0.1:{port}", 0);
+
         _listener = new TcpListener(IPAddress.Loopback, _listenPort);
         _listener.Start();
-        Console.WriteLine($"[swarm] {_myId} listening — accepting peers...");
+        Console.WriteLine($"[swarm] {_myId} listening — maintaining mesh with: [{string.Join(", ", _known.Keys.OrderBy(k => k))}]");
+
         _ = AcceptLoopAsync();
-
-        foreach (int port in peerPorts.Where(p => p != _listenPort && p > _listenPort))
-            _ = DialAsync(port);
-
+        _ = MaintenanceLoopAsync();
         return Task.CompletedTask;
     }
 
-    // Keep accepting inbound connections for the whole session (not just the first).
+    // Keep accepting inbound connections forever (newcomers, rejoiners, the lower-port side of each pair).
     private async Task AcceptLoopAsync()
     {
         while (!_cts.IsCancellationRequested)
         {
             TcpClient client;
             try { client = await _listener!.AcceptTcpClientAsync(_cts.Token); }
-            catch { break; } // listener stopped / cancelled
+            catch { break; }
             _ = HandleConnectionAsync(client, knownId: null); // identity arrives via Hello
         }
     }
 
-    // Dial one peer, retrying until it's up (so launch order doesn't matter).
-    private async Task DialAsync(int port)
+    // Continuously make the mesh whole: dial known higher-port peers we're not connected to.
+    private async Task MaintenanceLoopAsync()
     {
-        string id = $"127.0.0.1:{port}";
-        for (int attempt = 1; ; attempt++)
+        while (!_cts.IsCancellationRequested)
         {
-            var client = new TcpClient();
-            try
+            foreach (string id in _known.Keys)
             {
-                await client.ConnectAsync(IPAddress.Loopback, port, _cts.Token);
-                await HandleConnectionAsync(client, knownId: id); // we know who we dialed
-                return;
+                if (_peers.ContainsKey(id)) { _dialFailures[id] = 0; continue; }   // already connected
+                if (PortOf(id) <= _listenPort) continue;                            // dial-direction: lower dials higher
+                if (_dialFailures.GetValueOrDefault(id) >= MaxDialAttempts) continue; // gave up (cap)
+                _ = DialOnceAsync(id);
             }
-            catch (OperationCanceledException) { client.Dispose(); return; }
-            catch (Exception) when (attempt < 25)
-            {
-                client.Dispose();
-                try { await Task.Delay(200, _cts.Token); } catch { return; }
-            }
-            catch { client.Dispose(); return; }
+            try { await Task.Delay(RetryIntervalMs, _cts.Token); } catch { break; }
         }
     }
 
-    // One connection's whole life: register, (if dialer) announce identity, then read until it drops.
+    private async Task DialOnceAsync(string id)
+    {
+        if (_peers.ContainsKey(id)) return;
+        var client = new TcpClient();
+        try
+        {
+            await client.ConnectAsync(IPAddress.Loopback, PortOf(id), _cts.Token);
+            _dialFailures[id] = 0;
+            await HandleConnectionAsync(client, knownId: id); // we know whom we dialed
+        }
+        catch (OperationCanceledException) { client.Dispose(); }
+        catch
+        {
+            client.Dispose();
+            _dialFailures.AddOrUpdate(id, 1, (_, v) => v + 1); // count toward the cap
+        }
+    }
+
+    // One connection's whole life: register, exchange identity + membership, read until it drops.
     private async Task HandleConnectionAsync(TcpClient client, string? knownId)
     {
         NetworkStream stream = client.GetStream();
@@ -109,57 +134,83 @@ public sealed class SwarmNode : IAsyncDisposable
         {
             if (id is not null)
             {
-                // Outbound: we know the peer. Register, then announce ourselves with Hello.
-                link = AddPeer(id, client, stream);
-                if (link is null) { client.Dispose(); return; } // already connected → drop dup
-                await SendOnLinkAsync(link, PeerMessageKind.Hello, _myId);
+                link = Register(id, client, stream);
+                await SendOnLinkAsync(link, PeerMessageKind.Hello, _myId);          // announce who we are
+                await SendOnLinkAsync(link, PeerMessageKind.Membership, RosterText()); // gossip what we know
             }
 
             while (!_cts.IsCancellationRequested)
             {
                 PeerMessage? message = await ReadFrameAsync(stream, _cts.Token);
-                if (message is null) break; // peer closed
+                if (message is null) break; // EOF — peer closed (clean exit already removed it from _known, or it's a drop)
 
-                if (message.Kind == PeerMessageKind.Hello)
+                switch (message.Kind)
                 {
-                    // Inbound connection telling us who it is.
-                    if (id is null)
-                    {
-                        id = message.Text;
-                        link = AddPeer(id, client, stream);
-                        if (link is null) break; // dup → close this connection
-                    }
-                    continue;
-                }
+                    case PeerMessageKind.Hello:
+                        if (id is null)
+                        {
+                            id = message.Text;
+                            link = Register(id, client, stream);
+                            await SendOnLinkAsync(link, PeerMessageKind.Membership, RosterText());
+                        }
+                        break;
 
-                if (id is not null) MessageReceived?.Invoke(id, message);
+                    case PeerMessageKind.Membership:
+                        MergeRoster(message.Text);
+                        break;
+
+                    case PeerMessageKind.Goodbye:
+                        // Peer is leaving on purpose → forget it so we don't try to reconnect.
+                        // (An unexpected drop sends no Goodbye, so it stays in _known and the
+                        // maintenance loop reconnects — that's how the two cases differ.)
+                        string leaver = message.Text.Length > 0 ? message.Text : (id ?? "");
+                        _known.TryRemove(leaver, out _);
+                        break;
+
+                    default:
+                        if (id is not null) MessageReceived?.Invoke(id, message);
+                        break;
+                }
             }
         }
         catch { /* link dropped */ }
         finally
         {
-            if (id is not null) RemovePeer(id);
+            // Drop the live link. On an UNEXPECTED drop the peer stays in _known, so the
+            // maintenance loop reconnects; a CLEAN exit already removed it from _known via its
+            // Goodbye, so it stays gone.
+            if (link is not null) RemovePeer(id!, link);
             else client.Dispose();
         }
     }
 
-    // ── Peer collection management (the heart of join/leave) ─────────────────────────────
-    private PeerLink? AddPeer(string id, TcpClient client, NetworkStream stream)
+    // ── Connection bookkeeping ───────────────────────────────────────────────────────────
+    // Add a peer; if one already exists for this identity (stale-link race), the NEW connection
+    // atomically replaces it so we always keep the freshest link — one per pair.
+    private PeerLink Register(string id, TcpClient client, NetworkStream stream)
     {
         var link = new PeerLink(id, client, stream);
-        if (_peers.TryAdd(id, link))
+        while (true)
         {
-            Console.WriteLine($"[swarm] + {id} connected");
-            PrintPeers();
-            return link;
+            if (_peers.TryAdd(id, link))
+            {
+                Console.WriteLine($"[swarm] + {id} connected");
+                PrintPeers();
+                return link;
+            }
+            if (_peers.TryGetValue(id, out PeerLink? existing) && _peers.TryUpdate(id, link, existing))
+            {
+                existing.Dispose(); // replaced a stale link; peer list unchanged, no reprint
+                return link;
+            }
         }
-        link.Dispose();      // someone beat us to it (shouldn't happen with dial-higher) — drop
-        return null;
     }
 
-    private void RemovePeer(string id)
+    // Remove only if this exact link is still the registered one (so a dead link's cleanup
+    // can't evict a fresh replacement).
+    private void RemovePeer(string id, PeerLink link)
     {
-        if (_peers.TryRemove(id, out PeerLink? link))
+        if (_peers.TryRemove(new KeyValuePair<string, PeerLink>(id, link)))
         {
             link.Dispose();
             Console.WriteLine($"[swarm] - {id} disconnected");
@@ -170,7 +221,24 @@ public sealed class SwarmNode : IAsyncDisposable
     public void PrintPeers() =>
         Console.WriteLine($"[swarm] {_myId} peers ({_peers.Count}): [{string.Join(", ", Peers)}]");
 
-    // ── Send (the transport capability the swarm will use) ───────────────────────────────
+    // ── Membership gossip ────────────────────────────────────────────────────────────────
+    private string RosterText() =>
+        string.Join(",", _known.Keys.Append(_myId).Distinct().OrderBy(k => k));
+
+    private void MergeRoster(string text)
+    {
+        bool grew = false;
+        foreach (string raw in text.Split(','))
+        {
+            string ep = raw.Trim();
+            if (ep.Length == 0 || ep == _myId) continue;
+            if (_known.TryAdd(ep, 0)) grew = true; // a member we hadn't heard of → maintenance will dial it
+        }
+        // Only re-broadcast when we actually learned something, so gossip converges and stops.
+        if (grew) _ = BroadcastAsync(PeerMessageKind.Membership, RosterText());
+    }
+
+    // ── Sending ──────────────────────────────────────────────────────────────────────────
     public async Task SendToAsync(string id, PeerMessageKind kind, string text)
     {
         if (_peers.TryGetValue(id, out PeerLink? link))
@@ -186,11 +254,10 @@ public sealed class SwarmNode : IAsyncDisposable
         foreach (PeerLink link in _peers.Values.ToArray())
         {
             try { await SendOnLinkAsync(link, kind, text); }
-            catch { /* a single bad link must not stop the broadcast */ }
+            catch { /* one bad link must not stop the broadcast */ }
         }
     }
 
-    // Serialize writes per link — two broadcasts/sends could otherwise interleave bytes on one socket.
     private static async Task SendOnLinkAsync(PeerLink link, PeerMessageKind kind, string text)
     {
         await link.SendLock.WaitAsync();
@@ -198,7 +265,7 @@ public sealed class SwarmNode : IAsyncDisposable
         finally { link.SendLock.Release(); }
     }
 
-    // ── Framing: [4-byte length][1-byte kind][UTF-8 text] (same scheme as PeerNode) ──────
+    // ── Framing: [4-byte length][1-byte kind][UTF-8 text] ────────────────────────────────
     private static async Task WriteFrameAsync(NetworkStream stream, PeerMessageKind kind, string text, CancellationToken ct)
     {
         byte[] textBytes = Encoding.UTF8.GetBytes(text);
@@ -227,17 +294,24 @@ public sealed class SwarmNode : IAsyncDisposable
         return new PeerMessage((PeerMessageKind)payload[0], Encoding.UTF8.GetString(payload, 1, length - 1));
     }
 
+    private static int PortOf(string id)
+    {
+        int colon = id.LastIndexOf(':');
+        return colon >= 0 && int.TryParse(id[(colon + 1)..], out int p) ? p : -1;
+    }
+
     public async ValueTask DisposeAsync()
     {
+        // Clean exit: tell everyone we're leaving so they don't try to reconnect to us.
+        try { await BroadcastAsync(PeerMessageKind.Goodbye, _myId); } catch { }
+
         _cts.Cancel();
         _listener?.Stop();
         foreach (PeerLink link in _peers.Values.ToArray()) link.Dispose();
         _peers.Clear();
         _cts.Dispose();
-        await Task.CompletedTask;
     }
 
-    // One live peer connection.
     private sealed class PeerLink : IDisposable
     {
         public string Id { get; }
