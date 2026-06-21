@@ -319,44 +319,61 @@ public sealed class AgentCore
             // >>> nested composition (a step that is itself a chain) would attach HERE (later rung). <<<
         }
 
-        // MISSING-LINK-COUNT GATE: 0 → run as before; exactly 1 → generate that one link (below);
-        // MORE than 1 → clean failure, generate NOTHING (multi-link generation is a later rung).
-        if (missing.Count > 1)
+        // MISSING-LINK-COUNT GATE: 0 → run as before; 1 → single-link generation; EXACTLY 2 →
+        // multi-link generation (below); 3+ → clean failure, generate NOTHING. Cap is hard at 2.
+        int N = plan.Steps.Count;
+        if (missing.Count > 2)
             return CompositionResult.Failed(
                 $"cannot compose: {missing.Count} capabilities missing " +
-                $"({string.Join(", ", missing.Select(i => $"'{plan.Steps[i]}'"))}) — " +
-                "only single-missing-link generation is supported");
+                $"({string.Join(", ", missing.Select(i => $"'{plan.Steps[i]}'"))}) — at most 2 can be generated");
 
-        // Derive the missing link's required types from its CHAIN POSITION: input = the previous
-        // step's output type (or the chain's overall input type if it's first); output = the next
-        // step's input type (or the chain's overall output type if it's last). With only one link
-        // missing, its neighbors are always resolved, so the inner edges are pinned by the seam.
-        int k = missing.Count == 1 ? missing[0] : -1;
-        CapType linkIn = CapType.String, linkOut = CapType.String;
-        if (k >= 0)
+        // Derive the type flowing at chain boundary b (0..N): boundary b is the seam between step b-1
+        // and step b. A PRESENT capability on either side pins it authoritatively (its real type); an
+        // end with a present step uses that; otherwise (both sides missing/absent — the adjacent-
+        // missing-link case, or an end whose step is missing) it comes from decomposition's declared
+        // seam-type vector, falling back to the chain's overall input/output type. Because each
+        // boundary has ONE value, two ADJACENT missing links read the SAME type at their shared seam,
+        // so their invented types are consistent by construction.
+        CapType Boundary(int b)
         {
-            linkIn = k > 0 ? resolved[k - 1]!.OutputType : plan.InputType;
-            linkOut = k < plan.Steps.Count - 1 ? resolved[k + 1]!.InputType : plan.OutputType;
+            if (b > 0 && resolved[b - 1] is Capability lp) return lp.OutputType;          // present left → its output
+            if (b < N && resolved[b] is Capability rp) return rp.InputType;               // present right → its input
+            if (plan.SeamTypes.Count == N + 1) return plan.SeamTypes[b];                   // decompose's declared boundary type
+            return b == 0 ? plan.InputType : (b == N ? plan.OutputType : CapType.String);  // overall ends / safe default
         }
 
-        // DISPLAY the plan BEFORE executing/generating — marking the link to be generated.
+        // DISPLAY the plan BEFORE generating/executing — marking each link to be generated, with the
+        // seam-derived types. Adjacent missing links share Boundary(k+1), so their seam types agree.
         string planLine = "[composition] plan: " + string.Join(" → ", plan.Steps.Select((name, i) =>
             resolved[i] is Capability rc
                 ? $"{name} [{CapTypes.Name(rc.InputType)}→{CapTypes.Name(rc.OutputType)}]"
-                : $"{name} [{CapTypes.Name(linkIn)}→{CapTypes.Name(linkOut)}] (MISSING — will generate)"));
+                : $"{name} [{CapTypes.Name(Boundary(i))}→{CapTypes.Name(Boundary(i + 1))}] (MISSING — will generate)"));
         Console.WriteLine(planLine);
 
-        // GENERATE the single missing link, type-constrained by the seam, validated to the 5b floor,
-        // then adopt it (register + push exactly once). Only a link that passes the floor is used.
-        if (k >= 0)
+        // GENERATE + VALIDATE every missing link (chain order), each held LOCAL (persist:false,
+        // registered, NOT pushed). ALL-OR-NOTHING: only if EVERY missing link clears the 5b floor do
+        // we adopt them; if any fails, remove every link generated so far from the registry and push
+        // NOTHING — a failed multi-link composition leaves the shared catalog completely unchanged.
+        var generated = new List<(int Index, string Name, CapType In, CapType Out, GeneratedLink Link)>();
+        foreach (int k in missing) // ascending = chain order
         {
+            CapType linkIn = Boundary(k), linkOut = Boundary(k + 1);
             GeneratedLink? link = await GenerateValidatedLinkAsync(question, plan.Steps[k], linkIn, linkOut, ct);
             if (link is null)
-                return CompositionResult.Failed($"cannot compose: couldn't generate a working '{plan.Steps[k]}' that passes validation");
-            Console.WriteLine($"[composition] generated + validated '{plan.Steps[k]}' [{CapTypes.Name(linkIn)}→{CapTypes.Name(linkOut)}] ({link.Passed}/{link.Total} tests) — adopting (push to swarm).");
-            TryPersistWinner(plan.Steps[k], link.Description, link.Example, link.Source, linkIn, linkOut); // exactly one push
-            Registry.TryGetCapability(plan.Steps[k], out Capability newCap); // registered by generation
-            resolved[k] = newCap;
+            {
+                foreach (var g in generated) Registry.Remove(g.Name); // un-register the validated-but-unused siblings → no trace
+                return CompositionResult.Failed($"cannot compose: couldn't generate a working '{plan.Steps[k]}' that passes validation (nothing adopted)");
+            }
+            generated.Add((k, plan.Steps[k], linkIn, linkOut, link));
+        }
+
+        // Every missing link validated → ADOPT them all now (push each exactly once, with its types).
+        foreach (var g in generated)
+        {
+            Console.WriteLine($"[composition] adopting '{g.Name}' [{CapTypes.Name(g.In)}→{CapTypes.Name(g.Out)}] ({g.Link.Passed}/{g.Link.Total} tests) — push to swarm.");
+            TryPersistWinner(g.Name, g.Link.Description, g.Link.Example, g.Link.Source, g.In, g.Out);
+            Registry.TryGetCapability(g.Name, out Capability nc); // registered by generation
+            resolved[g.Index] = nc;
         }
 
         var caps = resolved.Select(c => c!).ToList();
@@ -400,15 +417,17 @@ public sealed class AgentCore
                          the next (e.g. "convert X to Y, then check the result"). List the ordered steps.
                          For each step, use the EXACT name of an existing capability if one fits; if a
                          step has NO matching capability in the list, give it a clear kebab-case name —
-                         it will be generated. Also give the chain's overall input and output types
-                         from: String, Int, Number, Bool, Date.
+                         it will be generated. Also give the chain's overall input and output types, and
+                         a "types" array: the data type flowing at EACH boundary of the chain (length =
+                         number of steps + 1 — the input to step 1, the type between each pair of steps,
+                         and the final output). All types are from: String, Int, Number, Bool, Date.
               "none"   — it cannot be answered by computation at all.
             Choose "chain" whenever the question genuinely has multiple sequential steps that feed each
             other — EVEN IF a needed capability is not in the list (name it; it will be built). Use
             "single" only for a truly one-step question; never pad a simple question with extra steps.
             Output ONLY JSON (no prose, no fences), one of:
               {"mode":"single"}
-              {"mode":"chain","steps":["name1","name2"],"inputType":"<type>","outputType":"<type>"}
+              {"mode":"chain","steps":["name1","name2"],"inputType":"<type>","outputType":"<type>","types":["<type>","<type>","<type>"]}
               {"mode":"none","reason":"<short reason>"}
             """;
         try
@@ -424,7 +443,15 @@ public sealed class AgentCore
             string reason = root.TryGetProperty("reason", out var r) ? r.GetString() ?? "" : "";
             CapType inT = CapTypes.Parse(root.TryGetProperty("inputType", out var it) ? it.GetString() : null);
             CapType outT = CapTypes.Parse(root.TryGetProperty("outputType", out var ot) ? ot.GetString() : null);
-            return new DecompositionPlan(mode, steps, reason, inT, outT);
+            List<CapType>? seams = null;
+            if (root.TryGetProperty("types", out var ts) && ts.ValueKind == JsonValueKind.Array)
+            {
+                seams = new List<CapType>();
+                foreach (JsonElement e in ts.EnumerateArray()) seams.Add(CapTypes.Parse(e.GetString()));
+                // Only trust it if it has one type per boundary (steps + 1); otherwise ignore it.
+                if (seams.Count != steps.Count + 1) seams = null;
+            }
+            return new DecompositionPlan(mode, steps, reason, inT, outT, seams);
         }
         catch { return new DecompositionPlan("single", new List<string>(), ""); }
     }
@@ -583,7 +610,13 @@ public sealed record Candidate(
 /// chain's overall input/output types (used to pin a first/last missing link's outer type).</summary>
 internal sealed record DecompositionPlan(
     string Mode, IReadOnlyList<string> Steps, string Reason,
-    CapType InputType = CapType.String, CapType OutputType = CapType.String);
+    CapType InputType = CapType.String, CapType OutputType = CapType.String,
+    IReadOnlyList<CapType>? SeamTypesOrNull = null)
+{
+    // The data type at each chain boundary (length = Steps+1) when the model supplied a consistent
+    // one; used to pin a seam between two ADJACENT missing links. Empty if unavailable.
+    public IReadOnlyList<CapType> SeamTypes => SeamTypesOrNull ?? Array.Empty<CapType>();
+}
 
 /// <summary>A generated-and-validated missing chain link: its source (to push), description +
 /// example (for the header/adoption), and its validation score.</summary>
