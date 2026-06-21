@@ -13,6 +13,7 @@ public enum PeerMessageKind : byte
     Chat = 0,      // plain text — what the Step 2 chat demo sends
     Question = 1,  // a follow-up question produced by the peer's agent
     Answer = 2,    // an answer to a question the peer sent us (sub-step B)
+    Hello = 3,     // swarm handshake: a dialer announcing its listen identity (rung 1)
 }
 
 /// <summary>One message received from a peer: its kind plus its text.</summary>

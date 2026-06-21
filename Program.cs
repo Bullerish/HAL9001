@@ -36,6 +36,17 @@ if (args.Length == 0 || args[0].Equals("agent", StringComparison.OrdinalIgnoreCa
 
 switch (args[0].ToLowerInvariant())
 {
+    // swarm <myPort> [peerPort ...] → rung-1 multi-peer connectivity
+    case "swarm" when args.Length >= 2 && int.TryParse(args[1], out int myPort):
+    {
+        var peerPorts = args.Skip(2)
+            .Select(a => int.TryParse(a, out int p) ? p : -1)
+            .Where(p => p > 0)
+            .ToList();
+        await SwarmDemo.RunAsync(myPort, peerPorts);
+        break;
+    }
+
     // demo → Step 1 Roslyn compile-and-load demo
     case "demo":
         RoslynDemo.Run();
@@ -59,5 +70,6 @@ switch (args[0].ToLowerInvariant())
         Console.WriteLine("  HAL9001 demo                  Step 1 Roslyn compile-and-load demo");
         Console.WriteLine("  HAL9001 host <port>           Step 2 TCP chat: listen on <port>");
         Console.WriteLine("  HAL9001 join <host> <port>    Step 2 TCP chat: connect to <host>:<port>");
+        Console.WriteLine("  HAL9001 swarm <port> [ports]  Rung-1 swarm: mesh with peers on the listed ports");
         break;
 }
