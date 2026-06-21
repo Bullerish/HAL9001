@@ -75,56 +75,87 @@ public sealed class HandlerGenerator
     public async Task<IHandler?> GenerateAsync(
         string name, string description, string exampleRequest, CancellationToken ct = default)
     {
-        // The USER prompt carries the specific, volatile part: the capability to build plus
-        // a concrete example. The "general, not one-off" rules live in the system prompt.
-        string userPrompt =
+        // The "general, not one-off" rules live in the system prompt; this carries the
+        // specific capability to build plus a concrete example.
+        string basePrompt =
             $"Build this capability:\n  name: {name}\n  description: {description}\n\n" +
             $"It must handle the whole class of such requests, not just this example.\n" +
             $"Example request it must answer: \"{exampleRequest}\"\n\n" +
             "Output only the raw C# class.";
 
-        string source = CleanSource(await _client.CompleteAsync(SystemPrompt, userPrompt, ct));
+        string? priorSource = null;
+        string? priorFailure = null;
 
-        // VALIDATION before we even hand it to the compiler: if it doesn't mention the
-        // interface, the model ignored the contract and there's no point compiling.
-        if (!LooksLikeHandler(source))
+        // Up to 2 attempts: initial + one fix-up. A "failure" is either a compile error OR a
+        // runtime throw on the trial run — both get fed back to the model the same way, so a
+        // handler that compiles but crashes (e.g. a duplicate dictionary key) gets a fix too.
+        for (int attempt = 1; attempt <= 2; attempt++)
         {
-            Console.WriteLine("  [generate] Response doesn't look like an IHandler class. Raw output:");
-            Console.WriteLine(Indent(source));
-            return null;
-        }
+            string prompt = priorFailure is null
+                ? basePrompt
+                : "The C# you wrote failed.\n\n--- your code ---\n" + priorSource +
+                  "\n\n--- the failure ---\n" + priorFailure +
+                  "\n\nReturn a corrected version. Output only raw C#, no fences or commentary.";
 
-        PrintSource("generated source", source);
+            string source = CleanSource(await _client.CompleteAsync(SystemPrompt, prompt, ct));
+            priorSource = source;
 
-        // First compile attempt. We capture the diagnostics so we can feed them back.
-        if (RuntimeCompiler.TryCompileAndLoad(name, description, source, _registry, out IHandler? handler, out string? errors))
-        {
-            // Compiled + registered → persist the exact source that compiled, then push.
+            // Cheap pre-check: if it doesn't even mention the interface, don't bother compiling.
+            if (!LooksLikeHandler(source))
+            {
+                Console.WriteLine("  [generate] Response doesn't look like an IHandler class.");
+                Console.WriteLine(Indent(source));
+                priorFailure = "Output was not a C# class implementing IHandler.";
+                continue;
+            }
+
+            PrintSource(attempt == 1 ? "generated source" : "regenerated source", source);
+
+            // 1) Must compile.
+            if (!RuntimeCompiler.TryCompileAndLoad(name, description, source, _registry, out IHandler? handler, out string? compileErrors))
+            {
+                Console.WriteLine("  [generate] didn't compile — feeding the errors back for a fix...");
+                priorFailure = compileErrors;
+                continue;
+            }
+
+            // 2) Must actually RUN. Trial it on the example so we never push code that
+            //    compiles but throws at runtime.
+            string? runtimeError = await TrialRunAsync(handler!, exampleRequest);
+            if (runtimeError is not null)
+            {
+                Console.WriteLine($"  [generate] compiled but threw at runtime ({runtimeError}) — feeding it back for a fix...");
+                priorFailure = "It compiled but threw at runtime on the example: " + runtimeError;
+                continue;
+            }
+
+            // Compiles AND runs → persist + push only now.
             PersistAndPush(name, description, exampleRequest, source);
             return handler;
         }
 
-        // ── ONE fix-up retry (capped so it can never loop) ──────────────────────────────
-        Console.WriteLine();
-        Console.WriteLine("  [generate] Didn't compile — sending the errors back for one fix attempt...");
-
-        string fixPrompt =
-            "The C# you wrote did not compile.\n\n" +
-            "--- your code ---\n" + source + "\n\n" +
-            "--- compiler errors ---\n" + errors + "\n\n" +
-            "Return the corrected class. Output only raw C#, no fences or commentary.";
-
-        string fixedSource = CleanSource(await _client.CompleteAsync(SystemPrompt, fixPrompt, ct));
-        PrintSource("regenerated source", fixedSource);
-
-        if (RuntimeCompiler.TryCompileAndLoad(name, description, fixedSource, _registry, out handler, out _))
-        {
-            PersistAndPush(name, description, exampleRequest, fixedSource);
-            return handler;
-        }
-
-        Console.WriteLine("  [generate] Still didn't compile after one fix attempt. Giving up on this request.");
+        Console.WriteLine("  [generate] couldn't produce a working capability after a retry. Giving up.");
         return null;
+    }
+
+    // Run the handler once on the example, guarded, to surface runtime failures (a thrown
+    // exception, a duplicate-key dictionary, a hung network call) BEFORE we persist + push.
+    // Returns null if it ran cleanly, or the error message to feed back to the model.
+    private static async Task<string?> TrialRunAsync(IHandler handler, string input)
+    {
+        try
+        {
+            await Task.Run(() => handler.Handle(input)).WaitAsync(TimeSpan.FromSeconds(20));
+            return null;
+        }
+        catch (TimeoutException)
+        {
+            return "ran longer than 20s (likely a slow or hung network call)";
+        }
+        catch (Exception ex)
+        {
+            return ex.GetBaseException().Message;
+        }
     }
 
     // =====================================================================================

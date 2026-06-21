@@ -95,6 +95,12 @@ public static class AgentRepl
                     {
                         return "(the capability took too long to run and was cancelled)";
                     }
+                    catch (Exception ex)
+                    {
+                        // Generated code can throw at runtime (bad data, failed web call,
+                        // null refs). Surface it and stay alive — never crash the agent.
+                        return $"(the capability errored at runtime: {ex.GetBaseException().Message})";
+                    }
                 }
                 finally
                 {
