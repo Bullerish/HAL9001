@@ -12,6 +12,10 @@ namespace HAL9001;
 /// </summary>
 public sealed class GitSync
 {
+    // Upper bound for any single git invocation (see Run). Generous — a healthy git finishes in
+    // milliseconds; this only exists to stop a wedged child from hanging the agent.
+    private const int GitTimeoutMs = 20000;
+
     private readonly string _repoRoot;
 
     private GitSync(string repoRoot) => _repoRoot = repoRoot;
@@ -47,6 +51,7 @@ public sealed class GitSync
         {
             FileName = "git",
             WorkingDirectory = _repoRoot,
+            RedirectStandardInput = true,   // give git its OWN stdin (closed below) — see note
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -57,14 +62,31 @@ public sealed class GitSync
         using var process = Process.Start(psi)
             ?? throw new InvalidOperationException("Could not start 'git' — is it installed and on PATH?");
 
-        // Read BOTH streams concurrently, then WaitForExit. If we fully read one stream
-        // while the other's OS pipe buffer fills up, git would block writing to it and we'd
-        // deadlock. Kicking off both async reads first avoids that classic trap.
+        // Close git's stdin immediately so it can never block waiting for input.
+        process.StandardInput.Close();
+
+        // Read BOTH streams concurrently, then wait. If we fully read one stream while the
+        // other's OS pipe buffer fills up, git would block writing and we'd deadlock — kicking
+        // off both async reads first avoids that classic trap.
         Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync();
         Task<string> stderrTask = process.StandardError.ReadToEndAsync();
-        process.WaitForExit();
 
-        return (process.ExitCode, stdoutTask.Result, stderrTask.Result);
+        // BOUND the whole thing. A child started with UseShellExecute=false inherits the parent's
+        // inheritable handles; inside the swarm (many open TCP sockets) a spawned git was observed
+        // to intermittently WEDGE — `git add` never returning — which would otherwise block the
+        // answer path forever. So we cap git: if it overruns, kill it and report failure. The
+        // caller already treats a git failure as non-fatal (handler stays live in memory), so a
+        // wedged/slow git degrades to "not synced" instead of hanging the agent. In a healthy
+        // environment git finishes in well under a second, so this never trips.
+        if (!process.WaitForExit(GitTimeoutMs))
+        {
+            try { process.Kill(entireProcessTree: true); } catch { /* best effort */ }
+            return (-1, "", $"git {args[0]} exceeded {GitTimeoutMs / 1000}s and was killed.");
+        }
+
+        string stdout = stdoutTask.Wait(2000) ? stdoutTask.Result : "";
+        string stderr = stderrTask.Wait(2000) ? stderrTask.Result : "";
+        return (process.ExitCode, stdout, stderr);
     }
 
     /// <summary>

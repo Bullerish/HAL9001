@@ -26,8 +26,26 @@ namespace HAL9001;
 ///   term; any node it talks to answers with the current (higher) term + leader, and a higher
 ///   term always wins, so the returnee adopts the new leader and yields instead of re-asserting.
 ///
-/// In-flight work recovery is NOT here — a question mid-flight when the coordinator died may be
-/// dropped this rung. >>> rung 4b-ii hooks in where marked. <<<
+/// IN-FLIGHT WORK RECOVERY (rung 4b-ii) — a question mid-flight when the coordinator dies must
+/// still get answered, exactly once as observed by the asker, without double-generating handlers:
+///   • ASKER-SIDE TRACKING (chosen over coordinator state replication): the asker keeps its own
+///     `outstanding` map, each entry stamped with the coordinator it was sent to. The PRIMARY
+///     recovery trigger is a COORDINATOR CHANGE — when an election installs a new coordinator, the
+///     asker immediately re-asks it (fires ~1s after the election, so the answer comes home seconds
+///     after a failover). A 30s timeout is a fallback for a lost message with no election. The
+///     asker is the one node that authoritatively knows it never got an answer, so no request state
+///     needs to survive on the dead coordinator. Capped so an unanswerable question can't loop.
+///   • HANDLER REDIRECT: a handler that was mid-generation when the coordinator died sends its
+///     result to whoever is coordinator *now* (re-resolved at send time), not the dead node that
+///     assigned it. So work already in progress is recovered, not dropped — and the asker usually
+///     gets its answer from that original work before its re-ask window even elapses, so no second
+///     generation happens.
+///   • DEDUP (reqId-keyed): every coordinator keeps a `pending` guard (a reqId already being
+///     worked is not re-assigned) and a `doneAnswers` cache (a reqId already answered is served
+///     from cache, and a second result for it is dropped). The asker clears `outstanding` the
+///     instant it sees an answer, so a question answered just before the coordinator died is never
+///     re-asked. GUARANTEE: exactly-once *delivery to the asker*; at-least-once *generation* with
+///     dedup that makes the common failover case exactly-once (see the README-style notes inline).
 /// </summary>
 public static class SwarmAgent
 {
@@ -36,6 +54,17 @@ public static class SwarmAgent
         string? Question = null, string? Origin = null,
         string? Answer = null, string? AnsweredBy = null, string? Coordinator = null,
         int Term = 0, string? Candidate = null, string? Voter = null);
+
+    // rung 4b-ii: an asker's record of a question it has sent but not yet seen answered.
+    private sealed class Outstanding
+    {
+        public string Question;
+        public DateTime LastSentAt;
+        public int Attempts;
+        public string CoordinatorWhenSent;   // who we last sent it to — a CHANGE means failover happened
+        public Outstanding(string question, DateTime sentAt, int attempts, string coordinator)
+        { Question = question; LastSentAt = sentAt; Attempts = attempts; CoordinatorWhenSent = coordinator; }
+    }
 
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
@@ -50,8 +79,27 @@ public static class SwarmAgent
         var answerGate = new SemaphoreSlim(1, 1);
 
         await using var node = new SwarmNode(myPort);
-        var pending = new ConcurrentDictionary<string, string>(); // reqId -> origin asker (coordinator role)
+        var pending = new ConcurrentDictionary<string, string>(); // reqId -> origin asker (coordinator role: in-progress guard)
         int roundRobin = 0;
+
+        // ── rung 4b-ii in-flight recovery state ───────────────────────────────────────────
+        // doneAnswers: reqId -> finished answer. Every node keeps this for the reqs it coordinates,
+        // so a duplicate ask/result for an already-answered reqId is served/dropped, not redone.
+        var doneAnswers = new ConcurrentDictionary<string, (string Answer, string By)>();
+        var doneOrder = new ConcurrentQueue<string>();   // FIFO of reqIds for bounded eviction
+        const int DoneCap = 512;
+        // outstanding: the ASKER's view of its own un-answered questions (for re-ask on failover).
+        var outstanding = new ConcurrentDictionary<string, Outstanding>();
+        // PRIMARY re-ask trigger = COORDINATOR CHANGE. The asker stamps each request with the
+        // coordinator it sent to; when an election installs a different coordinator, the asker
+        // immediately re-submits any still-outstanding request to the NEW one. That fires within
+        // ~1s of the election completing (~seconds after a kill) — short enough to observe — instead
+        // of waiting out a long timer. A 30s timeout is only a FALLBACK for a lost message with no
+        // coordinator change. Re-asks can't double-generate: the handler marks the reqId in-flight
+        // (see the "assign" case), so a re-ask to the new coordinator is dedup'd by `pending` while
+        // work is in progress, and by `doneAnswers` once it has finished.
+        const double ReAskTimeoutSeconds = 30.0;
+        const int MaxAttempts = 4;                        // initial send + up to 3 re-asks, then give up
 
         // ── Heartbeat + election timing (rung 4a/4b) ──────────────────────────────────────
         const int HeartbeatIntervalMs = 1000;
@@ -121,29 +169,77 @@ public static class SwarmAgent
             return members[((i % members.Count) + members.Count) % members.Count];
         }
 
+        // Asker-side: a request is satisfied — stop tracking it (so recovery won't re-ask). Returns
+        // true only the FIRST time, so a duplicate/late answer (e.g. original completion AND a
+        // re-ask both delivering) is printed once and silently ignored thereafter.
+        bool MarkAnswered(string reqId) => outstanding.TryRemove(reqId, out _);
+
         async Task DeliverAsync(string reqId, string answer, string answeredBy, string origin)
         {
-            if (origin == node.Id) { Console.WriteLine($"\n[swarm answer — handled by {answeredBy}] {answer}"); Console.Write("> "); }
+            if (origin == node.Id) { if (MarkAnswered(reqId)) { Console.WriteLine($"\n[swarm answer — handled by {answeredBy}] {answer}"); Console.Write("> "); } }
             else await SendSwarm(origin, new SwarmMsg("deliver", reqId, Answer: answer, AnsweredBy: answeredBy, Coordinator: node.Id));
+        }
+
+        // Coordinator-side completion gate: the FIRST result for a reqId is recorded + delivered;
+        // any later result for the same reqId (e.g. the original handler AND a re-assignment both
+        // finished) is dropped. This is the dedup that neutralizes double-handling.
+        async Task HandleResultAsync(string reqId, string answer, string answeredBy, string origin)
+        {
+            bool first = doneAnswers.TryAdd(reqId, (answer, answeredBy));
+            pending.TryRemove(reqId, out _);
+            if (!first) return; // duplicate completion — harmless, dropped
+            doneOrder.Enqueue(reqId);
+            while (doneOrder.Count > DoneCap && doneOrder.TryDequeue(out string? old)) doneAnswers.TryRemove(old, out _);
+            await DeliverAsync(reqId, answer, answeredBy, origin);
+        }
+
+        // A finished assignment goes home through the coordinator (which records it for dedup)
+        // when one is reachable — but DIRECT to the asker when no coordinator is reachable yet, so
+        // the answer isn't lost during the election gap right after the assigning coordinator died.
+        async Task CompleteAssignAsync(string reqId, string answer, string asker)
+        {
+            string coordNow; lock (stateLock) coordNow = coordinator;
+            if (coordNow == node.Id) { await HandleResultAsync(reqId, answer, node.Id, asker); return; }
+            if (node.Peers.Contains(coordNow)) { await SendSwarm(coordNow, new SwarmMsg("result", reqId, Answer: answer, AnsweredBy: node.Id, Origin: asker)); return; }
+            // No coordinator reachable (it died and the election isn't finished) — don't lose the
+            // answer: deliver it straight to the asker.
+            Console.WriteLine($"[recovery] coordinator unreachable — delivering req {reqId} direct to asker {asker}");
+            await DeliverAsync(reqId, answer, node.Id, asker);
         }
 
         async Task CoordinateAsync(string reqId, string question, string origin)
         {
+            // Already answered (a re-ask that raced a completion)? Serve the cached answer, no work.
+            if (doneAnswers.TryGetValue(reqId, out var cached)) { await DeliverAsync(reqId, cached.Answer, cached.By, origin); return; }
+            // Already being worked here? Ignore the duplicate (re-ask to the SAME coordinator).
+            if (!pending.TryAdd(reqId, origin)) return;
+
             string handler = PickHandler();
             Console.WriteLine($"[coordinator] assigning req {reqId} to {handler}");
-            if (handler == node.Id) { string a = await AnswerAsync(question); await DeliverAsync(reqId, a, node.Id, origin); }
-            else { pending[reqId] = origin; await SendSwarm(handler, new SwarmMsg("assign", reqId, Question: question)); }
-            // >>> rung 4b-ii: track this assignment so it can be re-driven if the handler/coordinator dies. <<<
+            // assign carries the origin so a handler can deliver home even if THIS coordinator later dies.
+            if (handler == node.Id) { string a = await AnswerAsync(question); await HandleResultAsync(reqId, a, node.Id, origin); }
+            else await SendSwarm(handler, new SwarmMsg("assign", reqId, Question: question, Origin: origin));
+        }
+
+        // (Re)send an ask to whoever is coordinator right now. Used for the first send and re-asks.
+        async Task DispatchAskAsync(string reqId, string question)
+        {
+            string c; lock (stateLock) c = coordinator;
+            if (c == node.Id) await CoordinateAsync(reqId, question, node.Id);
+            else if (node.Peers.Contains(c)) await SendSwarm(c, new SwarmMsg("ask", reqId, Question: question, Origin: node.Id));
+            else Console.WriteLine($"[ask] coordinator {c} not reachable yet — recovery will retry.");
         }
 
         async Task AskSwarmAsync(string question)
         {
             string reqId = Guid.NewGuid().ToString("N")[..8];
             string c; lock (stateLock) c = coordinator;
+            // Track BEFORE sending, stamped with the coordinator we're sending to — so recovery can
+            // detect a later coordinator CHANGE (failover) and re-drive this request. Survives the
+            // coordinator's death because it lives here, on the asker.
+            outstanding[reqId] = new Outstanding(question, DateTime.UtcNow, 1, c);
             Console.WriteLine($"[ask] req {reqId} → coordinator {c}");
-            if (c == node.Id) await CoordinateAsync(reqId, question, node.Id);
-            else if (node.Peers.Contains(c)) await SendSwarm(c, new SwarmMsg("ask", reqId, Question: question, Origin: node.Id));
-            else Console.WriteLine($"[ask] coordinator {c} not reachable yet — try again in a moment.");
+            await DispatchAskAsync(reqId, question);
         }
 
         // ── Election ──
@@ -194,17 +290,35 @@ public static class SwarmAgent
                     await CoordinateAsync(m.ReqId, m.Question ?? "", m.Origin ?? from);
                     break;
                 case "assign":
+                {
+                    string asker = m.Origin ?? from;
+                    // Mark this reqId in-flight ON THIS NODE too. If the coordinator that assigned it
+                    // dies and I (the handler) get elected coordinator, an incoming re-ask for the
+                    // SAME reqId is then dedup'd by this `pending` entry instead of being dispatched
+                    // again — that's what stops a re-ask from causing a SECOND commissioning.
+                    pending[m.ReqId] = asker;
                     Console.WriteLine($"\n[assigned by {from}] handling: \"{m.Question}\"");
                     string ans = await AnswerAsync(m.Question ?? "");
-                    await SendSwarm(from, new SwarmMsg("result", m.ReqId, Answer: ans, AnsweredBy: node.Id));
+                    // Deliver failover-aware: through the current coordinator if reachable, else
+                    // straight to the asker (the assigning coordinator may have died mid-work).
+                    await CompleteAssignAsync(m.ReqId, ans, asker);
                     Console.Write("> ");
                     break;
+                }
                 case "result":
-                    if (pending.TryRemove(m.ReqId, out string? origin)) await DeliverAsync(m.ReqId, m.Answer ?? "", m.AnsweredBy ?? from, origin);
+                {
+                    string asker = m.Origin ?? (pending.TryGetValue(m.ReqId, out string? po) ? po : node.Id);
+                    await HandleResultAsync(m.ReqId, m.Answer ?? "", m.AnsweredBy ?? from, asker);
                     break;
+                }
                 case "deliver":
-                    Console.WriteLine($"\n[swarm answer ← coordinator {m.Coordinator}, handled by {m.AnsweredBy}] {m.Answer}");
-                    Console.Write("> ");
+                    // Print only the first delivery for this reqId (the original completion and a
+                    // re-ask can both arrive); a later duplicate is dropped silently.
+                    if (MarkAnswered(m.ReqId))
+                    {
+                        Console.WriteLine($"\n[swarm answer ← coordinator {m.Coordinator}, handled by {m.AnsweredBy}] {m.Answer}");
+                        Console.Write("> ");
+                    }
                     break;
 
                 case "elect": // a candidate is running for term m.Term
@@ -303,6 +417,38 @@ public static class SwarmAgent
             }
         }
 
+        // ── rung 4b-ii: asker-side recovery. Re-drive an outstanding request when EITHER the
+        // coordinator changed since we sent it (an election happened → the node that held our
+        // request likely died) OR a fallback timeout elapsed (a lost message with no election).
+        // The coordinator-change trigger is what makes recovery prompt: it fires ~1s after the new
+        // coordinator is installed, so the answer comes home seconds after a kill, not minutes.
+        async Task AskerRecoveryLoop()
+        {
+            while (!loopCts.IsCancellationRequested)
+            {
+                try { await Task.Delay(1000, loopCts.Token); } catch { break; }
+                string c; lock (stateLock) c = coordinator;
+                foreach (var kv in outstanding.ToArray())
+                {
+                    Outstanding o = kv.Value; string reqId = kv.Key;
+                    bool coordChanged = c != o.CoordinatorWhenSent;
+                    bool timedOut = (DateTime.UtcNow - o.LastSentAt).TotalSeconds > ReAskTimeoutSeconds;
+                    if (!coordChanged && !timedOut) continue;
+                    if (o.Attempts >= MaxAttempts)
+                    {
+                        if (outstanding.TryRemove(reqId, out _))
+                        { Console.WriteLine($"\n[recovery] giving up on req {reqId} after {o.Attempts} attempts — unanswerable."); Console.Write("> "); }
+                        continue;
+                    }
+                    o.Attempts++; o.LastSentAt = DateTime.UtcNow; o.CoordinatorWhenSent = c;
+                    string why = coordChanged ? "coordinator changed (failover)" : $"no answer in {ReAskTimeoutSeconds:0}s";
+                    Console.WriteLine($"\n[recovery] re-asking req {reqId} — {why} — to coordinator {c} (attempt {o.Attempts}/{MaxAttempts}).");
+                    Console.Write("> ");
+                    await DispatchAskAsync(reqId, o.Question);
+                }
+            }
+        }
+
         // ── Wire up + run ──
         node.MessageReceived += (from, msg) =>
         {
@@ -325,6 +471,7 @@ public static class SwarmAgent
         await node.StartAsync(peerPorts);
         _ = HeartbeatSenderLoop();
         _ = MonitorLoop();
+        _ = AskerRecoveryLoop();
 
         Console.WriteLine();
         Console.WriteLine($"Swarm-agent {node.Id}." + (client is null ? " (no API key — answers with stubs.)" : ""));
@@ -334,9 +481,12 @@ public static class SwarmAgent
         while (true)
         {
             Console.Write("> ");
-            string? line = Console.ReadLine();
-            if (line is null || line.Trim().Equals("exit", StringComparison.OrdinalIgnoreCase)) break;
-            line = line.Trim();
+            string? raw = Console.ReadLine();
+            if (raw is null) break;
+            // Strip a leading UTF-8 BOM (U+FEFF) — piped stdin can prepend one, and .NET's
+            // Trim() does NOT treat it as whitespace, which would otherwise break command matching.
+            string line = raw.Trim().TrimStart('﻿').Trim();
+            if (line.Equals("exit", StringComparison.OrdinalIgnoreCase)) break;
             if (line.Length == 0) continue;
             if (line.Equals("peers", StringComparison.OrdinalIgnoreCase)) { node.PrintPeers(); continue; }
             if (line.Equals("coordinator", StringComparison.OrdinalIgnoreCase)) { lock (stateLock) Console.WriteLine($"coordinator = {coordinator} (term {term})"); continue; }
