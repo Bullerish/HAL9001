@@ -2,11 +2,12 @@ namespace HAL9001;
 
 /// <summary>
 /// One registered capability: a name, a one-line description of the GENERAL class of
-/// requests it handles, and the compiled handler that does the work. The description is
-/// what the <see cref="CapabilityRouter"/> reads to decide whether an incoming request is
-/// already covered.
+/// requests it handles, an example request that exercises it, and the compiled handler.
+/// The description is what the <see cref="CapabilityRouter"/> reads to decide whether an
+/// incoming request is already covered; the example is what the app replays when it
+/// generates its own follow-up question.
 /// </summary>
-public sealed record Capability(string Name, string Description, IHandler Handler);
+public sealed record Capability(string Name, string Description, string ExampleRequest, IHandler Handler);
 
 /// <summary>
 /// In-memory catalog of live capabilities, keyed by name.
@@ -31,9 +32,9 @@ public sealed class HandlerRegistry
     /// Add (or replace) a capability. Replacing matters later: when a better version of a
     /// capability is compiled, it overwrites the old one under the same name.
     /// </summary>
-    public void Register(string name, string description, IHandler handler)
+    public void Register(string name, string description, string exampleRequest, IHandler handler)
     {
-        _capabilities[name] = new Capability(name, description, handler);
+        _capabilities[name] = new Capability(name, description, exampleRequest, handler);
     }
 
     /// <summary>Try to find a handler by capability name.</summary>

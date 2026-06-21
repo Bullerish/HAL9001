@@ -22,15 +22,16 @@ public static class HandlerLoader
         {
             string source = File.ReadAllText(file);
 
-            // Prefer the embedded headers the generator writes. The name keys the registry;
-            // the description is what the router reads to recognize/reuse this capability.
-            // Files pushed before these headers existed fall back to the filename / blank.
+            // Prefer the embedded headers the generator writes. The name keys the registry,
+            // the description is what the router reads, and the request is the example the app
+            // replays as a follow-up. Files pushed before a header existed fall back / blank.
             string name = ExtractField(source, "name") ?? NameFromFileName(file);
             string description = ExtractField(source, "description") ?? "";
+            string example = ExtractField(source, "request") ?? "";
 
             // RuntimeCompiler registers the capability on success; on failure it prints the
             // CS#### errors itself. A bad file is skipped, never fatal.
-            if (RuntimeCompiler.TryCompileAndLoad(name, description, source, registry, out _))
+            if (RuntimeCompiler.TryCompileAndLoad(name, description, example, source, registry, out _))
                 Console.WriteLine($"  [load] {Path.GetFileName(file)} -> '{name}'");
             else
                 Console.WriteLine($"  [load] skipped {Path.GetFileName(file)} (did not compile)");

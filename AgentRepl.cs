@@ -50,7 +50,9 @@ public static class AgentRepl
             // general one → RUN it to get the answer. The LLM recognizes/commissions; it
             // never answers — the answer is always the output of running compiled code.
             // Used identically by a locally-typed request AND a peer question.
-            async Task<string?> ProduceAnswerAsync(string request)
+            // Returns the answer plus the NAME of the capability used (so the app can pick a
+            // *different* capability for the follow-up). Both null if nothing could be produced.
+            async Task<(string? Answer, string? Capability)> ProduceAnswerAsync(string request)
             {
                 await requestGate.WaitAsync();
                 try
@@ -58,10 +60,12 @@ public static class AgentRepl
                     RouteDecision decision = await router.RouteAsync(request);
 
                     IHandler? handler;
+                    string usedName;
                     if (decision.Action == RouteAction.UseExisting &&
                         registry.TryGet(decision.Name, out handler))
                     {
-                        Console.WriteLine($"  (using capability '{decision.Name}')");
+                        usedName = decision.Name;
+                        Console.WriteLine($"  (using capability '{usedName}')");
                     }
                     else
                     {
@@ -69,6 +73,7 @@ public static class AgentRepl
                         // have (LLM slip): commission a general capability either way.
                         string capName = decision.Name.Length > 0 ? decision.Name : "capability";
                         string capDesc = decision.Description.Length > 0 ? decision.Description : request;
+                        usedName = capName;
                         Console.WriteLine($"  (no capability yet — commissioning '{capName}': {capDesc})");
                         try
                         {
@@ -77,35 +82,49 @@ public static class AgentRepl
                         catch (Exception ex)
                         {
                             Console.WriteLine($"  generation failed: {ex.Message}");
-                            return null;
+                            return (null, null);
                         }
                         if (handler is null)
-                            return null; // didn't compile even after the retry; details already printed
+                            return (null, null); // didn't compile even after the retry; details printed
                     }
 
                     // Run the compiled capability with a timeout, so a hung network call in
-                    // generated code can't freeze the agent. (We can't cancel synchronous
-                    // code mid-run, but we stop waiting and report.)
+                    // generated code can't freeze the agent, and catch any runtime throw.
                     try
                     {
-                        return await Task.Run(() => handler!.Handle(request))
-                                         .WaitAsync(TimeSpan.FromSeconds(30));
+                        string result = await Task.Run(() => handler!.Handle(request))
+                                                  .WaitAsync(TimeSpan.FromSeconds(30));
+                        return (result, usedName);
                     }
                     catch (TimeoutException)
                     {
-                        return "(the capability took too long to run and was cancelled)";
+                        return ("(the capability took too long to run and was cancelled)", usedName);
                     }
                     catch (Exception ex)
                     {
-                        // Generated code can throw at runtime (bad data, failed web call,
-                        // null refs). Surface it and stay alive — never crash the agent.
-                        return $"(the capability errored at runtime: {ex.GetBaseException().Message})";
+                        // Surface the runtime error and stay alive — never crash the agent.
+                        return ($"(the capability errored at runtime: {ex.GetBaseException().Message})", usedName);
                     }
                 }
                 finally
                 {
                     requestGate.Release();
                 }
+            }
+
+            // App-generated follow-up (NO LLM): pick a DIFFERENT capability from the catalog
+            // and replay its example request. The agent's follow-ups are thus grounded in what
+            // it can actually do. Returns null when there's nothing relatable to ask yet
+            // (e.g. it only has the one capability it just used).
+            string? BuildFollowUp(string? justUsed)
+            {
+                var candidates = registry.Catalog()
+                    .Where(c => c.ExampleRequest.Length > 0)
+                    .Where(c => !string.Equals(c.Name, justUsed, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                return candidates.Count == 0
+                    ? null
+                    : candidates[Random.Shared.Next(candidates.Count)].ExampleRequest;
             }
 
             // ── Peer message handler ─────────────────────────────────────────────────────
@@ -122,8 +141,8 @@ public static class AgentRepl
                             // then send the result back as an Answer.
                             Console.WriteLine($"\n[peer asks] {message.Text}");
                             Console.WriteLine("  routing peer question into my agent...");
-                            string answer = await ProduceAnswerAsync(message.Text)
-                                             ?? "(sorry — I couldn't generate an answer for that)";
+                            var (peerAns, _) = await ProduceAnswerAsync(message.Text);
+                            string answer = peerAns ?? "(sorry — I couldn't generate an answer for that)";
                             Console.WriteLine($"  answering peer: {answer}");
                             await peer!.SendAsync(PeerMessageKind.Answer, answer);
                             Console.WriteLine("  [sent answer to peer]");
@@ -206,7 +225,7 @@ public static class AgentRepl
                 if (request.Length == 0) continue;
 
                 // Same answer path a peer question uses.
-                string? answer = await ProduceAnswerAsync(request);
+                var (answer, usedCapability) = await ProduceAnswerAsync(request);
                 if (answer is null)
                 {
                     Console.WriteLine();
@@ -214,32 +233,26 @@ public static class AgentRepl
                 }
                 Console.WriteLine($"  answer: {answer}");
 
-                // Generate a follow-up question; print it AND send it to the peer (sub-step A).
-                // This happens ONLY for locally-typed requests — answering a peer's question
-                // never generates a follow-up (that's the loop guard).
-                try
+                // APP-generated follow-up (no LLM): pick a different capability we have and
+                // replay its example. Print it AND send it to the peer (sub-step A). Only for
+                // locally-typed requests — answering a peer's question never follows up (loop
+                // guard). Null when we don't have a second capability to ask about yet.
+                string? followUp = BuildFollowUp(usedCapability);
+                if (followUp is not null)
                 {
-                    string followUp = await generator.GenerateFollowUpAsync(request, answer);
-                    if (followUp.Length > 0)
+                    Console.WriteLine($"  follow-up (from what I can do): {followUp}");
+                    if (peer is not null)
                     {
-                        Console.WriteLine($"  follow-up: {followUp}");
-                        if (peer is not null)
+                        try
                         {
-                            try
-                            {
-                                await peer.SendAsync(PeerMessageKind.Question, followUp);
-                                Console.WriteLine("  [sent follow-up to peer]");
-                            }
-                            catch (Exception ex)
-                            {
-                                Console.WriteLine($"  [could not send to peer: {ex.Message}]");
-                            }
+                            await peer.SendAsync(PeerMessageKind.Question, followUp);
+                            Console.WriteLine("  [sent follow-up to peer]");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"  [could not send to peer: {ex.Message}]");
                         }
                     }
-                }
-                catch
-                {
-                    // Follow-up is a nice-to-have; never let it break the loop.
                 }
 
                 Console.WriteLine();

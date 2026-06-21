@@ -27,33 +27,35 @@ public static class RuntimeCompiler
     /// in this project, not a crash.
     /// </summary>
     /// <summary>
-    /// Convenience overload for the Step 1 demo: no description, no error text.
+    /// Convenience overload for the Step 1 demo: no description/example, no error text.
     /// </summary>
     public static bool TryCompileAndLoad(
         string name,
         string sourceCode,
         HandlerRegistry registry,
         out IHandler? handler)
-        => TryCompileAndLoad(name, description: "", sourceCode, registry, out handler, out _);
+        => TryCompileAndLoad(name, description: "", exampleRequest: "", sourceCode, registry, out handler, out _);
 
-    /// <summary>Convenience overload: with description, without the error text.</summary>
+    /// <summary>Convenience overload: with description + example, without the error text.</summary>
     public static bool TryCompileAndLoad(
         string name,
         string description,
+        string exampleRequest,
         string sourceCode,
         HandlerRegistry registry,
         out IHandler? handler)
-        => TryCompileAndLoad(name, description, sourceCode, registry, out handler, out _);
+        => TryCompileAndLoad(name, description, exampleRequest, sourceCode, registry, out handler, out _);
 
     /// <summary>
     /// Full version. Registers the compiled capability under <paramref name="name"/> with
-    /// <paramref name="description"/> (the router reads that description later). On compile
-    /// failure, <paramref name="diagnostics"/> receives the CS#### error text that's also
-    /// printed — so the generator can feed it back to the LLM for a fix-up. Null on success.
+    /// <paramref name="description"/> (router reads it) and <paramref name="exampleRequest"/>
+    /// (the app replays it for follow-ups). On compile failure, <paramref name="diagnostics"/>
+    /// receives the CS#### error text that's also printed. Null on success.
     /// </summary>
     public static bool TryCompileAndLoad(
         string name,
         string description,
+        string exampleRequest,
         string sourceCode,
         HandlerRegistry registry,
         out IHandler? handler,
@@ -220,7 +222,7 @@ public static class RuntimeCompiler
             // ----------------------------------------------------------------
             // STEP 8 — REGISTER it (with its description). The capability is now live.
             // ----------------------------------------------------------------
-            registry.Register(name, description, instance);
+            registry.Register(name, description, exampleRequest, instance);
             handler = instance;
 
             Console.WriteLine($"  [ok] Compiled '{handlerType.FullName}' and registered it as '{name}'.");
