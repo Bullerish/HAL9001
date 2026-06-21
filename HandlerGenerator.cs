@@ -72,7 +72,7 @@ public sealed class HandlerGenerator
     /// that triggered this — passed to the model as a concrete example it must handle.
     /// Returns the live handler, or null if it never compiled.
     /// </summary>
-    public async Task<IHandler?> GenerateAsync(
+    public async Task<GeneratedHandler?> GenerateAsync(
         string name, string description, string exampleRequest, CancellationToken ct = default,
         bool persist = true)
     {
@@ -133,10 +133,11 @@ public sealed class HandlerGenerator
             // Compiles AND runs. Persist + push ONLY for the real answer path; a rung-5a
             // candidate (persist:false) is generated and held locally — NOT pushed — so N
             // competing nodes don't spam the repo with rival implementations (only 5b's winner
-            // should propagate).
+            // should propagate). We return the SOURCE alongside the handler so the swarm can push
+            // the exact winning implementation later (rung 5b) without regenerating it.
             if (persist)
                 PersistAndPush(name, description, exampleRequest, source);
-            return handler;
+            return new GeneratedHandler(handler!, source);
         }
 
         Console.WriteLine("  [generate] couldn't produce a working capability after a retry. Giving up.");
@@ -162,6 +163,14 @@ public sealed class HandlerGenerator
             return ex.GetBaseException().Message;
         }
     }
+
+    /// <summary>
+    /// Push an EXTERNALLY-chosen implementation (rung 5b: the deliberation winner). Same write +
+    /// commit + push as the normal answer path — used by the coordinator to propagate exactly the
+    /// one winning candidate's source, after the losers were generated locally and discarded.
+    /// </summary>
+    public void PersistShared(string name, string description, string exampleRequest, string source)
+        => PersistAndPush(name, description, exampleRequest, source);
 
     // =====================================================================================
     // PERSIST + PUSH (Step 4, push-half)
@@ -279,3 +288,7 @@ public sealed class HandlerGenerator
     private static string Indent(string text) =>
         "    " + text.Replace("\n", "\n    ");
 }
+
+/// <summary>A freshly generated capability: the live handler plus the exact source it was compiled
+/// from (so the swarm can push the winning implementation later without regenerating it).</summary>
+public sealed record GeneratedHandler(IHandler Handler, string Source);

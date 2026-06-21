@@ -54,10 +54,12 @@ public static class SwarmAgent
         string? Question = null, string? Origin = null,
         string? Answer = null, string? AnsweredBy = null, string? Coordinator = null,
         int Term = 0, string? Candidate = null, string? Voter = null,
-        // rung 5a fan-out fields:
+        // rung 5a/5b fan-out fields:
         string? TestCases = null,    // candreq: JSON array of TestCase the coordinator generated
         string? TestResults = null,  // candidate: JSON array of TestResult the member produced
         string? CapName = null,      // candidate: the capability the member used/built
+        string? CapDesc = null,      // candidate: that capability's description (for the winner push)
+        string? Source = null,       // candidate: the generated source (only the winner's is pushed, 5b)
         string? Status = null);      // candidate: Ok / Declined / GenerationFailed
 
     // rung 5a: the coordinator's in-progress fan-out — collecting competing candidates for one reqId.
@@ -73,7 +75,8 @@ public static class SwarmAgent
     }
 
     private sealed record CollectedCandidate(
-        string Member, string Status, string? Capability, string Answer, IReadOnlyList<TestResult> TestResults);
+        string Member, string Status, string? Capability, string? Description, string Source,
+        string Answer, IReadOnlyList<TestResult> TestResults);
 
     // rung 4b-ii: an asker's record of a question it has sent but not yet seen answered.
     private sealed class Outstanding
@@ -258,7 +261,7 @@ public static class SwarmAgent
         // means rungs 1–4b-ii (which all run through assign-to-one) are completely untouched.
 
         // Add a collected candidate; finalize early once every expected member has reported.
-        void AddCandidate(string reqId, string member, string status, string? cap, string answer, IReadOnlyList<TestResult> results)
+        void AddCandidate(string reqId, string member, string status, string? cap, string? desc, string source, string answer, IReadOnlyList<TestResult> results)
         {
             bool finalizeNow = false;
             if (competitions.TryGetValue(reqId, out Competition? comp))
@@ -266,8 +269,9 @@ public static class SwarmAgent
                 lock (comp)
                 {
                     if (comp.Finalized) return; // window already closed — a late straggler, ignore
-                    comp.Collected.Add(new CollectedCandidate(member, status, cap, answer, results));
-                    Console.WriteLine($"[deliberate] req {reqId}: candidate {comp.Collected.Count}/{comp.Expected} from {member} ({status})");
+                    comp.Collected.Add(new CollectedCandidate(member, status, cap, desc, source, answer, results));
+                    int passed = results.Count(r => r.Pass);
+                    Console.WriteLine($"[deliberate] req {reqId}: candidate {comp.Collected.Count}/{comp.Expected} from {member} ({status}, tests {passed}/{results.Count})");
                     Console.Write("> ");
                     if (comp.Collected.Count >= comp.Expected) finalizeNow = true;
                 }
@@ -275,7 +279,8 @@ public static class SwarmAgent
             if (finalizeNow) FinalizeCompetition(reqId, "all candidates in");
         }
 
-        // Close a competition exactly once: show the full slate and deliver it to the asker.
+        // Close a competition exactly once (rung 5b): show the slate, SCORE it, pick the winner,
+        // push ONLY the winner if it clears the quality floor, and deliver the winning answer.
         void FinalizeCompetition(string reqId, string why)
         {
             if (!competitions.TryGetValue(reqId, out Competition? comp)) return;
@@ -288,18 +293,72 @@ public static class SwarmAgent
             }
             competitions.TryRemove(reqId, out _);
 
+            // ── slate (5a display, kept for visibility) ──
             var sb = new System.Text.StringBuilder();
-            sb.AppendLine($"[deliberation {reqId}] \"{comp.Question}\" — collected {slate.Count}/{comp.Expected} candidate(s) ({why}); no winner yet (that's rung 5b):");
+            sb.AppendLine($"[deliberation {reqId}] \"{comp.Question}\" — collected {slate.Count}/{comp.Expected} candidate(s) ({why}):");
             for (int i = 0; i < slate.Count; i++)
             {
                 CollectedCandidate c = slate[i];
-                int passed = c.TestResults.Count(r => r.Pass);
-                sb.AppendLine($"  {i + 1}. {c.Member} via '{c.Capability ?? "—"}' [{c.Status}] — tests {passed}/{c.TestResults.Count} passed — answer: {c.Answer}");
+                int p = c.TestResults.Count(r => r.Pass);
+                string src = c.Source.Length > 0 ? $", src {c.Source.Length} chars" : "";
+                sb.AppendLine($"  {i + 1}. {c.Member} via '{c.Capability ?? "—"}' [{c.Status}] — tests {p}/{c.TestResults.Count}{src} — answer: {c.Answer}");
             }
+
+            // Possibly-bad-test signal (fallible LLM tests): a test EVERY Ok candidate failed is
+            // suspect — surface it, but don't act on it (the majority floor already tolerates it).
+            var okForTests = slate.Where(c => c.Status == "Ok" && c.TestResults.Count > 0).ToList();
+            if (okForTests.Count > 1)
+                foreach (var grp in okForTests.SelectMany(c => c.TestResults).GroupBy(r => r.Input))
+                    if (grp.All(r => !r.Pass))
+                        sb.AppendLine($"  note: every candidate failed test \"{grp.Key}\" (expected \"{grp.First().Expected}\") — the test may be wrong.");
+
+            // ── SCORE + SELECT ──
+            // Primary: most tests passed. Disqualify non-Ok (GenerationFailed/Declined). Tie-break:
+            // shortest source (parsimony — simpler code), then lowest port (deterministic, the
+            // swarm's canonical ordering) so the SAME slate always yields the SAME winner.
+            CollectedCandidate? winner = slate
+                .Where(c => c.Status == "Ok")
+                .OrderByDescending(c => c.TestResults.Count(r => r.Pass))
+                .ThenBy(c => c.Source.Length)
+                .ThenBy(c => PortOf(c.Member))
+                .FirstOrDefault();
+
+            string outcome;
+            if (winner is null)
+            {
+                outcome = "no node produced a working implementation — nothing adopted.";
+            }
+            else
+            {
+                int passed = winner.TestResults.Count(r => r.Pass);
+                int total = winner.TestResults.Count;
+                // Quality floor: must pass a MAJORITY of tests to be eligible to propagate. Strict
+                // "all" is too brittle given fallible LLM tests (one bad test would block a good
+                // handler); a majority tolerates one wrong test yet still demands broad correctness.
+                bool clearsFloor = total > 0 && passed * 2 > total;
+
+                if (clearsFloor && winner.Source.Length > 0)
+                {
+                    Console.WriteLine($"[deliberation {reqId}] winner: {winner.Member} ({passed}/{total}) — pushing '{winner.Capability}' to the swarm.");
+                    bool pushed = core.TryPersistWinner(winner.Capability ?? "capability", winner.Description ?? comp.Question, comp.Question, winner.Source);
+                    outcome = pushed
+                        ? $"WINNER {winner.Member} via '{winner.Capability}' ({passed}/{total} tests) — ADOPTED + propagated to the swarm.\n  answer: {winner.Answer}"
+                        : $"WINNER {winner.Member} via '{winner.Capability}' ({passed}/{total} tests) — selected (push unavailable here).\n  answer: {winner.Answer}";
+                }
+                else if (clearsFloor) // winner reused an already-shared handler — already canonical
+                {
+                    outcome = $"WINNER {winner.Member} via '{winner.Capability}' ({passed}/{total} tests) — already the shared handler.\n  answer: {winner.Answer}";
+                }
+                else // best-available answer to the asker, but too weak to become canonical
+                {
+                    outcome = $"BEST-AVAILABLE from {winner.Member} ({passed}/{total} tests) — below the majority floor, so NOT adopted (no handler propagated).\n  answer: {winner.Answer}";
+                }
+            }
+
+            sb.AppendLine(outcome);
             string text = sb.ToString().TrimEnd();
             Console.WriteLine("\n" + text);
             Console.Write("> ");
-            // Deliver the slate to the asker too (if it's a different node).
             if (comp.Origin != node.Id) _ = SendSwarm(comp.Origin, new SwarmMsg("slate", reqId, Answer: text));
         }
 
@@ -307,9 +366,9 @@ public static class SwarmAgent
         async Task ProduceOwnCandidateAsync(string reqId, string question, IReadOnlyList<TestCase> tests)
         {
             if (!core.HasLlm)
-            { AddCandidate(reqId, node.Id, "Declined", null, $"(node {node.Id} has no API key)", Array.Empty<TestResult>()); return; }
+            { AddCandidate(reqId, node.Id, "Declined", null, null, "", $"(node {node.Id} has no API key)", Array.Empty<TestResult>()); return; }
             Candidate cand = await core.ProduceCandidateAsync(question, tests);
-            AddCandidate(reqId, node.Id, cand.Status.ToString(), cand.Capability, cand.Answer, cand.TestResults);
+            AddCandidate(reqId, node.Id, cand.Status.ToString(), cand.Capability, cand.Description, cand.Source, cand.Answer, cand.TestResults);
         }
 
         // Close the competition when the collection window elapses (whatever arrived, we proceed).
@@ -431,16 +490,16 @@ public static class SwarmAgent
                     IReadOnlyList<TestCase> tests;
                     try { tests = JsonSerializer.Deserialize<List<TestCase>>(m.TestCases ?? "[]", JsonOpts) ?? new(); }
                     catch { tests = Array.Empty<TestCase>(); }
-                    string status, answer; string? cap; IReadOnlyList<TestResult> results;
+                    string status, answer, source; string? cap, desc; IReadOnlyList<TestResult> results;
                     if (!core.HasLlm)
-                    { status = "Declined"; cap = null; answer = $"(node {node.Id} has no API key)"; results = Array.Empty<TestResult>(); }
+                    { status = "Declined"; cap = null; desc = null; source = ""; answer = $"(node {node.Id} has no API key)"; results = Array.Empty<TestResult>(); }
                     else
                     {
                         Candidate cand = await core.ProduceCandidateAsync(m.Question ?? "", tests);
-                        status = cand.Status.ToString(); cap = cand.Capability; answer = cand.Answer; results = cand.TestResults;
+                        status = cand.Status.ToString(); cap = cand.Capability; desc = cand.Description; source = cand.Source; answer = cand.Answer; results = cand.TestResults;
                     }
                     await SendSwarm(from, new SwarmMsg("candidate", m.ReqId, Answer: answer, AnsweredBy: node.Id,
-                        CapName: cap, Status: status, TestResults: JsonSerializer.Serialize(results), Origin: m.Origin));
+                        CapName: cap, CapDesc: desc, Source: source, Status: status, TestResults: JsonSerializer.Serialize(results), Origin: m.Origin));
                     Console.Write("> ");
                     break;
                 }
@@ -449,7 +508,7 @@ public static class SwarmAgent
                     IReadOnlyList<TestResult> results;
                     try { results = JsonSerializer.Deserialize<List<TestResult>>(m.TestResults ?? "[]", JsonOpts) ?? new(); }
                     catch { results = Array.Empty<TestResult>(); }
-                    AddCandidate(m.ReqId, m.AnsweredBy ?? from, m.Status ?? "Ok", m.CapName, m.Answer ?? "", results);
+                    AddCandidate(m.ReqId, m.AnsweredBy ?? from, m.Status ?? "Ok", m.CapName, m.CapDesc, m.Source ?? "", m.Answer ?? "", results);
                     break;
                 }
                 case "slate": // coordinator → asker: the full collected slate (no winner yet)

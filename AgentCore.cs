@@ -101,16 +101,18 @@ public sealed class AgentCore
                 string capDesc = decision.Description.Length > 0 ? decision.Description : request;
                 usedName = capName;
                 Console.WriteLine($"  (commissioning '{capName}': {capDesc})");
+                GeneratedHandler? gen;
                 try
                 {
-                    handler = await _generator!.GenerateAsync(capName, capDesc, request, ct);
+                    gen = await _generator!.GenerateAsync(capName, capDesc, request, ct);
                 }
                 catch (Exception ex)
                 {
                     return AnswerResult.GenerationFailed($"(generation failed: {ex.Message})");
                 }
-                if (handler is null)
+                if (gen is null)
                     return AnswerResult.GenerationFailed("(couldn't build a working handler)");
+                handler = gen.Handler;
             }
 
             // Run the compiled capability with a timeout so a hung network call in generated
@@ -188,13 +190,16 @@ public sealed class AgentCore
         {
             RouteDecision decision = await _router!.RouteAsync(request, ct);
             if (decision.Action == RouteAction.Decline)
-                return new Candidate(CandidateStatus.Declined, decision.Reply, null, Array.Empty<TestResult>());
+                return new Candidate(CandidateStatus.Declined, decision.Reply, null, null, "", Array.Empty<TestResult>());
 
             IHandler? handler;
             string usedName;
+            string usedDesc;
+            string source = "";   // the generated source (empty for an existing handler) — for the winner push
             if (decision.Action == RouteAction.UseExisting && Registry.TryGet(decision.Name, out handler))
             {
                 usedName = decision.Name;
+                usedDesc = decision.Description;
                 Console.WriteLine($"  (candidate: using capability '{usedName}')");
             }
             else
@@ -202,10 +207,14 @@ public sealed class AgentCore
                 string capName = decision.Name.Length > 0 ? decision.Name : "capability";
                 string capDesc = decision.Description.Length > 0 ? decision.Description : request;
                 usedName = capName;
+                usedDesc = capDesc;
                 Console.WriteLine($"  (candidate: commissioning '{capName}' — held locally, not pushed)");
-                try { handler = await _generator!.GenerateAsync(capName, capDesc, request, ct, persist: false); }
-                catch (Exception ex) { return new Candidate(CandidateStatus.GenerationFailed, $"(generation failed: {ex.Message})", capName, Array.Empty<TestResult>()); }
-                if (handler is null) return new Candidate(CandidateStatus.GenerationFailed, "(couldn't build a working handler)", capName, Array.Empty<TestResult>());
+                GeneratedHandler? gen;
+                try { gen = await _generator!.GenerateAsync(capName, capDesc, request, ct, persist: false); }
+                catch (Exception ex) { return new Candidate(CandidateStatus.GenerationFailed, $"(generation failed: {ex.Message})", capName, capDesc, "", Array.Empty<TestResult>()); }
+                if (gen is null) return new Candidate(CandidateStatus.GenerationFailed, "(couldn't build a working handler)", capName, capDesc, "", Array.Empty<TestResult>());
+                handler = gen.Handler;
+                source = gen.Source;
             }
 
             string answer = await RunHandlerAsync(handler!, request);
@@ -216,12 +225,23 @@ public sealed class AgentCore
                 bool pass = got.Contains(tc.Expected, StringComparison.OrdinalIgnoreCase);
                 results.Add(new TestResult(tc.Input, tc.Expected, got, pass));
             }
-            return new Candidate(CandidateStatus.Ok, answer, usedName, results);
+            return new Candidate(CandidateStatus.Ok, answer, usedName, usedDesc, source, results);
         }
         finally
         {
             _gate.Release();
         }
+    }
+
+    /// <summary>
+    /// Push the deliberation WINNER (rung 5b): persist + commit + push exactly the one winning
+    /// candidate's source so it becomes the swarm's canonical handler. No-op without a key/generator.
+    /// </summary>
+    public bool TryPersistWinner(string name, string description, string exampleRequest, string source)
+    {
+        if (_generator is null || source.Length == 0) return false;
+        _generator.PersistShared(name, description, exampleRequest, source);
+        return true;
     }
 
     // Run a handler under the same 30s guard used everywhere, turning any throw/timeout into a
@@ -279,6 +299,9 @@ public sealed record TestResult(string Input, string Expected, string Got, bool 
 /// <summary>How a node's candidate turned out.</summary>
 public enum CandidateStatus { Ok, Declined, GenerationFailed }
 
-/// <summary>One node's competing candidate: its answer, the capability it used/built, and how it
-/// did on the test cases. Collected by the coordinator during a fan-out (no winner picked in 5a).</summary>
-public sealed record Candidate(CandidateStatus Status, string Answer, string? Capability, IReadOnlyList<TestResult> TestResults);
+/// <summary>One node's competing candidate: its answer, the capability it used/built (name +
+/// description), the SOURCE it generated (empty for an existing handler — only the winner's source
+/// is ever pushed, in 5b), and how it did on the test cases.</summary>
+public sealed record Candidate(
+    CandidateStatus Status, string Answer, string? Capability, string? Description, string Source,
+    IReadOnlyList<TestResult> TestResults);
