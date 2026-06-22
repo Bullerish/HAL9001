@@ -28,6 +28,7 @@ public sealed class AgentCore
     private readonly CapabilityRouter? _router;
     private readonly HandlerGenerator? _generator;
     private readonly TursoClient? _turso;   // the hive's shared knowledge store (facts), or null if no creds
+    private readonly SelfModel _selfModel;  // answers "what am I?" from real state (registry/facts/events)
 
     // One gate for the whole answer path. The registry and generator are shared mutable state;
     // serializing answer production keeps two concurrent callers from interleaving a half-built
@@ -54,6 +55,7 @@ public sealed class AgentCore
         Git = GitSync.Discover();
         _turso = TursoClient.FromEnvironment();
         Events = new EventLog(_turso, "single"); // shares the hive store; actor overridden by the swarm
+        _selfModel = new SelfModel(Registry, _turso, Events); // grounded introspection over real state
         if (client is not null)
         {
             _generator = new HandlerGenerator(client, Registry, Git);
@@ -228,6 +230,12 @@ public sealed class AgentCore
             // NOT A TASK → conversational reply; touch nothing in the compile/push pipeline.
             if (decision.Action == RouteAction.Decline)
                 return AnswerResult.Declined(decision.Reply);
+
+            // ABOUT ITSELF → answer from the SELF-MODEL: real state (registry + facts + episodic
+            // memory), rendered by code. The LLM only recognized the question as introspective and
+            // picked the topic — it never fabricates a capability or a fact it doesn't have.
+            if (decision.Action == RouteAction.Introspect)
+                return AnswerResult.Answered(await _selfModel.DescribeAsync(decision.SelfTopic), "self-model");
 
             IHandler? handler;
             string usedName;

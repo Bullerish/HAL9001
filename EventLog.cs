@@ -10,6 +10,10 @@ namespace HAL9001;
 /// </summary>
 public sealed record HiveEvent(long Id, string Timestamp, string Actor, string Kind, string Summary, string? Ref);
 
+/// <summary>Aggregate view of the event log for the self-model: how many events the hive has, the
+/// earliest one (its "birth"), and a per-kind tally (most frequent first).</summary>
+public sealed record EventStats(int Total, string? Earliest, List<(string Kind, int Count)> ByKind);
+
 /// <summary>
 /// EPISODIC MEMORY — the hive's autobiographical event log (sentience-ladder bite 1).
 ///
@@ -98,6 +102,36 @@ public sealed class EventLog
         }
         events.Reverse(); // DESC fetch → chronological (oldest first) for replay
         return events;
+    }
+
+    /// <summary>
+    /// Aggregate stats over the whole log, for the self-model: total event count, the earliest
+    /// timestamp (the hive's "birth"), and a per-kind tally (most frequent first). One GROUP BY
+    /// query. Returns zeros with no hive / on any read error.
+    /// </summary>
+    public async Task<EventStats> StatsAsync()
+    {
+        if (_turso is null) return new EventStats(0, null, new());
+        List<List<string?>> rows;
+        try { rows = await _turso.ExecuteAsync("SELECT kind, COUNT(*), MIN(ts) FROM events GROUP BY kind"); }
+        catch { return new EventStats(0, null, new()); }
+
+        int total = 0;
+        string? earliest = null;
+        var byKind = new List<(string Kind, int Count)>();
+        foreach (var r in rows)
+        {
+            if (r.Count < 3) continue;
+            string kind = r[0] ?? "?";
+            int count = int.TryParse(r[1], out int c) ? c : 0;
+            string? min = r[2];
+            total += count;
+            byKind.Add((kind, count));
+            // ISO-8601 timestamps sort lexicographically, so string Min is the true earliest.
+            if (min is not null && (earliest is null || string.CompareOrdinal(min, earliest) < 0)) earliest = min;
+        }
+        byKind.Sort((a, b) => b.Count.CompareTo(a.Count));
+        return new EventStats(total, earliest, byKind);
     }
 
     /// <summary>Print a timeline to the console — the shared "replay the timeline" formatter used by

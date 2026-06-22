@@ -8,6 +8,7 @@ public enum RouteAction
     UseExisting, // input clearly matches an existing capability → route to it
     CreateNew,   // a genuine task with no existing capability → commission a new general one
     Decline,     // NOT a task (greeting, chitchat, vague) → reply conversationally, build nothing
+    Introspect,  // a question ABOUT THE AGENT ITSELF → answer from the self-model (its own state)
 }
 
 /// <summary>
@@ -15,11 +16,13 @@ public enum RouteAction
 ///   UseExisting → Name is the existing capability.
 ///   CreateNew   → Name is a proposed id, Description the one-line spec of the GENERAL capability.
 ///   Decline     → Reply is a short conversational response; nothing is built.
+///   Introspect  → SelfTopic says which aspect of itself was asked about (answered from real state).
 /// </summary>
 public sealed record RouteDecision(
     RouteAction Action, string Name, string Description, string Reply,
     CapType InputType = CapType.String, CapType OutputType = CapType.String,
-    StabilityKind Stability = StabilityKind.Stable);
+    StabilityKind Stability = StabilityKind.Stable,
+    SelfTopic SelfTopic = SelfTopic.Identity);
 
 /// <summary>
 /// The "recognize, don't match" step. Instead of slug-matching a request's literal text,
@@ -52,17 +55,30 @@ public sealed class CapabilityRouter
                       transformation that running code could answer — and NO existing
                       capability covers it. Commission a new GENERAL capability (one that
                       handles the whole class, e.g. "the capital of any US state").
-          "decline" — the input is NOT a task: a greeting, small talk, thanks, an emotional
-                      or meta question about you, or something too vague to act on. Build
-                      NOTHING. Give a short, friendly conversational reply instead.
+          "self"    — the input asks ABOUT THE AGENT ITSELF: what it can do, what it knows,
+                      what it has done or learned lately, how many capabilities/facts it has,
+                      or who/what it is. It is answered from the agent's OWN state (not a tool,
+                      not a built fact). Also give a "topic" (below).
+          "decline" — the input is NOT a task and NOT about the agent: a greeting, small talk,
+                      thanks, "how are you", or something too vague to act on. Build NOTHING.
+                      Give a short, friendly conversational reply instead.
 
-        The decline-vs-new boundary (this is the important call):
+        The boundary (these are the important calls):
           - Could running code produce a concrete answer? (capital of a state, convert units,
             count the vowels, is-17-prime, reverse a string) → it's a TASK → "use" or "new".
-          - Would no tool meaningfully answer it? ("hi", "how are you", "thanks", "who are
-            you", "that's cool", "hey there") → "decline".
+          - Is it about the AGENT itself? ("what can you do", "what do you know", "who/what are
+            you", "what have you learned lately", "how many capabilities do you have", "tell me
+            about yourself") → "self". Note: "who are you" is "self"; "how are you" is "decline".
+            A factual lookup like "what is the capital of Ohio" is a TASK, NOT "self".
+          - Would no tool meaningfully answer it and it's not about the agent? ("hi", "thanks",
+            "that's cool", "hey there") → "decline".
           - When you genuinely can't find an actionable task in the input, prefer "decline".
             Building a tool for a non-task is the expensive mistake this rule exists to stop.
+
+        For a "self" question, also give the "topic" — the closest of:
+          capabilities (what it can do) | knowledge (what facts it holds) | history (what it has
+          done/learned recently) | scale (how many capabilities/facts/events) | identity (who/what
+          it is, or anything general about itself).
 
         For a "new" capability, also declare its INPUT and OUTPUT types from this fixed set:
           String (free-form text), Int (a whole number), Number (integer or decimal),
@@ -81,6 +97,7 @@ public sealed class CapabilityRouter
         Respond with ONLY JSON — no prose, no markdown fences — in one of these shapes:
           {"action":"use","name":"<existing-capability-name>"}
           {"action":"new","name":"<short-kebab-case-id>","description":"<one line: the general capability>","inputType":"<String|Int|Number|Bool|Date>","outputType":"<String|Int|Number|Bool|Date>","stability":"<stable|live>"}
+          {"action":"self","topic":"<capabilities|knowledge|history|scale|identity>"}
           {"action":"decline","reply":"<one short, friendly sentence>"}
         """;
 
@@ -114,6 +131,12 @@ public sealed class CapabilityRouter
 
             if (action.Equals("use", StringComparison.OrdinalIgnoreCase) && name.Length > 0)
                 return new RouteDecision(RouteAction.UseExisting, name, "", "");
+
+            if (action.Equals("self", StringComparison.OrdinalIgnoreCase))
+            {
+                string topic = root.TryGetProperty("topic", out JsonElement tp) ? tp.GetString() ?? "" : "";
+                return new RouteDecision(RouteAction.Introspect, "", "", "", SelfTopic: SelfTopics.Parse(topic));
+            }
 
             if (action.Equals("decline", StringComparison.OrdinalIgnoreCase))
                 return new RouteDecision(RouteAction.Decline, "", "",
