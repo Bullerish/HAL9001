@@ -17,7 +17,7 @@ public sealed class AnthropicClient : IDisposable
 {
     // ⇩ Change this ONE line to use a different model. (claude-opus-4-8 is the current
     //   most-capable model; claude-sonnet-4-6 / claude-haiku-4-5 are cheaper/faster.)
-    public const string Model = "claude-opus-4-8";
+    public const string Model = "claude-haiku-4-5-20251001";
 
     private const string Endpoint = "https://api.anthropic.com/v1/messages";
     private const string AnthropicVersion = "2023-06-01"; // required API version header
