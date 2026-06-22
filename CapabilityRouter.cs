@@ -18,7 +18,8 @@ public enum RouteAction
 /// </summary>
 public sealed record RouteDecision(
     RouteAction Action, string Name, string Description, string Reply,
-    CapType InputType = CapType.String, CapType OutputType = CapType.String);
+    CapType InputType = CapType.String, CapType OutputType = CapType.String,
+    StabilityKind Stability = StabilityKind.Stable);
 
 /// <summary>
 /// The "recognize, don't match" step. Instead of slug-matching a request's literal text,
@@ -70,9 +71,16 @@ public sealed class CapabilityRouter
         "convert C to F" is Number -> Number; "capital of a state" is String -> String. These types
         make the generated handler parse its input robustly. Use String when unsure.
 
+        Also declare its STABILITY:
+          "stable" — a PURE function of its input: the same input gives the same answer forever
+                     (is-28-perfect, capital-of-a-state, convert-C-to-F). Its answer is worth caching.
+          "live"   — the answer depends on the CURRENT date/time, so it changes over time
+                     (days-until-Christmas, what-day-is-it-today, how-old-is-someone-born-on-D).
+                     Its answer must NOT be cached.
+
         Respond with ONLY JSON — no prose, no markdown fences — in one of these shapes:
           {"action":"use","name":"<existing-capability-name>"}
-          {"action":"new","name":"<short-kebab-case-id>","description":"<one line: the general capability>","inputType":"<String|Int|Number|Bool|Date>","outputType":"<String|Int|Number|Bool|Date>"}
+          {"action":"new","name":"<short-kebab-case-id>","description":"<one line: the general capability>","inputType":"<String|Int|Number|Bool|Date>","outputType":"<String|Int|Number|Bool|Date>","stability":"<stable|live>"}
           {"action":"decline","reply":"<one short, friendly sentence>"}
         """;
 
@@ -117,8 +125,9 @@ public sealed class CapabilityRouter
             if (description.Length == 0) description = request;
             string inType = root.TryGetProperty("inputType", out JsonElement it) ? it.GetString() ?? "" : "";
             string outType = root.TryGetProperty("outputType", out JsonElement ot) ? ot.GetString() ?? "" : "";
+            string stab = root.TryGetProperty("stability", out JsonElement st) ? st.GetString() ?? "" : "";
             return new RouteDecision(RouteAction.CreateNew, name, description, "",
-                CapTypes.Parse(inType), CapTypes.Parse(outType));
+                CapTypes.Parse(inType), CapTypes.Parse(outType), StabilityKinds.Parse(stab));
         }
         catch
         {

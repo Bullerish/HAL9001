@@ -85,7 +85,11 @@ public sealed class AgentCore
     {
         if (_turso is null) return;
         await _turso.ExecuteAsync(
-            "CREATE TABLE IF NOT EXISTS facts (key TEXT PRIMARY KEY, value TEXT NOT NULL, type TEXT NOT NULL, updated_at TEXT NOT NULL)");
+            "CREATE TABLE IF NOT EXISTS facts (key TEXT PRIMARY KEY, value TEXT NOT NULL, type TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'explicit', updated_at TEXT NOT NULL)");
+        // Migrate a pre-provenance facts table (created before this bite) by adding the source column.
+        // ALTER throws "duplicate column" when the column already exists (fresh table) — ignore that.
+        try { await _turso.ExecuteAsync("ALTER TABLE facts ADD COLUMN source TEXT NOT NULL DEFAULT 'explicit'"); }
+        catch { /* column already present */ }
     }
 
     /// <summary>
@@ -116,9 +120,41 @@ public sealed class AgentCore
 
         CapType type = CapTypes.InferFromValue(value);
         await _turso.ExecuteAsync(
-            "INSERT OR REPLACE INTO facts (key, value, type, updated_at) VALUES (?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO facts (key, value, type, source, updated_at) VALUES (?, ?, ?, 'explicit', ?)",
             key, value, CapTypes.Name(type), DateTime.UtcNow.ToString("o"));
-        return new Fact(key, value, type);
+        return new Fact(key, value, type, "explicit");
+    }
+
+    /// <summary>
+    /// AUTO-DERIVE a cached fact from a STABLE capability's answer (the auto-derivation gate is the
+    /// caller — only Stable answers reach here). The fact is keyed by a slug of the question, typed by
+    /// the capability's output type, and marked source='derived' so it's distinct from explicit facts
+    /// (and purgeable later without touching them). LIVE answers are never derived, which is what makes
+    /// caching safe. No-op without a hive.
+    /// </summary>
+    private async Task DeriveFactAsync(string question, string value, CapType type, string fromCapability)
+    {
+        if (_turso is null) return;
+        string key = Slug(question);
+        if (key.Length == 0) return;
+        try
+        {
+            await _turso.ExecuteAsync(
+                "INSERT OR REPLACE INTO facts (key, value, type, source, updated_at) VALUES (?, ?, ?, 'derived', ?)",
+                key, value, CapTypes.Name(type), DateTime.UtcNow.ToString("o"));
+            Console.WriteLine($"  [knowledge] derived fact '{key}' = {value} ({CapTypes.Name(type)}) from stable '{fromCapability}' — cached");
+        }
+        catch (Exception ex) { Console.WriteLine($"  [knowledge] could not derive fact: {ex.Message}"); }
+    }
+
+    // A stable, readable key from a question, for derived facts: lowercase, alphanumerics → dashes.
+    private static string Slug(string question)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (char c in question.Trim().ToLowerInvariant())
+            sb.Append(char.IsLetterOrDigit(c) ? c : '-');
+        string s = string.Join("-", sb.ToString().Split('-', StringSplitOptions.RemoveEmptyEntries));
+        return s.Length <= 80 ? s : s[..80];
     }
 
     /// <summary>
@@ -134,12 +170,12 @@ public sealed class AgentCore
         if (_turso is null || _client is null) return null;
 
         List<List<string?>> rows;
-        try { rows = await _turso.ExecuteAsync("SELECT key, value, type FROM facts"); }
+        try { rows = await _turso.ExecuteAsync("SELECT key, value, type, source FROM facts"); }
         catch { return null; } // hive unreachable → behave as if no fact (fall through)
         if (rows.Count == 0) return null;
 
-        var facts = rows.Where(r => r.Count >= 3 && r[0] is not null)
-                        .Select(r => new Fact(r[0]!, r[1] ?? "", CapTypes.Parse(r[2])))
+        var facts = rows.Where(r => r.Count >= 4 && r[0] is not null)
+                        .Select(r => new Fact(r[0]!, r[1] ?? "", CapTypes.Parse(r[2]), r[3] ?? "explicit"))
                         .ToList();
         if (facts.Count == 0) return null;
 
@@ -183,27 +219,29 @@ public sealed class AgentCore
 
             IHandler? handler;
             string usedName;
-            CapType inType;   // declared input type of the chosen capability — for the boundary check
+            CapType inType;            // declared input type of the chosen capability — for the boundary check
+            CapType outType;           // declared output type — used to type an auto-derived fact
+            StabilityKind stability;   // Stable → may auto-derive a cached fact; Live → recompute, never cache
             if (decision.Action == RouteAction.UseExisting && Registry.TryGetCapability(decision.Name, out Capability cap))
             {
                 handler = cap.Handler;
                 usedName = decision.Name;
-                inType = cap.InputType;
-                Console.WriteLine($"  (using capability '{usedName}' [{CapTypes.Name(cap.InputType)}→{CapTypes.Name(cap.OutputType)}])");
+                inType = cap.InputType; outType = cap.OutputType; stability = cap.Stability;
+                Console.WriteLine($"  (using capability '{usedName}' [{CapTypes.Name(cap.InputType)}→{CapTypes.Name(cap.OutputType)}, {StabilityKinds.Name(cap.Stability)}])");
             }
             else
             {
                 // CreateNew — or a UseExisting that named something we don't actually have
-                // (an LLM slip): commission a general capability either way, with declared types.
+                // (an LLM slip): commission a general capability either way, with declared types + stability.
                 string capName = decision.Name.Length > 0 ? decision.Name : "capability";
                 string capDesc = decision.Description.Length > 0 ? decision.Description : request;
                 usedName = capName;
-                inType = decision.InputType;
-                Console.WriteLine($"  (commissioning '{capName}' [{CapTypes.Name(decision.InputType)}→{CapTypes.Name(decision.OutputType)}]: {capDesc})");
+                inType = decision.InputType; outType = decision.OutputType; stability = decision.Stability;
+                Console.WriteLine($"  (commissioning '{capName}' [{CapTypes.Name(decision.InputType)}→{CapTypes.Name(decision.OutputType)}, {StabilityKinds.Name(decision.Stability)}]: {capDesc})");
                 GeneratedHandler? gen;
                 try
                 {
-                    gen = await _generator!.GenerateAsync(capName, capDesc, request, ct, persist: true, decision.InputType, decision.OutputType);
+                    gen = await _generator!.GenerateAsync(capName, capDesc, request, ct, persist: true, decision.InputType, decision.OutputType, decision.Stability);
                 }
                 catch (Exception ex)
                 {
@@ -220,11 +258,22 @@ public sealed class AgentCore
                 return AnswerResult.Answered(CapTypes.Mismatch(inType, request), usedName);
 
             // Run the compiled capability with a timeout so a hung network call in generated
-            // code can't freeze the agent, and catch any runtime throw — never crash.
+            // code can't freeze the agent, and catch any runtime throw — never crash. A LIVE
+            // capability reads the REAL clock here (Clock.Injected is null in production).
             try
             {
                 string result = await Task.Run(() => handler!.Handle(request), ct)
                                           .WaitAsync(TimeSpan.FromSeconds(30), ct);
+
+                if (stability == StabilityKind.Live)
+                    // Live: recompute every call, NEVER cache a value (it'd be stale tomorrow).
+                    Console.WriteLine($"  [live] recomputed '{usedName}' against the real clock ({Clock.Today:yyyy-MM-dd}) — not cached");
+                else
+                    // Stable (pure): auto-derive a cached fact so a repeat of this exact question is
+                    // served from the hive without recomputing. Gated on Stable — this is why
+                    // auto-derivation can't go stale.
+                    await DeriveFactAsync(request, result, outType, usedName);
+
                 return AnswerResult.Answered(result, usedName);
             }
             catch (TimeoutException)
@@ -358,10 +407,10 @@ public sealed class AgentCore
     /// canonical handler. No-op without a key/generator.
     /// </summary>
     public bool TryPersistWinner(string name, string description, string exampleRequest, string source,
-        CapType inputType, CapType outputType)
+        CapType inputType, CapType outputType, StabilityKind stability = StabilityKind.Stable)
     {
         if (_generator is null || source.Length == 0) return false;
-        _generator.PersistShared(name, description, exampleRequest, source, inputType, outputType);
+        _generator.PersistShared(name, description, exampleRequest, source, inputType, outputType, stability);
         return true;
     }
 
@@ -678,9 +727,10 @@ public sealed record AnswerResult(AnswerKind Kind, string Text, string? Capabili
 // ── rung 5a deliberation types (shared by AgentCore + SwarmAgent, sent over the wire as JSON) ──
 
 /// <summary>A stored piece of hive knowledge: an identifier <see cref="Key"/>, its stored
-/// <see cref="Value"/>, and the declared <see cref="Type"/> (so a fact can later feed a typed
-/// handler input — not built this bite). The hive's "noun", distinct from a handler's "verb".</summary>
-public sealed record Fact(string Key, string Value, CapType Type);
+/// <see cref="Value"/>, the declared <see cref="Type"/> (so a fact can later feed a typed handler
+/// input — not built this bite), and its <see cref="Source"/> provenance ("explicit" = a human
+/// stored it, "derived" = auto-cached from a stable capability). The hive's "noun".</summary>
+public sealed record Fact(string Key, string Value, CapType Type, string Source);
 
 /// <summary>The coordinator's one-call deliberation setup: the declared input/output types every
 /// candidate must target, plus the test cases (consistent with those types) to score them on.</summary>

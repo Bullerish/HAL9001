@@ -243,9 +243,9 @@ public static class SwarmAgent
                 catch (Exception ex) { Console.WriteLine($"[knowledge] lookup error (falling through): {ex.Message}"); }
                 if (fact is not null)
                 {
-                    Console.WriteLine($"[knowledge] retrieved fact '{fact.Key}' = {fact.Value} ({CapTypes.Name(fact.Type)}) — no handler, no generation");
+                    Console.WriteLine($"[knowledge] {fact.Source}-fact '{fact.Key}' = {fact.Value} ({CapTypes.Name(fact.Type)}) — no handler, no generation");
                     Console.Write("> ");
-                    await HandleResultAsync(reqId, fact.Value, "knowledge", origin);
+                    await HandleResultAsync(reqId, fact.Value, $"knowledge:{fact.Source}", origin);
                     return;
                 }
             }

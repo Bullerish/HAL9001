@@ -16,6 +16,23 @@ public enum CapType
     Date,   // a calendar date
 }
 
+/// <summary>
+/// Whether a capability's answer is a pure function of its input (<see cref="Stable"/>) or depends
+/// on the ambient date/time (<see cref="Live"/>). Only Stable capabilities auto-derive cached facts;
+/// Live ones recompute every call against the injectable <see cref="Clock"/>. This split is what
+/// structurally prevents stale cached answers — unstable answers are never value-cached.
+/// </summary>
+public enum StabilityKind { Stable, Live }
+
+/// <summary>Parse/name helpers for <see cref="StabilityKind"/>; anything unrecognized → Stable, so
+/// pre-stability handlers grandfather as Stable (the existing handlers are all pure functions).</summary>
+public static class StabilityKinds
+{
+    public static StabilityKind Parse(string? s) =>
+        (s ?? "").Trim().Equals("live", StringComparison.OrdinalIgnoreCase) ? StabilityKind.Live : StabilityKind.Stable;
+    public static string Name(StabilityKind k) => k.ToString();
+}
+
 /// <summary>Helpers for the small type set: parse a name, describe it to the LLM, and do the
 /// lightweight boundary parse-check that catches an obvious input mismatch.</summary>
 public static class CapTypes

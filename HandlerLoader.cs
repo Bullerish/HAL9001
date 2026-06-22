@@ -32,10 +32,13 @@ public static class HandlerLoader
             // handlers are grandfathered as String -> String and keep working unchanged.
             CapType inType = CapTypes.Parse(ExtractField(source, "intype"));
             CapType outType = CapTypes.Parse(ExtractField(source, "outtype"));
+            // Stability from the header; absent (pre-stability handlers) → Stable, grandfathering
+            // the existing pure-function handlers (they may auto-derive cached facts, which is safe).
+            StabilityKind stability = StabilityKinds.Parse(ExtractField(source, "stability"));
 
             // RuntimeCompiler registers the capability on success; on failure it prints the
             // CS#### errors itself. A bad file is skipped, never fatal.
-            if (RuntimeCompiler.TryCompileAndLoad(name, description, example, source, registry, out _, out _, inType, outType))
+            if (RuntimeCompiler.TryCompileAndLoad(name, description, example, source, registry, out _, out _, inType, outType, stability))
                 Console.WriteLine($"  [load] {Path.GetFileName(file)} -> '{name}'");
             else
                 Console.WriteLine($"  [load] skipped {Path.GetFileName(file)} (did not compile)");

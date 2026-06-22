@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace HAL9001;
@@ -75,16 +76,27 @@ public sealed class HandlerGenerator
     public async Task<GeneratedHandler?> GenerateAsync(
         string name, string description, string exampleRequest, CancellationToken ct = default,
         bool persist = true,
-        CapType inputType = CapType.String, CapType outputType = CapType.String)
+        CapType inputType = CapType.String, CapType outputType = CapType.String,
+        StabilityKind stability = StabilityKind.Stable)
     {
         // The "general, not one-off" rules live in the system prompt; this carries the
         // specific capability to build plus a concrete example AND its declared types. The types
         // tell the LLM exactly what to parse from the input and what to produce — this is what
         // makes a handler robust to phrasing (e.g. an Int handler copes with "7th").
+        // For a LIVE capability, the date/time MUST come through the injectable HAL9001.Clock seam
+        // (never DateTime.Now directly), so validation can substitute a controlled "today".
+        string liveRules = stability == StabilityKind.Live
+            ? "\nThis capability is LIVE — its answer depends on the current date/time. To read the " +
+              "current date/time you MUST use the host clock: HAL9001.Clock.Today (a DateTime — the " +
+              "current date), HAL9001.Clock.Now, or HAL9001.Clock.UtcNow. Do NOT call DateTime.Now/" +
+              "Today/UtcNow directly (the host injects a controlled clock during testing). Compute the " +
+              "answer from Clock.* so it is correct for ANY 'today'.\n"
+            : "";
         string basePrompt =
             $"Build this capability:\n  name: {name}\n  description: {description}\n" +
             $"  input type: {CapTypes.Name(inputType)} — {CapTypes.Hint(inputType)}\n" +
-            $"  output type: {CapTypes.Name(outputType)} — {CapTypes.Hint(outputType)}\n\n" +
+            $"  output type: {CapTypes.Name(outputType)} — {CapTypes.Hint(outputType)}\n" +
+            $"  stability: {StabilityKinds.Name(stability)}\n" + liveRules + "\n" +
             $"It must handle the whole class of such requests, not just this example.\n" +
             $"Parse the input as {CapTypes.Name(inputType)} robustly; if the input has no valid " +
             $"{CapTypes.Name(inputType)}, return a short, clear message saying so.\n" +
@@ -120,30 +132,34 @@ public sealed class HandlerGenerator
             PrintSource(attempt == 1 ? "generated source" : "regenerated source", source);
 
             // 1) Must compile.
-            if (!RuntimeCompiler.TryCompileAndLoad(name, description, exampleRequest, source, _registry, out IHandler? handler, out string? compileErrors, inputType, outputType))
+            if (!RuntimeCompiler.TryCompileAndLoad(name, description, exampleRequest, source, _registry, out IHandler? handler, out string? compileErrors, inputType, outputType, stability))
             {
                 Console.WriteLine("  [generate] didn't compile — feeding the errors back for a fix...");
                 priorFailure = compileErrors;
                 continue;
             }
 
-            // 2) Must actually RUN. Trial it on the example so we never push code that
-            //    compiles but throws at runtime.
-            string? runtimeError = await TrialRunAsync(handler!, exampleRequest);
+            // 2) Must actually RUN. For a STABLE capability, trial it once on the example (as before).
+            //    For a LIVE capability, validate the DATE-MATH by injecting known dates and asserting
+            //    the per-date correct output to the 5b majority floor (catches off-by-one, past-date
+            //    handling, etc.) — without asserting a fixed real-world answer that's wrong tomorrow.
+            string? runtimeError = stability == StabilityKind.Live
+                ? await ValidateLiveAsync(handler!, name, description, exampleRequest, ct)
+                : await TrialRunAsync(handler!, exampleRequest);
             if (runtimeError is not null)
             {
-                Console.WriteLine($"  [generate] compiled but threw at runtime ({runtimeError}) — feeding it back for a fix...");
-                priorFailure = "It compiled but threw at runtime on the example: " + runtimeError;
+                Console.WriteLine($"  [generate] validation failed ({runtimeError}) — feeding it back for a fix...");
+                priorFailure = runtimeError;
                 continue;
             }
 
-            // Compiles AND runs. Persist + push ONLY for the real answer path; a rung-5a
+            // Compiles AND validates. Persist + push ONLY for the real answer path; a rung-5a
             // candidate (persist:false) is generated and held locally — NOT pushed — so N
             // competing nodes don't spam the repo with rival implementations (only 5b's winner
             // should propagate). We return the SOURCE alongside the handler so the swarm can push
             // the exact winning implementation later (rung 5b) without regenerating it.
             if (persist)
-                PersistAndPush(name, description, exampleRequest, source, inputType, outputType);
+                PersistAndPush(name, description, exampleRequest, source, inputType, outputType, stability);
             return new GeneratedHandler(handler!, source);
         }
 
@@ -171,14 +187,63 @@ public sealed class HandlerGenerator
         }
     }
 
+    // Validate a LIVE capability by INJECTING known dates and checking the per-date computed output
+    // (the date-math), to the 5b majority floor. Returns null on pass, or a failure string to feed
+    // back. The injected "today" flows to the handler via HAL9001.Clock (AsyncLocal → Task.Run).
+    private async Task<string?> ValidateLiveAsync(IHandler handler, string name, string description, string exampleRequest, CancellationToken ct)
+    {
+        const string sys = """
+            A LIVE capability depends on TODAY's date. Write 2-3 test cases that pin "today" to a
+            specific date and assert the correct answer FOR that date (compute it correctly yourself).
+            Output ONLY JSON: an array of {"date":"<yyyy-MM-dd as today>","input":"<request>","expected":"<key substring of the correct answer for that today>"}.
+            e.g. days until Christmas: [{"date":"2026-12-24","input":"days until christmas","expected":"1"},
+            {"date":"2026-12-25","input":"days until christmas","expected":"0"}]
+            """;
+        var tests = new List<(DateTime Date, string Input, string Expected)>();
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(CleanSource(await _client.CompleteAsync(sys, $"Capability: {name} — {description}\nExample: \"{exampleRequest}\"\nJSON:", ct)));
+            foreach (JsonElement e in doc.RootElement.EnumerateArray())
+            {
+                string ds = e.TryGetProperty("date", out var d) ? d.GetString() ?? "" : "";
+                string ip = e.TryGetProperty("input", out var i) ? i.GetString() ?? "" : "";
+                string ex = e.TryGetProperty("expected", out var x) ? x.GetString() ?? "" : "";
+                if (DateTime.TryParse(ds, out DateTime dt) && ip.Length > 0 && ex.Length > 0)
+                    tests.Add((dt, ip, ex));
+                if (tests.Count == 4) break;
+            }
+        }
+        catch { /* fall through to the empty-tests check */ }
+
+        if (tests.Count == 0) return "could not generate date-injected test cases to validate the live capability";
+
+        int passed = 0;
+        foreach (var (date, input, expected) in tests)
+        {
+            string got;
+            Clock.Injected = date;                          // inject controlled "today" (flows into Task.Run)
+            try { got = await Task.Run(() => handler.Handle(input)).WaitAsync(TimeSpan.FromSeconds(20)); }
+            catch (Exception ex) { got = $"(error: {ex.GetBaseException().Message})"; }
+            finally { Clock.Injected = null; }              // back to the real clock
+            bool ok = got.Contains(expected, StringComparison.OrdinalIgnoreCase);
+            if (ok) passed++;
+            Console.WriteLine($"  [generate] live-validate: today={date:yyyy-MM-dd} \"{input}\" -> \"{got}\" (expected \"{expected}\") {(ok ? "PASS" : "FAIL")}");
+        }
+        // Reuse the shared 5b quality floor (majority of the injected-date cases must compute right).
+        return AgentCore.ClearsQualityFloor(passed, tests.Count)
+            ? null
+            : $"live date-math validation: only {passed}/{tests.Count} injected-date cases were correct";
+    }
+
     /// <summary>
     /// Push an EXTERNALLY-chosen implementation (rung 5b: the deliberation winner). Same write +
     /// commit + push as the normal answer path — used by the coordinator to propagate exactly the
     /// one winning candidate's source, after the losers were generated locally and discarded.
     /// </summary>
     public void PersistShared(string name, string description, string exampleRequest, string source,
-        CapType inputType = CapType.String, CapType outputType = CapType.String)
-        => PersistAndPush(name, description, exampleRequest, source, inputType, outputType);
+        CapType inputType = CapType.String, CapType outputType = CapType.String,
+        StabilityKind stability = StabilityKind.Stable)
+        => PersistAndPush(name, description, exampleRequest, source, inputType, outputType, stability);
 
     // =====================================================================================
     // PERSIST + PUSH (Step 4, push-half)
@@ -189,7 +254,8 @@ public sealed class HandlerGenerator
     // fatal: the handler is already live in memory for this session.
     // =====================================================================================
     private void PersistAndPush(string name, string description, string exampleRequest, string source,
-        CapType inputType = CapType.String, CapType outputType = CapType.String)
+        CapType inputType = CapType.String, CapType outputType = CapType.String,
+        StabilityKind stability = StabilityKind.Stable)
     {
         if (_git is null)
         {
@@ -220,7 +286,8 @@ public sealed class HandlerGenerator
                 $"// hal9001:description={OneLine(description)}\n" +
                 $"// hal9001:request={OneLine(exampleRequest)}\n" +
                 $"// hal9001:intype={CapTypes.Name(inputType)}\n" +
-                $"// hal9001:outtype={CapTypes.Name(outputType)}\n";
+                $"// hal9001:outtype={CapTypes.Name(outputType)}\n" +
+                $"// hal9001:stability={StabilityKinds.Name(stability)}\n";
             File.WriteAllText(fullPath, header + source);
             Console.WriteLine($"  [sync] wrote handlers/{fileName}");
 

@@ -9,7 +9,8 @@ namespace HAL9001;
 /// </summary>
 public sealed record Capability(
     string Name, string Description, string ExampleRequest, IHandler Handler,
-    CapType InputType = CapType.String, CapType OutputType = CapType.String);
+    CapType InputType = CapType.String, CapType OutputType = CapType.String,
+    StabilityKind Stability = StabilityKind.Stable);
 
 /// <summary>
 /// In-memory catalog of live capabilities, keyed by name.
@@ -35,9 +36,10 @@ public sealed class HandlerRegistry
     /// capability is compiled, it overwrites the old one under the same name.
     /// </summary>
     public void Register(string name, string description, string exampleRequest, IHandler handler,
-        CapType inputType = CapType.String, CapType outputType = CapType.String)
+        CapType inputType = CapType.String, CapType outputType = CapType.String,
+        StabilityKind stability = StabilityKind.Stable)
     {
-        _capabilities[name] = new Capability(name, description, exampleRequest, handler, inputType, outputType);
+        _capabilities[name] = new Capability(name, description, exampleRequest, handler, inputType, outputType, stability);
     }
 
     /// <summary>Try to find a handler by capability name.</summary>
