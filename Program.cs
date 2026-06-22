@@ -70,6 +70,18 @@ switch (args[0].ToLowerInvariant())
         break;
     }
 
+    // identity → print the hive's persisted self (name/born/concept/persona) from the shared store.
+    // Standalone (no swarm), so it proves the identity PERSISTS ACROSS RESTARTS and is the SAME self
+    // every node reads. Needs the TURSO_* env vars.
+    case "identity":
+    {
+        var store = new IdentityStore(TursoClient.FromEnvironment(), null);
+        HiveIdentity? id = await store.LoadAsync();
+        if (id is null) Console.WriteLine("No persisted identity (no hive configured, or the hive hasn't been born yet — run the agent/swarm once with TURSO_* set).");
+        else Console.WriteLine($"I am {id.Name}.\n  born:    {id.Born}  (by {id.CreatedBy})\n  concept: {id.Concept}\n  persona: {id.Persona}");
+        break;
+    }
+
     // demo → Step 1 Roslyn compile-and-load demo
     case "demo":
         RoslynDemo.Run();
@@ -96,5 +108,6 @@ switch (args[0].ToLowerInvariant())
         Console.WriteLine("  HAL9001 swarm <port> [ports]  Swarm-agent: mesh + ask-the-swarm via coordinator");
         Console.WriteLine("  HAL9001 kernel [size] [n]     Kernel-opt search: generate/verify/benchmark/rank matmul");
         Console.WriteLine("  HAL9001 timeline [n]          Replay the hive's episodic memory (needs TURSO_* env vars)");
+        Console.WriteLine("  HAL9001 identity              Show the hive's persistent identity (needs TURSO_* env vars)");
         break;
 }

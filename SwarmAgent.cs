@@ -103,13 +103,14 @@ public static class SwarmAgent
         AnthropicClient? client = AnthropicClient.FromEnvironment();
         var core = new AgentCore(client);
         core.LoadSharedHandlers();
-        // Bootstrap the shared knowledge store (facts) — every node connects to the same Turso DB,
-        // so a fact stored by one node is known to all. No-op if Turso isn't configured.
-        try { await core.EnsureHiveAsync(); }
-        catch (Exception ex) { Console.WriteLine($"[hive] knowledge store unavailable: {ex.Message}"); }
 
         await using var node = new SwarmNode(myPort);
         core.Events.Actor = node.Id; // episodic memory: this node's events are stamped with its identity
+        // Bootstrap the shared hive (facts + episodic memory + the hive's persistent identity) — every
+        // node connects to the same Turso DB, so a fact/event/identity from one node is shared by all.
+        // Run AFTER the actor is set so an identity BIRTH is attributed to this node. No-op without Turso.
+        try { await core.EnsureHiveAsync(); }
+        catch (Exception ex) { Console.WriteLine($"[hive] knowledge store unavailable: {ex.Message}"); }
         var pending = new ConcurrentDictionary<string, string>(); // reqId -> origin asker (coordinator role: in-progress guard)
         int roundRobin = 0;
 
@@ -714,9 +715,11 @@ public static class SwarmAgent
         Console.WriteLine();
         Console.WriteLine($"Swarm-agent {node.Id}." + (client is null ? " (no API key — answers with stubs.)" : "")
             + (core.HasHive ? " [hive knowledge: on]" : " [hive knowledge: off]"));
+        if (core.Identity is not null)
+            Console.WriteLine($"I am {core.Identity.Name} — {core.Identity.Concept} (born {core.Identity.Born[..Math.Min(10, core.Identity.Born.Length)]})");
         Console.WriteLine("Commands:  <question>   ask the swarm (assign-to-one)   |   deliberate <question>  fan-out: every node competes");
         Console.WriteLine("           compose <question>  chain existing typed capabilities   |   remember <fact>  store knowledge in the hive");
-        Console.WriteLine("           timeline [n]  replay the hive's episodic memory   |   @<port> <msg>  direct");
+        Console.WriteLine("           identity  who the hive is   |   timeline [n]  replay its episodic memory   |   @<port> <msg>  direct");
         Console.WriteLine("           peers   |   coordinator   |   pause <secs>   |   exit");
         Console.WriteLine();
 
@@ -732,6 +735,15 @@ public static class SwarmAgent
             if (line.Length == 0) continue;
             if (line.Equals("peers", StringComparison.OrdinalIgnoreCase)) { node.PrintPeers(); continue; }
             if (line.Equals("coordinator", StringComparison.OrdinalIgnoreCase)) { lock (stateLock) Console.WriteLine($"coordinator = {coordinator} (term {term})"); continue; }
+            if (line.Equals("identity", StringComparison.OrdinalIgnoreCase) || line.Equals("whoami", StringComparison.OrdinalIgnoreCase))
+            {
+                // Print the hive's PERSISTED identity (the raw row, no LLM) — every node should show
+                // the SAME name/birth, proving one shared self across the swarm.
+                HiveIdentity? id = core.Identity;
+                if (id is null) Console.WriteLine("[identity] no persisted identity (no hive configured, or not born yet).");
+                else Console.WriteLine($"[identity] {id.Name} — born {id.Born} by {id.CreatedBy}\n  concept: {id.Concept}\n  persona: {id.Persona}");
+                continue;
+            }
             if (line.Equals("timeline", StringComparison.OrdinalIgnoreCase) || line.StartsWith("timeline ", StringComparison.OrdinalIgnoreCase))
             {
                 // REPLAY the hive's episodic memory — the shared autobiography all nodes write to.

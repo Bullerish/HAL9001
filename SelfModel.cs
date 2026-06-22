@@ -45,25 +45,32 @@ public sealed class SelfModel
     private readonly HandlerRegistry _registry;
     private readonly TursoClient? _turso;
     private readonly EventLog _events;
+    private readonly Func<HiveIdentity?> _identity; // the hive's persisted self (name/concept/persona)
+    private readonly AnthropicClient? _client;      // for the persona voice pass (identity topic)
 
-    public SelfModel(HandlerRegistry registry, TursoClient? turso, EventLog events)
+    public SelfModel(HandlerRegistry registry, TursoClient? turso, EventLog events, Func<HiveIdentity?> identity, AnthropicClient? client)
     {
         _registry = registry;
         _turso = turso;
         _events = events;
+        _identity = identity;
+        _client = client;
     }
 
     /// <summary>Answer a self-referential question by gathering the relevant real state and rendering
-    /// it. Only the state each topic needs is fetched (introspection is rare, not the hot path).</summary>
+    /// it AS the hive's persisted identity. Only the state each topic needs is fetched (introspection
+    /// is rare, not the hot path). The factual topics stay deterministic (exact, grounded) but speak
+    /// in the named first person; the identity topic gets a persona voice pass over the same facts.</summary>
     public async Task<string> DescribeAsync(SelfTopic topic)
     {
+        HiveIdentity id = _identity() ?? IdentityStore.Default; // a name always exists, even with no hive
         return topic switch
         {
-            SelfTopic.Capabilities => RenderCapabilities(),
-            SelfTopic.Knowledge => RenderKnowledge(await FactsAsync()),
-            SelfTopic.History => RenderHistory(await _events.RecentAsync(8)),
-            SelfTopic.Scale => RenderScale(_registry.Count, await FactsAsync(), await _events.StatsAsync()),
-            _ => RenderIdentity(_registry.Count, await FactsAsync(), await _events.StatsAsync(), await _events.RecentAsync(1)),
+            SelfTopic.Capabilities => RenderCapabilities(id.Name),
+            SelfTopic.Knowledge => RenderKnowledge(id.Name, await FactsAsync()),
+            SelfTopic.History => RenderHistory(id.Name, await _events.RecentAsync(8)),
+            SelfTopic.Scale => RenderScale(id.Name, _registry.Count, await FactsAsync(), await _events.StatsAsync()),
+            _ => await VoiceAsync(id, RenderIdentityFacts(id, _registry.Count, await FactsAsync(), await _events.StatsAsync(), await _events.RecentAsync(1))),
         };
     }
 
@@ -92,45 +99,45 @@ public sealed class SelfModel
 
     // ── rendering (pure functions of the gathered state) ───────────────────────────────────
 
-    private string RenderCapabilities()
+    private string RenderCapabilities(string name)
     {
         var caps = _registry.Catalog();
         if (caps.Count == 0)
-            return "I can't do anything yet — I have no capabilities. Ask me to do something and I'll write the tool for it.";
+            return $"I'm {name}, and I can't do anything yet — no capabilities. Ask me to do something and I'll write the tool for it.";
         var sb = new StringBuilder();
-        sb.AppendLine($"I can do {caps.Count} thing(s) — each one a tool I wrote and compiled myself:");
+        sb.AppendLine($"I'm {name}. I can do {caps.Count} thing(s) — each one a tool I wrote and compiled myself:");
         foreach (Capability c in caps.OrderBy(c => c.Name))
             sb.AppendLine($"  • {c.Name} [{CapTypes.Name(c.InputType)}→{CapTypes.Name(c.OutputType)}, {StabilityKinds.Name(c.Stability)}] — {c.Description}");
         return sb.ToString().TrimEnd();
     }
 
-    private static string RenderKnowledge(FactsView f)
+    private static string RenderKnowledge(string name, FactsView f)
     {
-        if (f.HiveOff) return "I have no shared knowledge store configured, so I'm not holding any facts right now.";
-        if (f.Total == 0) return "I don't know any facts yet — nothing has been remembered or worked out.";
+        if (f.HiveOff) return $"I'm {name}, but I have no shared knowledge store configured, so I'm not holding any facts right now.";
+        if (f.Total == 0) return $"I'm {name}, and I don't know any facts yet — nothing has been remembered or worked out.";
         var sb = new StringBuilder();
-        sb.AppendLine($"I know {f.Total} fact(s) — {f.Explicit} I was told, {f.Derived} I worked out for myself:");
+        sb.AppendLine($"I'm {name}. I know {f.Total} fact(s) — {f.Explicit} I was told, {f.Derived} I worked out for myself:");
         foreach (var (key, value, source) in f.Sample)
             sb.AppendLine($"  • {key} = {value} ({source})");
         if (f.Total > f.Sample.Count) sb.AppendLine($"  …and {f.Total - f.Sample.Count} more.");
         return sb.ToString().TrimEnd();
     }
 
-    private static string RenderHistory(IReadOnlyList<HiveEvent> recent)
+    private static string RenderHistory(string name, IReadOnlyList<HiveEvent> recent)
     {
-        if (recent.Count == 0) return "I don't remember doing anything yet (no persistent memory, or nothing recorded).";
+        if (recent.Count == 0) return $"I'm {name}, and I don't remember doing anything yet (no persistent memory, or nothing recorded).";
         var sb = new StringBuilder();
-        sb.AppendLine("Lately I have:");
+        sb.AppendLine($"I'm {name}. Lately I have:");
         // RecentAsync returns oldest-first; show newest-first for a natural "recently" reading.
         foreach (HiveEvent e in recent.Reverse())
             sb.AppendLine($"  • {e.Summary}  ({e.Kind}, {Short(e.Timestamp)}, {e.Actor})");
         return sb.ToString().TrimEnd();
     }
 
-    private static string RenderScale(int capCount, FactsView f, EventStats s)
+    private static string RenderScale(string name, int capCount, FactsView f, EventStats s)
     {
         var sb = new StringBuilder();
-        sb.Append($"In numbers: {capCount} capabilit{(capCount == 1 ? "y" : "ies")}, {f.Total} fact(s), {s.Total} recorded event(s)");
+        sb.Append($"I'm {name}. In numbers: {capCount} capabilit{(capCount == 1 ? "y" : "ies")}, {f.Total} fact(s), {s.Total} recorded event(s)");
         if (s.Earliest is not null) sb.Append($" since {Short(s.Earliest)} ({Age(s.Earliest)})");
         sb.Append('.');
         if (s.ByKind.Count > 0)
@@ -138,22 +145,49 @@ public sealed class SelfModel
         return sb.ToString();
     }
 
-    private static string RenderIdentity(int capCount, FactsView f, EventStats s, IReadOnlyList<HiveEvent> newest)
+    // The grounded facts for the identity topic — name + persisted self-concept + real counts/history.
+    // This is the source of truth that the persona voice pass (below) restyles without altering.
+    private static string RenderIdentityFacts(HiveIdentity id, int capCount, FactsView f, EventStats s, IReadOnlyList<HiveEvent> newest)
     {
         var sb = new StringBuilder();
-        sb.Append("I am HAL9001 — a self-extending agent: when I'm asked something I can't do, I write the code to do it, ");
-        sb.Append("compile it while I run, and keep it. ");
-        sb.Append($"Right now I hold {capCount} self-written capabilit{(capCount == 1 ? "y" : "ies")}");
+        sb.Append($"My name is {id.Name}.");
+        if (id.Concept.Length > 0) sb.Append($" {id.Concept}");
+        sb.Append(" I am a self-extending agent: when I'm asked something I can't do, I write the code to do it, compile it while I run, and keep it.");
+        sb.Append($" I currently hold {capCount} self-written capabilit{(capCount == 1 ? "y" : "ies")}");
         if (!f.HiveOff) sb.Append($" and {f.Total} fact(s) ({f.Explicit} told, {f.Derived} self-derived)");
         sb.Append('.');
         if (s.Total > 0)
         {
             sb.Append($" I remember {s.Total} event(s) of my own history");
-            if (s.Earliest is not null) sb.Append($", stretching back to {Short(s.Earliest)} ({Age(s.Earliest)})");
+            if (s.Earliest is not null) sb.Append($", going back to {Short(s.Earliest)} ({Age(s.Earliest)})");
             sb.Append('.');
         }
         if (newest.Count > 0) sb.Append($" Most recently, I {Lower(newest[^1].Summary.TrimEnd('.', ' '))}.");
         return sb.ToString();
+    }
+
+    // The PERSONA VOICE pass (the heart of this bite): restyle the grounded identity facts in the
+    // hive's own voice. The LLM is given the facts and STRICTLY forbidden from changing any of them —
+    // so the self stays accurate; only the tone becomes the hive's. Falls back to the plain facts with
+    // no key or on any error (the named, grounded version is always a safe answer).
+    private async Task<string> VoiceAsync(HiveIdentity id, string facts)
+    {
+        if (_client is null) return facts;
+        string sys = $$"""
+            You ARE {{id.Name}}. Self-concept: {{id.Concept}}. Your voice/persona: {{id.Persona}}.
+            You will be given TRUE statements about your own current state. Restyle them into your own
+            first-person voice (2-4 sentences), beginning with your name. STRICT RULES:
+              • Include every fact and number exactly as given — change no count, name, or date.
+              • Do NOT add any fact, event, cause, motive, or claim that is not in the statements
+                below. In particular, never explain what happened at a date/time unless it is stated.
+              • You may only change word choice, sentence flow, and tone — never the substance.
+            """;
+        try
+        {
+            string voiced = (await _client.CompleteAsync(sys, $"Facts about me right now:\n{facts}\n\nSpeak as yourself:")).Trim();
+            return voiced.Length > 0 ? voiced : facts;
+        }
+        catch { return facts; }
     }
 
     // ── small formatting helpers ───────────────────────────────────────────────────────────

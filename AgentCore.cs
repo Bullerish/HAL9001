@@ -28,7 +28,12 @@ public sealed class AgentCore
     private readonly CapabilityRouter? _router;
     private readonly HandlerGenerator? _generator;
     private readonly TursoClient? _turso;   // the hive's shared knowledge store (facts), or null if no creds
+    private readonly IdentityStore _identityStore; // the hive's persistent self (name/born/concept/persona)
     private readonly SelfModel _selfModel;  // answers "what am I?" from real state (registry/facts/events)
+
+    /// <summary>The hive's persistent identity (name, birth, self-concept, persona), loaded/born at
+    /// <see cref="EnsureHiveAsync"/>. Null until then, or when there's no hive.</summary>
+    public HiveIdentity? Identity { get; private set; }
 
     // One gate for the whole answer path. The registry and generator are shared mutable state;
     // serializing answer production keeps two concurrent callers from interleaving a half-built
@@ -55,7 +60,10 @@ public sealed class AgentCore
         Git = GitSync.Discover();
         _turso = TursoClient.FromEnvironment();
         Events = new EventLog(_turso, "single"); // shares the hive store; actor overridden by the swarm
-        _selfModel = new SelfModel(Registry, _turso, Events); // grounded introspection over real state
+        _identityStore = new IdentityStore(_turso, client); // the hive's persistent, self-chosen identity
+        // Grounded introspection over real state — now speaking as the hive's persisted identity, in
+        // its persona's voice (the voice pass uses the LLM; facts always come from state).
+        _selfModel = new SelfModel(Registry, _turso, Events, () => Identity, client);
         if (client is not null)
         {
             _generator = new HandlerGenerator(client, Registry, Git);
@@ -100,6 +108,11 @@ public sealed class AgentCore
         catch { /* column already present */ }
         // Bootstrap episodic memory alongside knowledge — the events table lives in the same hive.
         await Events.EnsureAsync();
+        // Bootstrap + BIRTH the hive's persistent identity (once, atomically). After this, every node
+        // and every restart shares the same self. (Birth records the right actor because the swarm
+        // sets Events.Actor before calling EnsureHiveAsync.)
+        await _identityStore.EnsureTableAsync();
+        Identity = await _identityStore.EnsureBornAsync(Events);
     }
 
     /// <summary>
