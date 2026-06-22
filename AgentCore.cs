@@ -40,6 +40,11 @@ public sealed class AgentCore
     /// <summary>The git repo handlers are synced through, or null if we're not inside one.</summary>
     public GitSync? Git { get; }
 
+    /// <summary>The hive's autobiographical event log (episodic memory). Shares the same Turso store
+    /// as facts; significant acts on this answer path append to it. The host sets <c>Events.Actor</c>
+    /// (the swarm to its node id; the lone agent leaves the default "single").</summary>
+    public EventLog Events { get; }
+
     /// <summary>True when an API key was available — i.e. we can actually route + generate.</summary>
     public bool HasLlm => _router is not null && _generator is not null;
 
@@ -48,6 +53,7 @@ public sealed class AgentCore
         _client = client;
         Git = GitSync.Discover();
         _turso = TursoClient.FromEnvironment();
+        Events = new EventLog(_turso, "single"); // shares the hive store; actor overridden by the swarm
         if (client is not null)
         {
             _generator = new HandlerGenerator(client, Registry, Git);
@@ -90,6 +96,8 @@ public sealed class AgentCore
         // ALTER throws "duplicate column" when the column already exists (fresh table) — ignore that.
         try { await _turso.ExecuteAsync("ALTER TABLE facts ADD COLUMN source TEXT NOT NULL DEFAULT 'explicit'"); }
         catch { /* column already present */ }
+        // Bootstrap episodic memory alongside knowledge — the events table lives in the same hive.
+        await Events.EnsureAsync();
     }
 
     /// <summary>
@@ -122,6 +130,8 @@ public sealed class AgentCore
         await _turso.ExecuteAsync(
             "INSERT OR REPLACE INTO facts (key, value, type, source, updated_at) VALUES (?, ?, ?, 'explicit', ?)",
             key, value, CapTypes.Name(type), DateTime.UtcNow.ToString("o"));
+        await Events.AppendAsync("fact-remembered",
+            $"remembered '{key}' = {value} ({CapTypes.Name(type)})", key);
         return new Fact(key, value, type, "explicit");
     }
 
@@ -143,6 +153,8 @@ public sealed class AgentCore
                 "INSERT OR REPLACE INTO facts (key, value, type, source, updated_at) VALUES (?, ?, ?, 'derived', ?)",
                 key, value, CapTypes.Name(type), DateTime.UtcNow.ToString("o"));
             Console.WriteLine($"  [knowledge] derived fact '{key}' = {value} ({CapTypes.Name(type)}) from stable '{fromCapability}' — cached");
+            await Events.AppendAsync("fact-derived",
+                $"derived '{key}' = {value} ({CapTypes.Name(type)}) from stable '{fromCapability}'", key);
         }
         catch (Exception ex) { Console.WriteLine($"  [knowledge] could not derive fact: {ex.Message}"); }
     }
@@ -250,6 +262,11 @@ public sealed class AgentCore
                 if (gen is null)
                     return AnswerResult.GenerationFailed("(couldn't build a working handler)");
                 handler = gen.Handler;
+                // EPISODIC MEMORY: commissioning a new capability is a significant act — the hive
+                // learned a new skill. Record it (best-effort; never blocks the answer).
+                await Events.AppendAsync("capability-commissioned",
+                    $"commissioned '{capName}' [{CapTypes.Name(inType)}→{CapTypes.Name(outType)}, {StabilityKinds.Name(stability)}]: {capDesc}",
+                    capName);
             }
 
             // Boundary parse-check (typed-capabilities rung): if the input can't possibly hold the

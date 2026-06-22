@@ -57,6 +57,19 @@ switch (args[0].ToLowerInvariant())
         break;
     }
 
+    // timeline [n] → replay the hive's episodic memory (its autobiographical event log) from the
+    // shared Turso store. Standalone (no swarm needed), so it proves events SURVIVE RESTARTS: write
+    // events in one process, read them back in a fresh one. Needs the TURSO_* env vars.
+    case "timeline":
+    {
+        int n = args.Length >= 2 && int.TryParse(args[1], out int cnt) ? cnt : 50;
+        var log = EventLog.FromEnvironment("reader");
+        if (!log.Enabled) { Console.WriteLine("No hive configured — set TURSO_DATABASE_URL + TURSO_AUTH_TOKEN to record/replay episodic memory."); break; }
+        await log.EnsureAsync();
+        EventLog.Print(await log.RecentAsync(n));
+        break;
+    }
+
     // demo → Step 1 Roslyn compile-and-load demo
     case "demo":
         RoslynDemo.Run();
@@ -82,5 +95,6 @@ switch (args[0].ToLowerInvariant())
         Console.WriteLine("  HAL9001 join <host> <port>    Step 2 TCP chat: connect to <host>:<port>");
         Console.WriteLine("  HAL9001 swarm <port> [ports]  Swarm-agent: mesh + ask-the-swarm via coordinator");
         Console.WriteLine("  HAL9001 kernel [size] [n]     Kernel-opt search: generate/verify/benchmark/rank matmul");
+        Console.WriteLine("  HAL9001 timeline [n]          Replay the hive's episodic memory (needs TURSO_* env vars)");
         break;
 }

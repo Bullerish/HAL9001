@@ -86,7 +86,7 @@ public static class KernelOptimizer
                 }
 
                 // ── RANK + REPORT. ─────────────────────────────────────────────────────────────
-                Report(results, refTiming);
+                await Report(results, refTiming, size);
             }
 
             Console.WriteLine($"\n(anti-dead-code-elimination sink = {KernelBenchmark.Sink:E3})");
@@ -192,8 +192,9 @@ public static class KernelOptimizer
         return list;
     }
 
-    /// <summary>Render the ranked table and announce the fastest correct candidate + its source.</summary>
-    private static void Report(List<Result> results, TimingStat refTiming)
+    /// <summary>Render the ranked table and announce the fastest correct candidate + its source,
+    /// and record the winner in the hive's episodic memory.</summary>
+    private static async Task Report(List<Result> results, TimingStat refTiming, int size)
     {
         Console.WriteLine("══════════════════════════════════════════════════════════════════════════════");
         Console.WriteLine(" RESULTS — ranked by benchmark speed (correct candidates first, fastest on top)");
@@ -236,6 +237,18 @@ public static class KernelOptimizer
         Console.WriteLine("\n──────── winning candidate source ────────");
         Console.WriteLine(winner.Source);
         Console.WriteLine("──────────────────────────────────────────");
+
+        // EPISODIC MEMORY: record the kernel winner in the shared hive timeline. The search itself
+        // is single-node (no distribution), but the hive still remembers what it discovered. No-op
+        // without Turso configured.
+        try
+        {
+            var events = EventLog.FromEnvironment($"kernel@{Environment.MachineName}");
+            await events.EnsureAsync();
+            await events.AppendAsync("kernel-winner",
+                $"matmul {size}x{size}: candidate {winner.Index} won @ {winner.Timing.MedianMs:F2} ms ({winSpeedup:F2}x over naive) — {winner.Strategy}");
+        }
+        catch (Exception ex) { Console.WriteLine($"  [memory] could not record kernel winner: {ex.Message}"); }
     }
 
     private static void PrintBanner(int size, int count, int warmup, int iterations)

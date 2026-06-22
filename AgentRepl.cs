@@ -35,6 +35,10 @@ public static class AgentRepl
             // lives in the SHARED AgentCore (same implementation the swarm uses). This REPL keeps
             // only its own concerns: the peer link, the one-round loop guard, and follow-ups.
             var core = new AgentCore(client);
+            // Bootstrap the shared hive (facts + episodic memory) so this lone agent's significant
+            // acts are recorded too. No-op without Turso configured. (Actor stays the default "single".)
+            try { await core.EnsureHiveAsync(); }
+            catch (Exception ex) { Console.WriteLine($"[hive] store unavailable: {ex.Message}"); }
 
             PeerNode? peer = null;
 

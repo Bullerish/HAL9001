@@ -109,6 +109,7 @@ public static class SwarmAgent
         catch (Exception ex) { Console.WriteLine($"[hive] knowledge store unavailable: {ex.Message}"); }
 
         await using var node = new SwarmNode(myPort);
+        core.Events.Actor = node.Id; // episodic memory: this node's events are stamped with its identity
         var pending = new ConcurrentDictionary<string, string>(); // reqId -> origin asker (coordinator role: in-progress guard)
         int roundRobin = 0;
 
@@ -225,6 +226,8 @@ public static class SwarmAgent
             // No coordinator reachable (it died and the election isn't finished) — don't lose the
             // answer: deliver it straight to the asker.
             Console.WriteLine($"[recovery] coordinator unreachable — delivering req {reqId} direct to asker {asker}");
+            // EPISODIC MEMORY: an answer survived a coordinator death by routing home directly.
+            _ = core.Events.AppendAsync("in-flight-recovery", $"req {reqId} delivered direct to {asker} after coordinator loss", reqId);
             await DeliverAsync(reqId, answer, node.Id, asker);
         }
 
@@ -367,6 +370,10 @@ public static class SwarmAgent
                 {
                     Console.WriteLine($"[deliberation {reqId}] winner: {winner.Member} ({passed}/{total}) — pushing '{winner.Capability}' [{CapTypes.Name(comp.InputType)}→{CapTypes.Name(comp.OutputType)}] to the swarm.");
                     bool pushed = core.TryPersistWinner(winner.Capability ?? "capability", winner.Description ?? comp.Question, comp.Question, winner.Source, comp.InputType, comp.OutputType);
+                    // EPISODIC MEMORY: the swarm competed and adopted a best implementation.
+                    _ = core.Events.AppendAsync("deliberation-won",
+                        $"\"{comp.Question}\" → {winner.Member}'s '{winner.Capability}' won ({passed}/{total} tests)" + (pushed ? ", adopted by the swarm" : ""),
+                        winner.Capability);
                     outcome = pushed
                         ? $"WINNER {winner.Member} via '{winner.Capability}' ({passed}/{total} tests) — ADOPTED + propagated to the swarm.\n  answer: {winner.Answer}"
                         : $"WINNER {winner.Member} via '{winner.Capability}' ({passed}/{total} tests) — selected (push unavailable here).\n  answer: {winner.Answer}";
@@ -460,6 +467,8 @@ public static class SwarmAgent
             {
                 Console.WriteLine($"\n[election] WON term {t} with {got}/{Majority()} votes — I am the coordinator now.");
                 Console.Write("> ");
+                // EPISODIC MEMORY: recovery — this node took over leadership of the hive.
+                _ = core.Events.AppendAsync("coordinator-elected", $"{node.Id} elected coordinator for term {t} ({got}/{Majority()} votes)", node.Id);
                 await BroadcastSwarm(new SwarmMsg("leader", Term: t, Coordinator: node.Id));
             }
         }
@@ -637,6 +646,9 @@ public static class SwarmAgent
                         if (candidate == node.Id) { campaign = true; campaignFor = term + 1; }
                     }
                 }
+                // EPISODIC MEMORY: a coordinator death is a significant life event for the hive.
+                if (deadCoord is not null)
+                    _ = core.Events.AppendAsync("node-death-suspected", $"coordinator {deadCoord} suspected dead (candidate {LowestAlive(deadCoord)})", deadCoord);
                 if (deadCoord is not null && !campaign)
                     { Console.WriteLine($"\n[detect] coordinator {deadCoord} SUSPECTED DEAD — awaiting election (candidate {LowestAlive(deadCoord)})."); Console.Write("> "); }
                 if (campaign) { Console.WriteLine($"\n[detect] coordinator {deadCoord} SUSPECTED DEAD — I'm lowest-port alive, starting election."); await BeginCampaignAsync(campaignFor); }
@@ -704,7 +716,8 @@ public static class SwarmAgent
             + (core.HasHive ? " [hive knowledge: on]" : " [hive knowledge: off]"));
         Console.WriteLine("Commands:  <question>   ask the swarm (assign-to-one)   |   deliberate <question>  fan-out: every node competes");
         Console.WriteLine("           compose <question>  chain existing typed capabilities   |   remember <fact>  store knowledge in the hive");
-        Console.WriteLine("           @<port> <msg>  direct   |   peers   |   coordinator   |   pause <secs>   |   exit");
+        Console.WriteLine("           timeline [n]  replay the hive's episodic memory   |   @<port> <msg>  direct");
+        Console.WriteLine("           peers   |   coordinator   |   pause <secs>   |   exit");
         Console.WriteLine();
 
         while (true)
@@ -719,6 +732,17 @@ public static class SwarmAgent
             if (line.Length == 0) continue;
             if (line.Equals("peers", StringComparison.OrdinalIgnoreCase)) { node.PrintPeers(); continue; }
             if (line.Equals("coordinator", StringComparison.OrdinalIgnoreCase)) { lock (stateLock) Console.WriteLine($"coordinator = {coordinator} (term {term})"); continue; }
+            if (line.Equals("timeline", StringComparison.OrdinalIgnoreCase) || line.StartsWith("timeline ", StringComparison.OrdinalIgnoreCase))
+            {
+                // REPLAY the hive's episodic memory — the shared autobiography all nodes write to.
+                if (!core.HasHive) { Console.WriteLine("[memory] no hive configured (set TURSO_DATABASE_URL + TURSO_AUTH_TOKEN)."); continue; }
+                int n = 20;
+                string arg = line.Length > "timeline".Length ? line["timeline".Length..].Trim() : "";
+                if (arg.Length > 0 && int.TryParse(arg, out int parsed)) n = parsed;
+                try { EventLog.Print(await core.Events.RecentAsync(n)); }
+                catch (Exception ex) { Console.WriteLine($"[memory] couldn't read the timeline: {ex.Message}"); }
+                continue;
+            }
             if (line.StartsWith("pause ", StringComparison.OrdinalIgnoreCase) && int.TryParse(line[6..].Trim(), out int secs))
             { lock (stateLock) pausedUntil = DateTime.UtcNow.AddSeconds(secs); Console.WriteLine($"[test] pausing my heartbeats for {secs}s (simulating a hung coordinator)"); continue; }
             if (line.StartsWith("remember ", StringComparison.OrdinalIgnoreCase))
