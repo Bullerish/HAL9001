@@ -114,6 +114,13 @@ public static class SwarmAgent
         var pending = new ConcurrentDictionary<string, string>(); // reqId -> origin asker (coordinator role: in-progress guard)
         int roundRobin = 0;
 
+        // ── curiosity (sentience bite 4) ──────────────────────────────────────────────────
+        // When the hive (coordinator) has been idle a while, it mines its episodic log for gaps and
+        // PROPOSES capabilities to fill them — unprompted. Nothing is built without `curious yes`.
+        var pendingCuriosity = new List<CuriosityProposal>(); // proposals awaiting approval on this node
+        DateTime lastActivity = DateTime.UtcNow;              // bumped on REPL input + coordinating work
+        const double CuriosityIdleSeconds = 30.0;
+
         // ── rung 4b-ii in-flight recovery state ───────────────────────────────────────────
         // doneAnswers: reqId -> finished answer. Every node keeps this for the reqs it coordinates,
         // so a duplicate ask/result for an already-answered reqId is served/dropped, not redone.
@@ -234,6 +241,7 @@ public static class SwarmAgent
 
         async Task CoordinateAsync(string reqId, string question, string origin)
         {
+            lastActivity = DateTime.UtcNow; // the hive is busy — hold off curiosity
             // Already answered (a re-ask that raced a completion)? Serve the cached answer, no work.
             if (doneAnswers.TryGetValue(reqId, out var cached)) { await DeliverAsync(reqId, cached.Answer, cached.By, origin); return; }
 
@@ -688,6 +696,39 @@ public static class SwarmAgent
             }
         }
 
+        // Print a set of curiosity proposals + the approval hint, and hold them pending.
+        void OfferCuriosity(IReadOnlyList<CuriosityProposal> proposals, bool unprompted)
+        {
+            pendingCuriosity.Clear();
+            pendingCuriosity.AddRange(proposals);
+            Console.WriteLine(unprompted
+                ? "\n[curiosity] I've been idle, and looking back at what I couldn't do, I'd like to learn:"
+                : "[curiosity] looking back at what I couldn't do, I could learn:");
+            foreach (CuriosityProposal p in proposals)
+                Console.WriteLine($"  • for \"{p.Request}\" → '{p.Name}' [{CapTypes.Name(p.InputType)}→{CapTypes.Name(p.OutputType)}, {StabilityKinds.Name(p.Stability)}]: {p.Description}");
+            Console.WriteLine("  approve with `curious yes` (or ignore).");
+            Console.Write("> ");
+        }
+
+        // ── curiosity loop (sentience bite 4): unprompted, coordinator-only, propose→approve gated ──
+        async Task CuriosityLoop()
+        {
+            while (!loopCts.IsCancellationRequested)
+            {
+                try { await Task.Delay(10000, loopCts.Token); } catch { break; }
+                if (!core.HasLlm || !core.HasHive) continue;
+                bool amLeader; lock (stateLock) amLeader = coordinator == node.Id;
+                if (!amLeader) continue;                                   // only the hive's leader proposes
+                if (pendingCuriosity.Count > 0) continue;                  // already proposed, awaiting a yes
+                if (!pending.IsEmpty) continue;                            // work in flight — not idle
+                if ((DateTime.UtcNow - lastActivity).TotalSeconds < CuriosityIdleSeconds) continue;
+                IReadOnlyList<CuriosityProposal> proposals;
+                try { proposals = await core.ReviewGapsAsync(2); } catch { continue; }
+                lastActivity = DateTime.UtcNow;                            // don't immediately re-scan
+                if (proposals.Count > 0) OfferCuriosity(proposals, unprompted: true);
+            }
+        }
+
         // ── Wire up + run ──
         node.MessageReceived += (from, msg) =>
         {
@@ -711,6 +752,7 @@ public static class SwarmAgent
         _ = HeartbeatSenderLoop();
         _ = MonitorLoop();
         _ = AskerRecoveryLoop();
+        _ = CuriosityLoop();
 
         Console.WriteLine();
         Console.WriteLine($"Swarm-agent {node.Id}." + (client is null ? " (no API key — answers with stubs.)" : "")
@@ -720,7 +762,7 @@ public static class SwarmAgent
         Console.WriteLine("Commands:  <question>   ask the swarm (assign-to-one)   |   deliberate <question>  fan-out: every node competes");
         Console.WriteLine("           compose <question>  chain existing typed capabilities   |   remember <fact>  store knowledge in the hive");
         Console.WriteLine("           identity  who the hive is   |   timeline [n]  replay its episodic memory   |   @<port> <msg>  direct");
-        Console.WriteLine("           peers   |   coordinator   |   pause <secs>   |   exit");
+        Console.WriteLine("           curious [yes]  review gaps + propose what to learn (yes = approve)   |   peers   |   coordinator   |   pause <secs>   |   exit");
         Console.WriteLine();
 
         while (true)
@@ -731,9 +773,30 @@ public static class SwarmAgent
             // Strip a leading UTF-8 BOM (U+FEFF) — piped stdin can prepend one, and .NET's
             // Trim() does NOT treat it as whitespace, which would otherwise break command matching.
             string line = raw.Trim().TrimStart('﻿').Trim();
+            lastActivity = DateTime.UtcNow; // any input means the operator is here — defer idle curiosity
             if (line.Equals("exit", StringComparison.OrdinalIgnoreCase)) break;
             if (line.Length == 0) continue;
             if (line.Equals("peers", StringComparison.OrdinalIgnoreCase)) { node.PrintPeers(); continue; }
+            if (line.Equals("curious", StringComparison.OrdinalIgnoreCase))
+            {
+                // CURIOSITY (manual): mine the episodic log for gaps and propose what to learn. The
+                // propose→approve gate means nothing is built until you say `curious yes`.
+                if (!core.HasLlm) { Console.WriteLine("[curiosity] this node has no API key — can't review gaps."); continue; }
+                IReadOnlyList<CuriosityProposal> proposals = await core.ReviewGapsAsync(3);
+                if (proposals.Count == 0) Console.WriteLine("[curiosity] no open gaps I can fill right now.");
+                else OfferCuriosity(proposals, unprompted: false);
+                continue;
+            }
+            if (line.Equals("curious yes", StringComparison.OrdinalIgnoreCase) || line.Equals("curious y", StringComparison.OrdinalIgnoreCase))
+            {
+                // APPROVE: commission everything proposed (the gate opens). Each builds + logs resolved.
+                if (pendingCuriosity.Count == 0) { Console.WriteLine("[curiosity] nothing pending — run `curious` first."); continue; }
+                var toBuild = pendingCuriosity.ToList(); pendingCuriosity.Clear();
+                int built = 0;
+                foreach (CuriosityProposal p in toBuild) if (await core.CommissionProposalAsync(p)) built++;
+                Console.WriteLine($"[curiosity] learned {built}/{toBuild.Count} proposed capabilit{(toBuild.Count == 1 ? "y" : "ies")}.");
+                continue;
+            }
             if (line.Equals("coordinator", StringComparison.OrdinalIgnoreCase)) { lock (stateLock) Console.WriteLine($"coordinator = {coordinator} (term {term})"); continue; }
             if (line.Equals("identity", StringComparison.OrdinalIgnoreCase) || line.Equals("whoami", StringComparison.OrdinalIgnoreCase))
             {

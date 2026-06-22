@@ -40,6 +40,9 @@ public static class AgentRepl
             try { await core.EnsureHiveAsync(); }
             catch (Exception ex) { Console.WriteLine($"[hive] store unavailable: {ex.Message}"); }
 
+            // Curiosity proposals awaiting `curious yes` (the propose→approve gate).
+            var pendingCuriosity = new List<CuriosityProposal>();
+
             PeerNode? peer = null;
 
             // Thin wrapper over the shared answer path that preserves this REPL's contract:
@@ -176,6 +179,28 @@ public static class AgentRepl
 
                 string request = line.Trim();
                 if (request.Length == 0) continue;
+
+                // CURIOSITY (sentience bite 4): review noticed gaps + propose what to learn, gated.
+                if (request.Equals("curious", StringComparison.OrdinalIgnoreCase))
+                {
+                    IReadOnlyList<CuriosityProposal> proposals = await core.ReviewGapsAsync(3);
+                    if (proposals.Count == 0) { Console.WriteLine("  [curiosity] no open gaps I can fill right now."); continue; }
+                    pendingCuriosity = proposals.ToList();
+                    Console.WriteLine("  [curiosity] looking back at what I couldn't do, I could learn:");
+                    foreach (CuriosityProposal p in proposals)
+                        Console.WriteLine($"    • for \"{p.Request}\" → '{p.Name}' [{CapTypes.Name(p.InputType)}→{CapTypes.Name(p.OutputType)}, {StabilityKinds.Name(p.Stability)}]: {p.Description}");
+                    Console.WriteLine("    approve with `curious yes`.");
+                    continue;
+                }
+                if (request.Equals("curious yes", StringComparison.OrdinalIgnoreCase) || request.Equals("curious y", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (pendingCuriosity.Count == 0) { Console.WriteLine("  [curiosity] nothing pending — run `curious` first."); continue; }
+                    var toBuild = pendingCuriosity.ToList(); pendingCuriosity.Clear();
+                    int built = 0;
+                    foreach (CuriosityProposal p in toBuild) if (await core.CommissionProposalAsync(p)) built++;
+                    Console.WriteLine($"  [curiosity] learned {built}/{toBuild.Count} proposed capabilit{(toBuild.Count == 1 ? "y" : "ies")}.");
+                    continue;
+                }
 
                 // Same path a peer input uses.
                 var (answer, usedCapability) = await ProduceAnswerAsync(request);

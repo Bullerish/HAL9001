@@ -240,9 +240,15 @@ public sealed class AgentCore
         {
             RouteDecision decision = await _router!.RouteAsync(request, ct);
 
-            // NOT A TASK → conversational reply; touch nothing in the compile/push pipeline.
+            // NOT A TASK → conversational reply; touch nothing in the compile/push pipeline. If the
+            // declined input still LOOKS like a real query (not a one-word greeting), record it as a
+            // GAP — curiosity may later reconsider whether it was actually a buildable task.
             if (decision.Action == RouteAction.Decline)
+            {
+                if (LooksLikeQuery(request))
+                    await Events.AppendAsync("gap-noticed", $"declined \"{request}\" — may be a task I could learn", request);
                 return AnswerResult.Declined(decision.Reply);
+            }
 
             // ABOUT ITSELF → answer from the SELF-MODEL: real state (registry + facts + episodic
             // memory), rendered by code. The LLM only recognized the question as introspective and
@@ -278,10 +284,15 @@ public sealed class AgentCore
                 }
                 catch (Exception ex)
                 {
+                    // GAP: recognized a task but couldn't build the tool — record it for curiosity.
+                    await Events.AppendAsync("gap-noticed", $"couldn't build a capability for \"{request}\" ({ex.Message})", request);
                     return AnswerResult.GenerationFailed($"(generation failed: {ex.Message})");
                 }
                 if (gen is null)
+                {
+                    await Events.AppendAsync("gap-noticed", $"couldn't build a working capability for \"{request}\"", request);
                     return AnswerResult.GenerationFailed("(couldn't build a working handler)");
+                }
                 handler = gen.Handler;
                 // EPISODIC MEMORY: commissioning a new capability is a significant act — the hive
                 // learned a new skill. Record it (best-effort; never blocks the answer).
@@ -327,6 +338,114 @@ public sealed class AgentCore
         {
             _gate.Release();
         }
+    }
+
+    // ── CURIOSITY (sentience ladder, bite 4): notice gaps, propose + commission to fill them ──
+    //
+    // The hive's first real INITIATIVE. Failures it has lived through — questions it declined, tasks
+    // it couldn't build, compositions it couldn't complete — are recorded in the episodic log as
+    // "gap-noticed" events (see AnswerAsync / ComposeAsync). When idle, the hive mines those gaps,
+    // and for each genuine-but-unmet task it PROPOSES a capability to fill it. Nothing is built
+    // without approval (the propose→approve gate); on approval it commissions the tool and logs a
+    // "curiosity-resolved" event ("I couldn't X, so I learned it"). It notices its own ignorance and
+    // acts to fix it — but only with a human's yes, for now.
+
+    // Gaps already proposed this session, so an idle re-scan doesn't keep re-proposing the same ones.
+    private readonly HashSet<string> _proposedGaps = new(StringComparer.OrdinalIgnoreCase);
+
+    // A declined input is worth reconsidering only if it still reads like a real query — not a
+    // one-word greeting ("hi", "thanks"). Cheap heuristic; curiosity's LLM review is the real filter.
+    private static bool LooksLikeQuery(string s)
+        => s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length >= 4 || s.Any(char.IsDigit);
+
+    /// <summary>
+    /// Mine the episodic log for unmet gaps and, for each genuine task a tool could answer, return a
+    /// capability PROPOSAL. Skips gaps already resolved (a prior curiosity-resolved) or already
+    /// proposed this session. Pure proposal — nothing is built here (that's the approve gate). Empty
+    /// without an LLM.
+    /// </summary>
+    public async Task<IReadOnlyList<CuriosityProposal>> ReviewGapsAsync(int maxProposals = 3, int scan = 80)
+    {
+        if (_client is null) return Array.Empty<CuriosityProposal>();
+        IReadOnlyList<HiveEvent> recent = await Events.RecentAsync(scan); // oldest→newest
+
+        // Requests already satisfied by curiosity before — never re-learn them.
+        var resolved = new HashSet<string>(
+            recent.Where(e => e.Kind == "curiosity-resolved" && !string.IsNullOrEmpty(e.Ref)).Select(e => e.Ref!),
+            StringComparer.OrdinalIgnoreCase);
+
+        // Candidate gaps, newest first, de-duplicated, minus resolved/already-proposed.
+        var gaps = recent.Where(e => e.Kind == "gap-noticed" && !string.IsNullOrEmpty(e.Ref))
+                         .Select(e => e.Ref!)
+                         .Reverse()
+                         .Distinct(StringComparer.OrdinalIgnoreCase)
+                         .Where(r => !resolved.Contains(r) && !_proposedGaps.Contains(r))
+                         .ToList();
+
+        var proposals = new List<CuriosityProposal>();
+        foreach (string req in gaps)
+        {
+            if (proposals.Count >= maxProposals) break;
+            _proposedGaps.Add(req); // don't reconsider this gap again this session, build-or-skip
+            CuriosityProposal? p = await ProposeForGapAsync(req);
+            if (p is not null) proposals.Add(p);
+        }
+        return proposals;
+    }
+
+    // Ask the LLM whether a single gap is a buildable task and, if so, propose a general capability.
+    private async Task<CuriosityProposal?> ProposeForGapAsync(string request)
+    {
+        const string sys = """
+            An agent DECLINED or FAILED the request below and recorded it as a GAP. Even if it wasn't
+            phrased as a direct command, decide whether it gestures at a COMPUTABLE DOMAIN a
+            self-contained tool could serve — a computation, a conversion, a lookup over baked data, or
+            a fact about numbers/words/dates (e.g. "roman numerals are cool" → a number→roman-numeral
+            converter; "the fibonacci sequence is neat" → an Nth-Fibonacci tool). If so, propose a
+            GENERAL capability for that whole class. Skip ONLY pure chit-chat, greetings, opinions about
+            the agent, feelings, or anything with no computable task at all. Output ONLY JSON:
+              {"build":true,"name":"<short-kebab-id>","description":"<one line: the general capability>","inputType":"<String|Int|Number|Bool|Date>","outputType":"<String|Int|Number|Bool|Date>","stability":"<stable|live>"}
+              {"build":false}
+            """;
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(StripFences(await _client!.CompleteAsync(sys, $"Request: \"{request}\"\nJSON:")));
+            JsonElement root = doc.RootElement;
+            if (!(root.TryGetProperty("build", out var b) && b.ValueKind == JsonValueKind.True)) return null;
+            string name = (root.TryGetProperty("name", out var n) ? n.GetString() : null)?.Trim() ?? "";
+            string desc = (root.TryGetProperty("description", out var d) ? d.GetString() : null)?.Trim() ?? "";
+            if (name.Length == 0 || desc.Length == 0) return null;
+            string inT = root.TryGetProperty("inputType", out var it) ? it.GetString() ?? "" : "";
+            string outT = root.TryGetProperty("outputType", out var ot) ? ot.GetString() ?? "" : "";
+            string stab = root.TryGetProperty("stability", out var st) ? st.GetString() ?? "" : "";
+            return new CuriosityProposal(request, name, desc, CapTypes.Parse(inT), CapTypes.Parse(outT), StabilityKinds.Parse(stab));
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// APPROVE-AND-ACT: commission the capability a proposal describes (the same generate/compile/
+    /// validate/push path as a normal commission), and on success log a "curiosity-resolved" event —
+    /// "I couldn't X, so I learned it." Returns true if the capability was built.
+    /// </summary>
+    public async Task<bool> CommissionProposalAsync(CuriosityProposal p, CancellationToken ct = default)
+    {
+        if (_generator is null) return false;
+        await _gate.WaitAsync(ct);
+        try
+        {
+            GeneratedHandler? gen;
+            try { gen = await _generator.GenerateAsync(p.Name, p.Description, p.Request, ct, persist: true, p.InputType, p.OutputType, p.Stability); }
+            catch (Exception ex) { Console.WriteLine($"  [curiosity] couldn't learn '{p.Name}': {ex.Message}"); return false; }
+            if (gen is null) { Console.WriteLine($"  [curiosity] couldn't build a working '{p.Name}'."); return false; }
+
+            Console.WriteLine($"  [curiosity] learned '{p.Name}' [{CapTypes.Name(p.InputType)}→{CapTypes.Name(p.OutputType)}, {StabilityKinds.Name(p.Stability)}] to fill the gap: \"{p.Request}\"");
+            await Events.AppendAsync("curiosity-resolved",
+                $"I couldn't answer \"{p.Request}\", so I learned '{p.Name}' [{CapTypes.Name(p.InputType)}→{CapTypes.Name(p.OutputType)}, {StabilityKinds.Name(p.Stability)}] to do it",
+                p.Request);
+            return true;
+        }
+        finally { _gate.Release(); }
     }
 
     // ── rung 5a: deliberation support ────────────────────────────────────────────────────
@@ -505,9 +624,13 @@ public sealed class AgentCore
         // multi-link generation (below); 3+ → clean failure, generate NOTHING. Cap is hard at 2.
         int N = plan.Steps.Count;
         if (missing.Count > 2)
+        {
+            // GAP: a composite needed more than we can auto-fill — record it for curiosity to mine.
+            await Events.AppendAsync("gap-noticed", $"couldn't compose \"{question}\" — {missing.Count} capabilities missing", question);
             return CompositionResult.Failed(
                 $"cannot compose: {missing.Count} capabilities missing " +
                 $"({string.Join(", ", missing.Select(i => $"'{plan.Steps[i]}'"))}) — at most 2 can be generated");
+        }
 
         // Derive the type flowing at chain boundary b (0..N): boundary b is the seam between step b-1
         // and step b. A PRESENT capability on either side pins it authoritatively (its real type); an
@@ -769,6 +892,11 @@ public sealed record AnswerResult(AnswerKind Kind, string Text, string? Capabili
 /// input — not built this bite), and its <see cref="Source"/> provenance ("explicit" = a human
 /// stored it, "derived" = auto-cached from a stable capability). The hive's "noun".</summary>
 public sealed record Fact(string Key, string Value, CapType Type, string Source);
+
+/// <summary>A curiosity PROPOSAL: a capability the hive offers to build to fill a noticed gap.
+/// <see cref="Request"/> is the original unmet input; the rest is the general capability it would
+/// commission (after approval) to answer that whole class.</summary>
+public sealed record CuriosityProposal(string Request, string Name, string Description, CapType InputType, CapType OutputType, StabilityKind Stability);
 
 /// <summary>The coordinator's one-call deliberation setup: the declared input/output types every
 /// candidate must target, plus the test cases (consistent with those types) to score them on.</summary>
