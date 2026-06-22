@@ -47,6 +47,16 @@ switch (args[0].ToLowerInvariant())
         break;
     }
 
+    // kernel [size] [candidates] → Kernel Optimization Search bite 1 (single node):
+    // generate matmul candidates, verify correctness, benchmark, rank. Needs ANTHROPIC_API_KEY.
+    case "kernel":
+    {
+        int size = args.Length >= 2 && int.TryParse(args[1], out int s) ? s : 256;
+        int candidates = args.Length >= 3 && int.TryParse(args[2], out int c) ? c : 5;
+        await KernelOptimizer.RunAsync(size, candidates);
+        break;
+    }
+
     // demo → Step 1 Roslyn compile-and-load demo
     case "demo":
         RoslynDemo.Run();
@@ -71,5 +81,6 @@ switch (args[0].ToLowerInvariant())
         Console.WriteLine("  HAL9001 host <port>           Step 2 TCP chat: listen on <port>");
         Console.WriteLine("  HAL9001 join <host> <port>    Step 2 TCP chat: connect to <host>:<port>");
         Console.WriteLine("  HAL9001 swarm <port> [ports]  Swarm-agent: mesh + ask-the-swarm via coordinator");
+        Console.WriteLine("  HAL9001 kernel [size] [n]     Kernel-opt search: generate/verify/benchmark/rank matmul");
         break;
 }

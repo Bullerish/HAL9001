@@ -93,6 +93,17 @@ Identical instances launched with `swarm` form a full mesh and add coordination 
 - **Stable vs Live capabilities (auto-derivation without staleness)** — every capability is classed at commission time as **Stable** (a pure function of its input — same input → same answer forever, e.g. *is-28-perfect*, *capital-of-a-state*) or **Live** (its answer depends on the **current date/time**, e.g. *days-until-Christmas*). The distinction is structural, not a policy: when a **Stable** capability answers, the agent **auto-derives a fact** — it caches that answer in the hive (marked `derived`, distinct from `explicit`), so the same question is later served straight from knowledge with no handler run. A **Live** capability **never caches** — it **recomputes every call** against the clock, which makes staleness *impossible by construction* (no TTLs, no invalidation). Live capabilities read "now"/"today" through an injectable **`Clock`** seam: the real system clock in production, but a **fixed injected date** under validation — so a Live handler is verified by injecting known dates and asserting the computed answer *for that date* (inject `2025-12-24` → expect `1` day until Christmas), validating the date-math without a moving real-world target. Scope this bite is date/time only — no network/file/other ambient state, and no fact updating/invalidation yet.
 - **Composition** — `compose <question>` answers a multi-step question by chaining typed capabilities: an LLM decomposes it against the live catalog (names + declared types) into an ordered chain, the plan is **displayed before running**, each **seam is type-checked** (step N's output type must equal step N+1's input type), and the chain executes step→step feeding output into input. Up to **two** missing links are **auto-generated** — each type-constrained by its seam position (two adjacent missing links share a consistent invented seam) and validated to the same quality floor as competitive generation — with **all-or-nothing adoption**: only if *every* missing link validates are they all pushed and the chain run; if any fails, nothing is adopted and the catalog is left untouched. **Three or more** missing links fail cleanly with no generation, and a simple question is answered as a single capability rather than being decomposed. (Runs locally on the asking node; every node shares the catalog via GitHub.)
 
+### Kernel optimization search (a different use of the same machinery)
+
+The `kernel` mode reuses generate-and-compile for a different goal: not *adding* a skill but
+*optimizing* one. For a fixed operation (dense matrix multiply), the LLM writes several varied C#
+implementations; each is compiled, **verified correct against a naive reference** within a
+floating-point tolerance (wrong ⇒ disqualified — correctness is the floor, exactly as in the
+swarm's deliberation), and the correct ones are **benchmarked** (warmup to reach optimized JIT
+code, then the median of many timed runs). The candidates are ranked by speedup over the naive
+baseline and the fastest correct one wins. This is bite one: a single node proving the
+generate→verify→benchmark→rank loop; distributing the search across the swarm comes later.
+
 ---
 
 ## Installation
@@ -202,6 +213,22 @@ dotnet bin/Debug/net8.0/HAL9001.dll swarm 5003 5001 5002
 | `@<port> <msg>` | Send a direct chat line to one peer. |
 | `exit` | Leave the swarm cleanly (broadcasts a goodbye). |
 
+### Kernel optimization search (single node)
+
+```bash
+dotnet run -- kernel              # 256×256 matmul, 5 candidates (defaults)
+dotnet run -- kernel 512 6        # 512×512 matrices, 6 candidates
+```
+
+A different use of the same generate-and-compile machinery: instead of *adding a capability*, it
+**searches for a faster implementation** of one fixed compute operation (dense matrix multiply).
+The LLM writes several varied C# implementations; each is compiled, **verified correct against a
+naive reference** (within a floating-point tolerance — wrong ⇒ disqualified, speed irrelevant), and
+the correct ones are **benchmarked** (JIT warmup, then the median of many timed runs). It prints a
+table ranked by speed, the speedup of each over the naive baseline, and the source of the fastest
+correct candidate. Single-node only this bite — no swarm, no distribution, no GitHub push. Needs
+`ANTHROPIC_API_KEY`.
+
 ### Other modes
 
 ```bash
@@ -229,7 +256,11 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 | `IHandler.cs` | The capability contract: `string Handle(string input)`. |
 | `CapType.cs` | The fixed capability type set (`String/Int/Number/Bool/Date`) + parse, prompt-hint, boundary parse-check, and value-inference helpers; plus the **`StabilityKind`** (`Stable`/`Live`) enum + parse. |
 | `Clock.cs` | The injectable date/time seam for **Live** capabilities: real system clock in production, a fixed **injected** date under validation (via `AsyncLocal`, so it flows into a handler's `Task.Run`). The *only* ambient state Live handlers may read this bite. |
-| `RuntimeCompiler.cs` | Compile a C# source string to an in-memory assembly with Roslyn, load it, register the handler (with its declared types). |
+| `RuntimeCompiler.cs` | Compile a C# source string to an in-memory assembly with Roslyn, load it, register the handler (with its declared types). Also exposes `TryCompileAssembly` — a general compile-to-assembly (unsafe enabled) used by the kernel-optimization search to load a numeric method, not an `IHandler`. |
+| `MatrixOps.cs` | Kernel search: the naive triple-loop matmul **reference** (correctness oracle + speed baseline), seeded random matrices, tolerance-based comparison, and an anti-dead-code checksum. |
+| `KernelBenchmark.cs` | Kernel search: the timing harness — warmup (defeat tiered JIT), median/min/max over N timed runs, GC control, and a best-effort quiet scope (high priority + single-core pin). |
+| `KernelGenerator.cs` | Kernel search: prompts the LLM for several **varied** single-threaded matmul implementations (one optimization strategy per concurrent call). |
+| `KernelOptimizer.cs` | Kernel search orchestrator: generate → compile → correctness-gate → benchmark correct candidates → rank by speedup → report + show the winner's source. |
 | `HandlerRegistry.cs` | In-memory catalog of capabilities (name, description, example, handler, **input/output type**). |
 | `AnthropicClient.cs` | Minimal HTTP client for the Anthropic Messages API. |
 | `TursoClient.cs` | Minimal HTTP client for the hive's shared knowledge store (Turso/libSQL `/v2/pipeline`). Connects via env credentials. |
@@ -265,6 +296,7 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 - **Bounded multi-link generation (cap 2, all-or-nothing) — done.** A chain may have up to two missing links; each is generated + validated, and both are adopted atomically — or, if either fails, nothing is adopted and the catalog is left unchanged. Three or more still fails clean.
 - **Stored knowledge — typed facts in the Turso hive — done.** The hive holds knowledge (facts), not just behaviors: `remember` stores an explicit typed fact in a shared Turso table; routing resolves a matching question by a conservative knowledge-lookup. Cross-node and persistent. Explicit storage only (that release).
 - **Auto-derived facts + the Stable/Live distinction — done.** Capabilities are classed **Stable** (pure function) or **Live** (depends on current date/time). A Stable answer is **auto-derived** into a cached `derived` fact (distinct from `explicit`); a Live capability **never caches** — it recomputes against an injectable `Clock` every call, so staleness is structurally impossible. Live handlers are validated by **injecting known dates**. Ambient state scoped to date/time only.
+- **Kernel optimization search (bite 1, single node) — done.** A new use of the generate-and-compile machinery: generate several candidate implementations of a fixed compute operation (dense matrix multiply), verify each correct against a naive reference within a floating-point tolerance, benchmark the correct ones (warmup + median of N timed runs), and rank by speedup over the baseline. Correctness is the floor (wrong ⇒ disqualified); speed is the new ranking dimension. **Next (kernel track):** distribute the search across the swarm (a volunteer-compute "best-of-N implementations" where nodes generate/benchmark candidates and the coordinator adopts the fastest correct one), then more operations and larger/auto-scaled sizes.
 - **Next (knowledge track):** fact-in-composition (a derived/explicit fact's typed value feeding a handler's input), then fact updating/invalidation and confidence/provenance-aware overrides — each its own bite. (Staleness for *time-dependent* answers is already solved by Live-never-caches; invalidation is about *explicit/derived* facts that can go out of date for other reasons.)
 - **Also planned:** ambient state beyond date/time for Live capabilities (network / files / other external sources) with the same inject-under-validation seam; general-N missing links (lift the cap-2); nested/recursive composition (chains of chains); stateful capabilities; cloud (swarm beyond loopback); collapsing the two-node `PeerNode` transport onto the N-peer `SwarmNode`; further out, self-reflection and guarded goal-setting. Type inference/generics/coercion and branching remain out of scope.
 
@@ -273,6 +305,16 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 ## Release notes
 
 > Newest first. Each rung was verified before the next was built. Commit hashes are on `main`.
+
+### Kernel optimization search — bite 1 (single node)
+A new direction reusing HAL9001's generate-and-compile core, but adding a **speed** dimension to validation. Instead of *adding a capability*, this searches for the *fastest correct implementation* of one fixed compute operation — **dense double matrix multiply** at a fixed size. The loop: **generate → compile → verify-correct → benchmark → rank**, all on one node (no swarm, no distribution, no GitHub push — that's a later bite).
+- **Reference = oracle + baseline:** a naive triple-loop matmul (`MatrixOps.MultiplyReference`) is both the correctness oracle (every candidate's output must match it) and the speed baseline (every candidate's time is a speedup over it).
+- **Generate varied candidates:** `KernelGenerator` asks the LLM (the existing Anthropic client, toolsmith as always — it writes *code*, never an answer) for several **different** single-threaded implementations, one optimization strategy per concurrent call: clean i-j-k, cache-friendly i-k-j, transpose-B dot products, cache **tiling/blocking**, `unsafe`/`Span<T>` bounds-check elision, and register-blocking/unrolling.
+- **Compile each** via a new additive `RuntimeCompiler.TryCompileAssembly` (the same Roslyn pipeline, Release optimization, **unsafe enabled**), reflected to a typed `Func<double[,],double[,],double[,]>` delegate — no `IHandler`, no string marshalling on the hot path (that would corrupt timing). A candidate that fails to compile is logged and discarded, never fatal.
+- **Correctness gate (the floor):** each candidate must match the reference within a tolerance (`|got-want| ≤ 1e-9 + 1e-9·|want|`) across a battery of **varied shapes** — the exact benchmark pair, plus square, non-square, tiny-below-block, and 1×1 — because floating-point reordering means a *correct* candidate differs by ~k·ε≈1e-13 while a *buggy* one is off by O(1); a tolerance between them cleanly separates them. Wrong output (or a throw, or NaN/∞) is **disqualified regardless of speed**.
+- **Benchmark methodology (the crux — trustworthy timing is the whole foundation):** identical pre-built inputs for every candidate; **warmup** runs first to force tiered-JIT/OSR promotion to optimized code and warm caches (so we don't time Tier-0 code or JIT compilation); then **N individually-timed runs** ranked on the **median** (robust — a GC or scheduler hiccup becomes an outlier the median ignores; mean would be dragged up by it), with **min** (cleanest run) and **max** (so the min↔max spread exposes measurement noise) also reported; a full **GC** before timing plus `SustainedLowLatency` mode during it; a high-resolution `Stopwatch`; results consumed into a printed sink to defeat **dead-code elimination**; and a best-effort quiet scope (raised process priority + single-core affinity) to cut scheduling noise. Single-threaded only, so we compare *algorithmic/memory-access* efficiency, not core count.
+- **Rank + report:** a table of every candidate (compiled? correct? median, min, speedup vs. reference), the reference shown as the 1.00× baseline, the fastest **correct** candidate crowned the winner, and the winner's full source printed.
+- *Verified (single node, real key):* `kernel` (256×256, 5 candidates) — naive reference baseline **49.93 ms median**; all 5 candidates compiled and passed correctness; benchmark times **differed meaningfully** (winner **7.62 ms** vs ~16 ms for the others), winner = the flatten-to-1D + `unsafe`-pointer + i-k-j-unrolled candidate at **6.55× faster**, its source printed. The median's value showed in the raw data: candidates 2–4 logged `max` ~47–50 ms outliers (GC/scheduler) while their medians held ~16 ms — the median correctly ignored the noise. **Disqualification confirmed:** injecting a deliberately-wrong-but-trivially-fast control (returns all zeros) — the fastest thing in the run — it was flagged `WRONG output … maxRelErr=1.00E+000 — DISQUALIFIED (speed irrelevant)` and dropped to the rejected section, never crowned; the fastest **correct** candidate won (3.42×). Single-node only — no swarm, no push.
 
 ### Auto-derived facts + the Stable/Live capability distinction
 The hive now **learns from what it computes** — but only when that's *safe to remember*. Every capability is classed at commission time as **Stable** or **Live**, and that single distinction decides whether its answer may be cached, structurally preventing stale knowledge with no TTLs or invalidation logic.
@@ -391,3 +433,242 @@ The heart: compile a C# source string into a real, loadable assembly in memory a
 ## Maintaining this README
 
 This README is part of the deliverable, not an afterthought. **On every future change, scan this file and update every section it affects** — at minimum add a new entry to [Release notes](#release-notes) (newest first), and revise [How it works](#how-it-works), [Usage](#usage), [Project layout](#project-layout), and [Roadmap](#roadmap) wherever the change touches them.
+
+PS C:\Users\bjame\Source\Repos\HAL9001> dotnet run -- kernel
+==============================================================================
+ HAL9001 — Kernel Optimization Search (bite 1: single node)
+==============================================================================
+ operation : dense matrix multiply, 256x256 doubles (a*b)
+ candidates: 5   |   benchmark: 5 warmup + 15 timed runs, ranked by MEDIAN
+ loop      : generate -> compile -> verify-correct (oracle: naive triple loop)
+             -> benchmark correct ones -> rank by speedup over the baseline
+ note      : correctness is the floor — a wrong candidate is disqualified
+             regardless of speed. Single-threaded comparison only.
+==============================================================================
+
+Generating 5 candidate(s) via claude-haiku-4-5-20251001 ...
+
+Benchmarking reference (naive triple loop) as the baseline ...
+  reference: median 49.93 ms  (min 49.26, max 58.33)
+
+── Candidate 1: Classic i-j-k triple loop, but written as cleanly and tightly as poss…
+   [compile] ok
+   [correct] PASS all 5 tests (worst relative error 0.00E+000)
+   [bench]   median 15.82 ms  (min 15.52, max 16.65)
+
+── Candidate 2: Reorder the loops to i-k-j so the innermost loop strides CONTIGUOUSLY…
+   [compile] ok
+   [correct] PASS all 5 tests (worst relative error 0.00E+000)
+   [bench]   median 16.55 ms  (min 16.26, max 48.42)
+
+── Candidate 3: Transpose B into a temporary array first, then compute each C[i,j] as…
+   [compile] ok
+   [correct] PASS all 5 tests (worst relative error 0.00E+000)
+   [bench]   median 16.17 ms  (min 15.62, max 47.37)
+
+── Candidate 4: Cache blocking / tiling: split the i, j, k loops into blocks (e.g. bl…
+   [compile] ok
+   [correct] PASS all 5 tests (worst relative error 0.00E+000)
+   [bench]   median 17.04 ms  (min 16.59, max 50.69)
+
+── Candidate 5: Flatten the matrices to 1D and use unsafe pointers (or Span<double>) …
+   [compile] ok
+   [correct] PASS all 5 tests (worst relative error 0.00E+000)
+   [bench]   median 7.62 ms  (min 7.30, max 9.92)
+
+══════════════════════════════════════════════════════════════════════════════
+ RESULTS — ranked by benchmark speed (correct candidates first, fastest on top)
+══════════════════════════════════════════════════════════════════════════════
+#  compiled  correct  median ms   min ms    speedup  strategy
+──────────────────────────────────────────────────────────────────────────────
+refyes       oracle   49.93       49.26     1.00x    naive triple loop (baseline)
+5  yes       yes      7.62        7.30      6.55    x Flatten the matrices to 1D and use un…
+1  yes       yes      15.82       15.52     3.16    x Classic i-j-k triple loop, but writte…
+3  yes       yes      16.17       15.62     3.09    x Transpose B into a temporary array fi…
+2  yes       yes      16.55       16.26     3.02    x Reorder the loops to i-k-j so the inn…
+4  yes       yes      17.04       16.59     2.93    x Cache blocking / tiling: split the i,…
+──────────────────────────────────────────────────────────────────────────────
+
+*** WINNER: Candidate 5 — 7.62 ms, 6.55x faster than the naive reference. ***
+    strategy: Flatten the matrices to 1D and use unsafe pointers (or Span<double>) to eliminate array bounds checks on the hot path, combined with a cache-friendly loop order. Keep it single-threaded.
+
+──────── winning candidate source ────────
+using System;
+
+public static class Kernel
+{
+    public static double[,] Multiply(double[,] a, double[,] b)
+    {
+        int n = a.GetLength(0);
+        int k = a.GetLength(1);
+        int m = b.GetLength(1);
+
+        double[,] c = new double[n, m];
+
+        // Convert to 1D spans for cache-friendly access
+        double[] aFlat = new double[n * k];
+        double[] bFlat = new double[k * m];
+        double[] cFlat = new double[n * m];
+
+        // Copy a into flat array
+        for (int i = 0; i < n; i++)
+        {
+            for (int j = 0; j < k; j++)
+            {
+                aFlat[i * k + j] = a[i, j];
+            }
+        }
+
+        // Copy b into flat array
+        for (int i = 0; i < k; i++)
+        {
+            for (int j = 0; j < m; j++)
+            {
+                bFlat[i * m + j] = b[i, j];
+            }
+        }
+
+        // Perform multiplication with unsafe pointers for hot path
+        unsafe
+        {
+            fixed (double* pA = aFlat, pB = bFlat, pC = cFlat)
+            {
+                double* a_ptr = pA;
+                double* b_ptr = pB;
+                double* c_ptr = pC;
+
+                // Cache-friendly loop order: i, j, k
+                // Process row by row of result matrix
+                for (int i = 0; i < n; i++)
+                {
+                    // Initialize result row
+                    double* c_row = c_ptr + i * m;
+                    for (int j = 0; j < m; j++)
+                    {
+                        c_row[j] = 0.0;
+                    }
+
+                    // Compute dot product for each element in row
+                    double* a_row = a_ptr + i * k;
+                    for (int p = 0; p < k; p++)
+                    {
+                        double a_val = a_row[p];
+                        double* b_col = b_ptr + p * m;
+
+                        // Unroll inner loop by 4 for better performance
+                        int j = 0;
+                        int m_aligned = m - (m % 4);
+
+                        for (; j < m_aligned; j += 4)
+                        {
+                            c_row[j] += a_val * b_col[j];
+                            c_row[j + 1] += a_val * b_col[j + 1];
+                            c_row[j + 2] += a_val * b_col[j + 2];
+                            c_row[j + 3] += a_val * b_col[j + 3];
+                        }
+
+                        // Handle remainder
+                        for (; j < m; j++)
+                        {
+                            c_row[j] += a_val * b_col[j];
+                        }
+                    }
+                }
+            }
+        }
+
+        // Copy result back to 2D array
+        for (int i = 0; i < n; i++)
+        {
+            for (int j = 0; j < m; j++)
+            {
+                c[i, j] = cFlat[i * m + j];
+            }
+        }
+
+        return c;
+    }
+}
+──────────────────────────────────────────
+
+(anti-dead-code-elimination sink = 2.000E+006)
+PS C:\Users\bjame\Source\Repos\HAL9001> dotnet run -- kernel 128 2
+C:\Users\bjame\Source\Repos\HAL9001\KernelBenchmark.cs(168,17): warning CA1416: This call site is reachable on all platforms. 'Process.ProcessorAffinity' is only supported on: 'linux', 'windows'. (https://learn.microsoft.com/dotnet/fundamentals/code-analysis/quality-rules/ca1416)
+C:\Users\bjame\Source\Repos\HAL9001\KernelBenchmark.cs(178,39): warning CA1416: This call site is reachable on all platforms. 'Process.ProcessorAffinity' is only supported on: 'linux', 'windows'. (https://learn.microsoft.com/dotnet/fundamentals/code-analysis/quality-rules/ca1416)
+C:\Users\bjame\Source\Repos\HAL9001\KernelBenchmark.cs(167,33): warning CA1416: This call site is reachable on all platforms. 'Process.ProcessorAffinity' is only supported on: 'linux', 'windows'. (https://learn.microsoft.com/dotnet/fundamentals/code-analysis/quality-rules/ca1416)
+==============================================================================
+ HAL9001 — Kernel Optimization Search (bite 1: single node)
+==============================================================================
+ operation : dense matrix multiply, 128x128 doubles (a*b)
+ candidates: 2   |   benchmark: 5 warmup + 15 timed runs, ranked by MEDIAN
+ loop      : generate -> compile -> verify-correct (oracle: naive triple loop)
+             -> benchmark correct ones -> rank by speedup over the baseline
+ note      : correctness is the floor — a wrong candidate is disqualified
+             regardless of speed. Single-threaded comparison only.
+==============================================================================
+
+Generating 2 candidate(s) via claude-haiku-4-5-20251001 ...
+
+Benchmarking reference (naive triple loop) as the baseline ...
+  reference: median 6.10 ms  (min 6.00, max 6.41)
+
+── Candidate 1: CONTROL: deliberately WRONG (returns all zeros) — fast but must be di…
+   [compile] ok
+   [correct] WRONG output on test 1 (128x128 · 128x128), maxRelErr=1.00E+000 — DISQUALIFIED (speed irrelevant)
+
+── Candidate 2: Classic i-j-k triple loop, but written as cleanly and tightly as poss…
+   [compile] ok
+   [correct] PASS all 5 tests (worst relative error 0.00E+000)
+   [bench]   median 1.79 ms  (min 1.71, max 1.85)
+
+── Candidate 3: Reorder the loops to i-k-j so the innermost loop strides CONTIGUOUSLY…
+   [compile] ok
+   [correct] PASS all 5 tests (worst relative error 0.00E+000)
+   [bench]   median 2.17 ms  (min 1.86, max 3.75)
+
+══════════════════════════════════════════════════════════════════════════════
+ RESULTS — ranked by benchmark speed (correct candidates first, fastest on top)
+══════════════════════════════════════════════════════════════════════════════
+#  compiled  correct  median ms   min ms    speedup  strategy
+──────────────────────────────────────────────────────────────────────────────
+refyes       oracle   6.10        6.00      1.00x    naive triple loop (baseline)
+2  yes       yes      1.79        1.71      3.42    x Classic i-j-k triple loop, but writte…
+3  yes       yes      2.17        1.86      2.82    x Reorder the loops to i-k-j so the inn…
+1  yes       NO       -           -         -        CONTROL: deliberately WRONG (returns …  [incorrect output]
+──────────────────────────────────────────────────────────────────────────────
+
+*** WINNER: Candidate 2 — 1.79 ms, 3.42x faster than the naive reference. ***
+    strategy: Classic i-j-k triple loop, but written as cleanly and tightly as possible (cache locals, hoist invariants). A baseline-style implementation.
+
+──────── winning candidate source ────────
+using System;
+
+public static class Kernel
+{
+    public static double[,] Multiply(double[,] a, double[,] b)
+    {
+        int n = a.GetLength(0);
+        int k = a.GetLength(1);
+        int m = b.GetLength(1);
+
+        double[,] c = new double[n, m];
+
+        for (int i = 0; i < n; i++)
+        {
+            for (int j = 0; j < m; j++)
+            {
+                double sum = 0.0;
+                for (int p = 0; p < k; p++)
+                {
+                    sum += a[i, p] * b[p, j];
+                }
+                c[i, j] = sum;
+            }
+        }
+
+        return c;
+    }
+}
+──────────────────────────────────────────
+
+(anti-dead-code-elimination sink = 2.530E+005)

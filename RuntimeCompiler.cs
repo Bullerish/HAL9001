@@ -17,6 +17,78 @@ namespace HAL9001;
 public static class RuntimeCompiler
 {
     /// <summary>
+    /// GENERAL compile-to-assembly used by the kernel-optimization search (bite 1).
+    ///
+    /// The <see cref="TryCompileAndLoad"/> family below is specialised to <see cref="IHandler"/>:
+    /// it expects a class implementing that interface and registers an instance. The kernel
+    /// search needs something different — a plain numeric method
+    /// (<c>double[,] Multiply(double[,], double[,])</c>) that the benchmark calls through a
+    /// typed delegate, with NO interface and NO string marshalling (any boxing/parsing on the
+    /// hot path would corrupt the timing we're trying to measure).
+    ///
+    /// So this method does only the universal part — parse → reference the whole platform →
+    /// compile in Release → emit to memory → load — and hands the caller the raw
+    /// <see cref="Assembly"/> to reflect over however it likes. It is purely additive; the
+    /// verified IHandler path is untouched. <c>unsafe</c> is ENABLED here so pointer/Span
+    /// candidates (a legitimate optimisation strategy) can compile.
+    /// </summary>
+    public static bool TryCompileAssembly(string sourceCode, out Assembly? assembly, out string? diagnostics)
+    {
+        assembly = null;
+        diagnostics = null;
+        try
+        {
+            SyntaxTree syntaxTree = CSharpSyntaxTree.ParseText(sourceCode);
+
+            // Same trick as the IHandler path: hand Roslyn every assembly the runtime already
+            // loaded us with (the whole BCL + HAL9001.dll), so generated code can reference
+            // anything we can. (See the long comment in TryCompileAndLoad for why.)
+            string trusted = (string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!;
+            var references = trusted
+                .Split(Path.PathSeparator)
+                .Where(p => p.Length > 0)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase)
+                .Select(p => (MetadataReference)MetadataReference.CreateFromFile(p))
+                .ToList();
+
+            string assemblyName = "HAL9001.Kernel." + Guid.NewGuid().ToString("N");
+            CSharpCompilation compilation = CSharpCompilation.Create(
+                assemblyName,
+                syntaxTrees: new[] { syntaxTree },
+                references: references,
+                options: new CSharpCompilationOptions(
+                    OutputKind.DynamicallyLinkedLibrary,
+                    optimizationLevel: OptimizationLevel.Release,   // Release = the optimised JIT input we want to benchmark
+                    allowUnsafe: true));                            // permit unsafe/pointer candidates
+
+            using var assemblyStream = new MemoryStream();
+            EmitResult emitResult = compilation.Emit(assemblyStream);
+
+            if (!emitResult.Success)
+            {
+                var errors = emitResult.Diagnostics
+                    .Where(d => d.Severity == DiagnosticSeverity.Error)
+                    .ToList();
+                var report = new System.Text.StringBuilder();
+                report.AppendLine($"  [compile] FAILED with {errors.Count} error(s):");
+                foreach (Diagnostic d in errors)
+                    report.AppendLine($"    {d.Id}: {d.GetMessage()}");
+                diagnostics = report.ToString();
+                return false; // caller decides whether to print; a bad candidate is discarded, not fatal
+            }
+
+            assemblyStream.Seek(0, SeekOrigin.Begin);
+            assembly = Assembly.Load(assemblyStream.ToArray()); // same intentional default-context leak noted below
+            return true;
+        }
+        catch (Exception ex)
+        {
+            diagnostics = $"  [error] Unexpected failure while compiling candidate: {ex.Message}";
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Compile <paramref name="sourceCode"/> (which must define a public, non-abstract
     /// class implementing <see cref="IHandler"/>), load it, instantiate it, and add it
     /// to <paramref name="registry"/> under <paramref name="name"/>.
