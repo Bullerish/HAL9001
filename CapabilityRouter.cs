@@ -57,19 +57,20 @@ public sealed class CapabilityRouter
                       handles the whole class, e.g. "the capital of any US state").
           "self"    — the input asks ABOUT THE AGENT ITSELF: what it can do, what it knows,
                       what it has done or learned lately, how many capabilities/facts it has,
-                      or who/what it is. It is answered from the agent's OWN state (not a tool,
-                      not a built fact). Also give a "topic" (below).
-          "decline" — the input is NOT a task and NOT about the agent: a greeting, small talk,
-                      thanks, "how are you", or something too vague to act on. Build NOTHING.
-                      Give a short, friendly conversational reply instead.
+                      who/what it is, OR HOW IT IS / HOW IT FEELS (its mood). It is answered from
+                      the agent's OWN state (not a tool, not a built fact). Also give a "topic" (below).
+          "decline" — the input is NOT a task and NOT about the agent: a greeting, thanks, "that's
+                      cool", or something too vague to act on. Build NOTHING. Give a short, friendly
+                      conversational reply instead.
 
         The boundary (these are the important calls):
           - Could running code produce a concrete answer? (capital of a state, convert units,
             count the vowels, is-17-prime, reverse a string) → it's a TASK → "use" or "new".
           - Is it about the AGENT itself? ("what can you do", "what do you know", "who/what are
             you", "what have you learned lately", "how many capabilities do you have", "tell me
-            about yourself") → "self". Note: "who are you" is "self"; "how are you" is "decline".
-            A factual lookup like "what is the capital of Ohio" is a TASK, NOT "self".
+            about yourself", "how are you", "how do you feel", "what's your mood") → "self". Both
+            "who are you" AND "how are you" are "self" now. A factual lookup like "what is the
+            capital of Ohio" is a TASK, NOT "self".
           - Would no tool meaningfully answer it and it's not about the agent? ("hi", "thanks",
             "that's cool", "hey there") → "decline".
           - When you genuinely can't find an actionable task in the input, prefer "decline".
@@ -77,8 +78,8 @@ public sealed class CapabilityRouter
 
         For a "self" question, also give the "topic" — the closest of:
           capabilities (what it can do) | knowledge (what facts it holds) | history (what it has
-          done/learned recently) | scale (how many capabilities/facts/events) | identity (who/what
-          it is, or anything general about itself).
+          done/learned recently) | scale (how many capabilities/facts/events) | mood (how it is /
+          how it feels) | identity (who/what it is, or anything general about itself).
 
         For a "new" capability, also declare its INPUT and OUTPUT types from this fixed set:
           String (free-form text), Int (a whole number), Number (integer or decimal),

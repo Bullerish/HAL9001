@@ -725,9 +725,10 @@ public static class SwarmAgent
             Console.Write("> ");
         }
 
-        // ── idle introspection loop (bites 4+5): unprompted, coordinator-only, gated ──
-        // When the hive's leader is idle it looks inward: first it tries CURIOSITY (propose tools for
-        // gaps); if there's nothing to propose, it REFLECTS (score its own capabilities, flag the weak).
+        // ── idle introspection loop (bites 4+5+6): unprompted, coordinator-only, MOOD-DRIVEN, gated ──
+        // When the hive's leader is idle it consults its MOOD and acts on the mood's inclination:
+        //   weary → rest;  curious → explore (curiosity);  self-critical/content → consolidate (reflect).
+        // Same internal state → different behavior — affect you can watch.
         async Task CuriosityLoop()
         {
             while (!loopCts.IsCancellationRequested)
@@ -740,12 +741,22 @@ public static class SwarmAgent
                 if (!pending.IsEmpty) continue;                            // work in flight — not idle
                 if ((DateTime.UtcNow - lastActivity).TotalSeconds < CuriosityIdleSeconds) continue;
 
-                IReadOnlyList<CuriosityProposal> proposals;
-                try { proposals = await core.ReviewGapsAsync(2); } catch { continue; }
-                lastActivity = DateTime.UtcNow;                            // don't immediately re-scan
-                if (proposals.Count > 0) { OfferCuriosity(proposals, unprompted: true); continue; }
+                Mood mood;
+                try { mood = await core.AssessMoodAsync(pending.Count); } catch { continue; }
+                lastActivity = DateTime.UtcNow;                            // acted (or chose to rest) — don't re-scan immediately
+                if (mood.Inclination == MoodInclination.Rest) continue;    // too weary — defer non-urgent work
 
-                // Nothing new to learn → reflect on something I've built but not yet judged.
+                Console.WriteLine($"\n[mood] feeling {mood.Label} ({mood.Note}) — I'll {mood.InclinationPhrase}.");
+                Console.Write("> ");
+
+                if (mood.Inclination == MoodInclination.Explore)
+                {
+                    // curious → look for gaps to fill; if none, fall back to a little reflection.
+                    IReadOnlyList<CuriosityProposal> proposals;
+                    try { proposals = await core.ReviewGapsAsync(2); } catch { continue; }
+                    if (proposals.Count > 0) { OfferCuriosity(proposals, unprompted: true); continue; }
+                }
+                // consolidate / tend (or curious-but-no-gaps) → reflect on my own work.
                 IReadOnlyList<SelfAssessment> assessments;
                 try { assessments = await core.ReflectAsync(2); } catch { continue; }
                 if (assessments.Count > 0) ReportReflection(assessments, unprompted: true);
@@ -786,7 +797,7 @@ public static class SwarmAgent
         Console.WriteLine("           compose <question>  chain existing typed capabilities   |   remember <fact>  store knowledge in the hive");
         Console.WriteLine("           identity  who the hive is   |   timeline [n]  replay its episodic memory   |   @<port> <msg>  direct");
         Console.WriteLine("           curious [yes]  propose what to learn   |   reflect [fix]  self-critique + re-work weak tools");
-        Console.WriteLine("           peers   |   coordinator   |   pause <secs>   |   exit");
+        Console.WriteLine("           mood  how the hive is feeling   |   peers   |   coordinator   |   pause <secs>   |   exit");
         Console.WriteLine();
 
         while (true)
@@ -819,6 +830,14 @@ public static class SwarmAgent
                 int built = 0;
                 foreach (CuriosityProposal p in toBuild) if (await core.CommissionProposalAsync(p)) built++;
                 Console.WriteLine($"[curiosity] learned {built}/{toBuild.Count} proposed capabilit{(toBuild.Count == 1 ? "y" : "ies")}.");
+                continue;
+            }
+            if (line.Equals("mood", StringComparison.OrdinalIgnoreCase) || line.Equals("how are you", StringComparison.OrdinalIgnoreCase))
+            {
+                // The hive's current drives, read from its real recent history + live in-flight load.
+                if (!core.HasHive) { Console.WriteLine("[mood] no hive configured — I can't read my own history."); continue; }
+                try { Mood m = await core.AssessMoodAsync(pending.Count); Console.WriteLine($"[mood] {m.Describe(core.Identity?.Name ?? "I")}"); }
+                catch (Exception ex) { Console.WriteLine($"[mood] couldn't read my mood: {ex.Message}"); }
                 continue;
             }
             if (line.Equals("reflect", StringComparison.OrdinalIgnoreCase))

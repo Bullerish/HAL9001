@@ -203,6 +203,13 @@ public static class AgentRepl
                     continue;
                 }
 
+                // MOOD (sentience bite 6): the hive's current drives, read from its real history.
+                if (request.Equals("mood", StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine($"  [mood] {await core.DescribeMoodAsync()}");
+                    continue;
+                }
+
                 // SELF-CRITIQUE (sentience bite 5): score my own capabilities, flag + re-work the weak.
                 if (request.Equals("reflect", StringComparison.OrdinalIgnoreCase))
                 {

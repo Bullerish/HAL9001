@@ -258,7 +258,11 @@ public sealed class AgentCore
             // memory), rendered by code. The LLM only recognized the question as introspective and
             // picked the topic — it never fabricates a capability or a fact it doesn't have.
             if (decision.Action == RouteAction.Introspect)
-                return AnswerResult.Answered(await _selfModel.DescribeAsync(decision.SelfTopic), "self-model");
+                return AnswerResult.Answered(
+                    decision.SelfTopic == SelfTopic.Mood
+                        ? await DescribeMoodAsync()                              // "how are you?" → real drives
+                        : await _selfModel.DescribeAsync(decision.SelfTopic),    // other self-questions
+                    decision.SelfTopic == SelfTopic.Mood ? "mood" : "self-model");
 
             IHandler? handler;
             string usedName;
@@ -634,6 +638,44 @@ public sealed class AgentCore
         }
         finally { _gate.Release(); }
     }
+
+    // ── MOOD / internal drives (sentience ladder, bite 6) ───────────────────────────────
+    //
+    // A small set of scalar drives computed from REAL signals — the episodic log (recent wins vs
+    // setbacks, open gaps) plus current load — surfaced as a mood and used to MODULATE the idle loop.
+    // Grounded: it reads how the hive's life has actually been going, never a random or invented feeling.
+
+    /// <summary>Read the hive's current mood from its recent episodic memory and a live load signal
+    /// (e.g. the coordinator's in-flight request count). Deterministic — same log + load → same mood.</summary>
+    public async Task<Mood> AssessMoodAsync(int liveLoad = 0)
+    {
+        IReadOnlyList<HiveEvent> recent = await Events.RecentAsync(40);
+        int gaps = 0, resolved = 0, wins = 0, setbacks = 0, burst = 0;
+        DateTime cutoff = DateTime.UtcNow.AddMinutes(-2);
+        foreach (HiveEvent e in recent)
+        {
+            switch (e.Kind)
+            {
+                case "gap-noticed": gaps++; setbacks++; break;
+                case "curiosity-resolved": resolved++; wins++; break;
+                case "capability-commissioned":
+                case "self-improved":
+                case "deliberation-won": wins++; break;
+                case "self-critique":
+                    if (e.Summary.Contains("weak")) setbacks++;
+                    else if (e.Summary.Contains("solid")) wins++;
+                    break;
+            }
+            if (DateTime.TryParse(e.Timestamp, null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime t)
+                && t.ToUniversalTime() >= cutoff) burst++;
+        }
+        int openGaps = Math.Max(0, gaps - resolved);
+        return Mood.From(openGaps, wins, setbacks, liveLoad, burst);
+    }
+
+    /// <summary>A first-person description of the current mood, spoken as the hive's identity.</summary>
+    public async Task<string> DescribeMoodAsync(int liveLoad = 0)
+        => (await AssessMoodAsync(liveLoad)).Describe(Identity?.Name ?? IdentityStore.Default.Name);
 
     // ── rung 5a: deliberation support ────────────────────────────────────────────────────
 
