@@ -322,7 +322,16 @@ public static class Dashboard
   .empty{color:var(--dim);font-size:12px}
   .wide{grid-column:1/-1}
   footer{max-width:1100px;margin:16px auto 0;color:var(--dim);font-size:10px;text-align:center;letter-spacing:2px;text-transform:uppercase}
+  .eye{transition:box-shadow .25s}
+  .eye.flare{box-shadow:0 10px 30px rgba(0,0,0,.85),inset 0 2px 5px rgba(255,255,255,.4),inset 0 -4px 8px rgba(0,0,0,.6),inset 0 0 16px 3px rgba(255,70,34,.55),0 0 46px 10px rgba(255,55,22,.45)}
+  .eye.gold{box-shadow:0 10px 30px rgba(0,0,0,.85),inset 0 2px 5px rgba(255,255,255,.4),inset 0 -4px 8px rgba(0,0,0,.6),inset 0 0 18px 4px rgba(255,200,90,.6),0 0 60px 14px rgba(255,200,90,.5)}
+  .crt{position:fixed;inset:0;pointer-events:none;z-index:50;background:repeating-linear-gradient(to bottom,rgba(0,0,0,0) 0,rgba(0,0,0,0) 2px,rgba(0,0,0,.16) 3px,rgba(0,0,0,0) 4px);animation:flicker 5.5s infinite}
+  .vig{position:fixed;inset:0;pointer-events:none;z-index:49;background:radial-gradient(ellipse at 50% 42%,transparent 52%,rgba(0,0,0,.6) 100%)}
+  .scan{position:fixed;left:0;right:0;top:-140px;height:140px;pointer-events:none;z-index:51;background:linear-gradient(to bottom,transparent,rgba(255,120,80,.045),transparent);animation:sweep 7s linear infinite}
+  @keyframes flicker{0%,100%{opacity:.96}48%{opacity:1}50%{opacity:.92}52%{opacity:1}}
+  @keyframes sweep{0%{top:-140px}100%{top:100%}}
 </style></head><body>
+<div class="vig"></div><div class="crt"></div><div class="scan"></div>
 <div class="eyewrap">
   <div class="eye" id="eye"><div class="lens"><div class="glow"></div><div class="hi hi1"></div><div class="hi hi2"></div><div class="hot"></div></div></div>
   <h1>HAL 9001</h1>
