@@ -911,6 +911,12 @@ public static class SwarmAgent
         _ = AskerRecoveryLoop();
         _ = CuriosityLoop();
 
+        void KillHired() { foreach (var hp in hiredProcesses) { try { hp.Kill(entireProcessTree: true); } catch { } } }
+        // Ctrl+C: prevent immediate kill, clean up children, then let the REPL exit via null readline.
+        Console.CancelKeyPress += (_, e) => { e.Cancel = true; KillHired(); loopCts.Cancel(); };
+        // Process.Exit (e.g. parent killed): best-effort synchronous cleanup.
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => KillHired();
+
         Console.WriteLine();
         Console.WriteLine($"Swarm-agent {node.Id}." + (client is null ? " (no API key — answers with stubs.)" : "")
             + (core.HasHive ? " [hive knowledge: on]" : " [hive knowledge: off]"));
