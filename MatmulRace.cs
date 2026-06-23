@@ -1,3 +1,4 @@
+using System.Numerics;
 using System.Reflection;
 
 namespace HAL9001;
@@ -39,7 +40,7 @@ public static class MatmulRace
     /// <summary>What one race round produced.</summary>
     public sealed record RoundResult(
         int Size, Metric Metric, double Score, double Speedup,
-        string Strategy, bool NewRecord, string Summary);
+        string Strategy, bool NewRecord, string Summary, bool Discovery = false);
 
     /// <summary>
     /// Run one full race round at <paramref name="size"/> under <paramref name="metric"/>. Generates
@@ -84,6 +85,14 @@ public static class MatmulRace
             await core.SetMatmulChampionAsync(
                 $"127.0.0.1:{myPort}", size, bestStrategy, metric, bestScore, speedup, bestSource);
 
+        // ── NOVELTY GATE (bite 16) ──────────────────────────────────────────────────────────
+        // A new mult-count record might be genuinely novel (beats the best known to humanity). Only
+        // here do we check — and only a record that BEATS known-best AND passes EXACT verification is
+        // claimed. The race's 1e-9 float check is fine for ranking but NOT for asserting a theorem.
+        bool discovery = false;
+        if (metric == Metric.Muls && newRecord)
+            discovery = await ClaimIfNovelAsync(core, size, (long)bestScore, bestStrategy, bestSource, $"127.0.0.1:{myPort}", ct);
+
         string unit = MetricName(metric);
         string mine = metric == Metric.Muls ? $"{bestScore:F0} {unit}" : $"{bestScore:F2}{unit}";
         string champLine = champ is null
@@ -93,7 +102,98 @@ public static class MatmulRace
             ? $"NEW RECORD {size}x{size} [{unit}]: {mine} ({speedup:F2}x vs naive) — '{Short(bestStrategy, 50)}'. {champLine}"
             : $"Round {size}x{size} [{unit}]: my best {mine} ({speedup:F2}x). {champLine} Still chasing.";
 
-        return new RoundResult(size, metric, bestScore, speedup, bestStrategy, newRecord, summary);
+        return new RoundResult(size, metric, bestScore, speedup, bestStrategy, newRecord, summary, discovery);
+    }
+
+    // ── novelty gate (bite 16) ────────────────────────────────────────────────────────────
+    /// <summary>
+    /// Decide whether a new mult-count record is a genuine discovery and, if so, record it. Compares
+    /// against <see cref="MatmulKnownBest"/>; a result below a PROVEN lower bound is flagged as a bug
+    /// (verification is wrong, not a breakthrough); a result that beats known-best is EXACT-verified
+    /// (BigInteger, many random integer inputs) before any claim, then written as a discovery artifact.
+    /// Returns true only when a real, exactly-verified discovery was recorded.
+    /// </summary>
+    private static async Task<bool> ClaimIfNovelAsync(
+        AgentCore core, int size, long muls, string strategy, string source, string node, CancellationToken ct)
+    {
+        var (verdict, best, lower) = MatmulKnownBest.Classify(size, muls);
+        switch (verdict)
+        {
+            case MatmulKnownBest.Verdict.BelowLowerBound:
+                Console.WriteLine($"\n[novelty] {size}x{size} reported {muls} muls — below the PROVEN lower bound of {lower}. " +
+                                  "That's impossible, so our verification has a bug. NOT claiming anything; rejecting.");
+                await core.Events.AppendAsync("novelty-impossible",
+                    $"{size}x{size} {muls} muls < proven lower bound {lower} — verification bug, rejected");
+                return false;
+
+            case MatmulKnownBest.Verdict.BeatsKnownBest:
+                Console.WriteLine($"\n[novelty] {size}x{size} {muls} muls BEATS known-best ({best}) — running EXACT verification before any claim...");
+                if (!RecompileAndVerifyExact(source, size))
+                {
+                    Console.WriteLine("[novelty] exact verification FAILED — the float check was fooled. Rejecting, not a discovery.");
+                    await core.Events.AppendAsync("novelty-false-positive",
+                        $"{size}x{size} {muls} muls beat known-best but failed exact verification — rejected");
+                    return false;
+                }
+                Console.WriteLine("[novelty] exact verification PASSED. Recording a candidate discovery for human review.");
+                await core.RecordDiscoveryAsync(size, muls, best, lower, strategy, source, node, ct);
+                return true;
+
+            default: // Rediscovery / NoTarget — no claim
+                return false;
+        }
+    }
+
+    /// <summary>EXACT verification: recompile the source and confirm it computes the true product on
+    /// many random INTEGER matrices using BigInteger arithmetic — a bilinear scheme correct on enough
+    /// random integer inputs is correct with overwhelming certainty (Schwartz–Zippel).</summary>
+    private static bool RecompileAndVerifyExact(string source, int size)
+    {
+        if (!RuntimeCompiler.TryCompileAssembly(source, out Assembly? asm, out _)) return false;
+        Func<Scalar[,], Scalar[,], Scalar[,]>? fn = BindScalar(asm!);
+        return fn is not null && VerifyExact(fn, size);
+    }
+
+    private const int ExactTrials = 64;
+    private const int ExactEntryBound = 6; // small entries keep every double exact (far under 2^53)
+
+    /// <summary>Run the candidate on <see cref="ExactTrials"/> random integer matrices and require an
+    /// EXACT match against a BigInteger reference each time. Small entries guarantee the candidate's
+    /// double arithmetic is itself exact (integers below 2^53), so equality is a true exact check.</summary>
+    internal static bool VerifyExact(Func<Scalar[,], Scalar[,], Scalar[,]> fn, int size)
+    {
+        var rng = new Random(0x5CA1AB1E);
+        for (int trial = 0; trial < ExactTrials; trial++)
+        {
+            var ia = new long[size, size];
+            var ib = new long[size, size];
+            var da = new double[size, size];
+            var db = new double[size, size];
+            for (int i = 0; i < size; i++)
+                for (int j = 0; j < size; j++)
+                {
+                    ia[i, j] = rng.Next(-ExactEntryBound, ExactEntryBound + 1);
+                    ib[i, j] = rng.Next(-ExactEntryBound, ExactEntryBound + 1);
+                    da[i, j] = ia[i, j];
+                    db[i, j] = ib[i, j];
+                }
+
+            Scalar[,] got;
+            try { got = fn(Scalar.From(da), Scalar.From(db)); }
+            catch { return false; }
+            if (got.GetLength(0) != size || got.GetLength(1) != size) return false;
+
+            for (int i = 0; i < size; i++)
+                for (int j = 0; j < size; j++)
+                {
+                    BigInteger want = 0;
+                    for (int p = 0; p < size; p++) want += (BigInteger)ia[i, p] * ib[p, j];
+                    double g = got[i, j].ToDouble();
+                    if (g != Math.Floor(g)) return false;             // non-integer ⇒ wrong/rounded
+                    if ((BigInteger)g != want) return false;           // exact mismatch ⇒ wrong scheme
+                }
+        }
+        return true;
     }
 
     // ── wall-clock track (large sizes) ────────────────────────────────────────────────────
@@ -263,6 +363,25 @@ public static class MatmulRace
 
         RunSelfTestOne("naive   (expect muls=8)", naive, sa, sb, reference);
         RunSelfTestOne("strassen(expect muls=7)", strassen, sa, sb, reference);
+
+        // A transpose-bug candidate: correct only for symmetric inputs, so it slips the single-pair
+        // float check sometimes but the exact verifier (64 random integer matrices) must reject it.
+        const string buggy = """
+            using HAL9001;
+            public static class Kernel {
+              public static Scalar[,] Multiply(Scalar[,] a, Scalar[,] b) {
+                int n=a.GetLength(0), k=a.GetLength(1), m=b.GetLength(1);
+                var c=new Scalar[n,m];
+                for(int i=0;i<n;i++) for(int j=0;j<m;j++){ var s=new Scalar(0); for(int p=0;p<k;p++) s=s+a[i,p]*b[j,p]; c[i,j]=s; }
+                return c;
+              }
+            }
+            """;
+
+        Console.WriteLine("-- exact verifier (bite 16): correct schemes pass, wrong ones rejected --");
+        Console.WriteLine($"  naive   : exact-verify={ExactVerifyOne(naive)}    (expect True)");
+        Console.WriteLine($"  strassen: exact-verify={ExactVerifyOne(strassen)}    (expect True)");
+        Console.WriteLine($"  buggy   : exact-verify={ExactVerifyOne(buggy)}    (expect False)");
     }
 
     private static void RunSelfTestOne(string label, string src, Scalar[,] sa, Scalar[,] sb, double[,] reference)
@@ -277,4 +396,6 @@ public static class MatmulRace
         bool ok = CompareScalar(reference, got);
         Console.WriteLine($"  {label}: correct={ok}  muls={muls}  adds={adds}");
     }
+
+    private static bool ExactVerifyOne(string src) => RecompileAndVerifyExact(src, 2);
 }
