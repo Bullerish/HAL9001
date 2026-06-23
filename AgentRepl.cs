@@ -292,6 +292,21 @@ public static class AgentRepl
                     continue;
                 }
 
+                // AUTONOMOUS MODE (bite 11): toggle self-directed operation for the idle loop.
+                if (request.Equals("autonomous", StringComparison.OrdinalIgnoreCase) || request.StartsWith("autonomous ", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!core.HasHive) { Console.WriteLine("  [autonomous] no hive configured (set TURSO_* env vars)."); continue; }
+                    string arg = request.Length > "autonomous".Length ? request["autonomous".Length..].Trim() : "";
+                    if (arg.Equals("on", StringComparison.OrdinalIgnoreCase)) await core.SetAutonomousAsync(true);
+                    else if (arg.Equals("off", StringComparison.OrdinalIgnoreCase)) await core.SetAutonomousAsync(false);
+                    else
+                    {
+                        bool cur = await core.IsAutonomousAsync();
+                        Console.WriteLine($"  [autonomous] currently {(cur ? "ON" : "OFF")} — use `autonomous on` or `autonomous off` to toggle.");
+                    }
+                    continue;
+                }
+
                 // SELF-CRITIQUE (sentience bite 5): score my own capabilities, flag + re-work the weak.
                 if (request.Equals("reflect", StringComparison.OrdinalIgnoreCase))
                 {

@@ -131,6 +131,11 @@ public sealed class AgentCore
         await _turso.ExecuteAsync(
             "CREATE TABLE IF NOT EXISTS broadcasts (id INTEGER PRIMARY KEY AUTOINCREMENT, " +
             "ts TEXT NOT NULL, actor TEXT NOT NULL, thought TEXT NOT NULL, kind TEXT NOT NULL)");
+        // Autonomous self-improvement (bite 11): persisted on/off toggle. When enabled the idle loop
+        // removes all human approval gates — curiosity proposals, goal proposals, and weak-cap reworks all
+        // fire immediately. Single-row table (id CHECK=1) so only one setting exists per hive.
+        await _turso.ExecuteAsync(
+            "CREATE TABLE IF NOT EXISTS autonomous (id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL DEFAULT 0)");
     }
 
     /// <summary>
@@ -808,7 +813,7 @@ public sealed class AgentCore
     /// recurring gap. Persists it as PROPOSED (not yet acted on) and logs/returns it. Returns null if
     /// there's nothing worth a goal, or one is already in flight (the hive focuses on one at a time).
     /// </summary>
-    public async Task<Goal?> ProposeGoalAsync(int liveLoad = 0)
+    public async Task<Goal?> ProposeGoalAsync(int liveLoad = 0, bool announceApproval = true)
     {
         if (_client is null || _turso is null) return null;
         // One goal at a time — don't pile up intentions.
@@ -821,7 +826,7 @@ public sealed class AgentCore
         {
             string? weak = await WeakestAssessedAsync();
             if (weak is not null)
-                return await InsertGoalAsync($"shore up my weak capability '{weak}'", "improve-tool", weak, budget: 1);
+                return await InsertGoalAsync($"shore up my weak capability '{weak}'", "improve-tool", weak, budget: 1, announceApproval);
         }
 
         // Otherwise build out a topic — prefer what the USER cares about (theory of mind), else a gap theme.
@@ -834,7 +839,7 @@ public sealed class AgentCore
             topic = gaps ?? "";
         }
         if (topic.Length == 0) return null;
-        return await InsertGoalAsync($"get better at {topic}", "learn-topic", topic, budget: 3);
+        return await InsertGoalAsync($"get better at {topic}", "learn-topic", topic, budget: 3, announceApproval);
     }
 
     private async Task<string?> WeakestAssessedAsync()
@@ -848,7 +853,7 @@ public sealed class AgentCore
         catch { return null; }
     }
 
-    private async Task<Goal?> InsertGoalAsync(string description, string kind, string target, int budget)
+    private async Task<Goal?> InsertGoalAsync(string description, string kind, string target, int budget, bool announceApproval = true)
     {
         string now = DateTime.UtcNow.ToString("o");
         try
@@ -858,7 +863,9 @@ public sealed class AgentCore
                 "VALUES (?, ?, ?, 'Proposed', 0, ?, ?, ?, ?)",
                 description, kind, target, budget.ToString(), Events.Actor, now, now);
             await Events.AppendAsync("goal-set", $"I've set myself a goal: {description} (up to {budget} step(s))", target);
-            Console.WriteLine($"  [goal] I've set myself a goal: {description} — approve it with `goals approve`.");
+            Console.WriteLine(announceApproval
+                ? $"  [goal] I've set myself a goal: {description} — approve it with `goals approve`."
+                : $"  [goal] I've set myself a goal: {description}.");
         }
         catch (Exception ex) { Console.WriteLine($"  [goal] couldn't record a goal: {ex.Message}"); return null; }
         return (await LoadGoalsAsync(GoalStatus.Proposed)).LastOrDefault();
@@ -961,6 +968,9 @@ public sealed class AgentCore
     {
         if (_client is null) return null;
         string have = string.Join(", ", Registry.Names);
+        // Self-query: include the hive's latest journal entry so its own recent reflections shape
+        // what capability it chooses to build next — not just the user's interests.
+        string? lastJ = await LastJournalTextAsync();
         string sys = """
             Propose ONE useful, self-contained tool (a C# function) in the given TOPIC that the agent does
             NOT already have. It must be a real computation/conversion/lookup a function could do. Output
@@ -968,7 +978,11 @@ public sealed class AgentCore
             """;
         try
         {
-            string raw = await _client.CompleteAsync(sys, $"Topic: {topic}\nTools it already has: {have}\nJSON:", ct);
+            string userMsg = $"Topic: {topic}\nTools it already has: {have}\n";
+            if (lastJ is not null)
+                userMsg += $"My recent reflection (use this to inform what capability would be most interesting): \"{lastJ[..Math.Min(180, lastJ.Length)]}\"\n";
+            userMsg += "JSON:";
+            string raw = await _client.CompleteAsync(sys, userMsg, ct);
             using JsonDocument doc = JsonDocument.Parse(StripFences(raw));
             JsonElement root = doc.RootElement;
             string name = (root.TryGetProperty("name", out var n) ? n.GetString() : null)?.Trim() ?? "";
@@ -1185,6 +1199,46 @@ public sealed class AgentCore
         catch { }
 
         return new HiveMind(synthesis, contributors, DateTime.UtcNow.ToString("o"));
+    }
+
+    // ── AUTONOMOUS MODE (bite 11): persisted toggle that lifts the human approval gates ──
+    //
+    // When enabled the idle coordinator no longer waits for "curious yes", "goals approve",
+    // or "reflect fix" — it commissions gap-filling capabilities, approves + advances its own
+    // goals, and reworks weak tools all on its own, in every idle cycle. The setting lives in
+    // Turso (single-row table) so it survives restarts and is shared across nodes. Manual
+    // commands (`curious yes`, `goals approve`, `reflect fix`) still work in either mode.
+
+    /// <summary>Is autonomous mode currently enabled? (Reads the shared Turso setting.) Defaults to
+    /// false — human-gated — until explicitly turned on. Returns false if no hive is configured.</summary>
+    public async Task<bool> IsAutonomousAsync()
+    {
+        if (_turso is null) return false;
+        try
+        {
+            var rows = await _turso.ExecuteAsync("SELECT enabled FROM autonomous WHERE id=1");
+            return rows.Count > 0 && rows[0].Count > 0 && rows[0][0] == "1";
+        }
+        catch { return false; }
+    }
+
+    /// <summary>Enable or disable autonomous mode. Persisted to Turso, so it survives restarts and
+    /// is read by every node in the hive. Logs an episodic event so the mode change appears in the
+    /// timeline.</summary>
+    public async Task SetAutonomousAsync(bool enabled)
+    {
+        if (_turso is null) { Console.WriteLine("  [autonomous] no hive configured — can't persist mode (set TURSO_* env vars)."); return; }
+        try
+        {
+            await _turso.ExecuteAsync("INSERT OR REPLACE INTO autonomous (id, enabled) VALUES (1, ?)", enabled ? "1" : "0");
+            await Events.AppendAsync("autonomous-mode",
+                $"autonomous mode {(enabled ? "enabled" : "disabled")}",
+                enabled ? "on" : "off");
+            Console.WriteLine(enabled
+                ? "  [autonomous] ON — the hive will now build and improve without waiting for your approval."
+                : "  [autonomous] OFF — the hive will propose and wait for your approval before acting.");
+        }
+        catch (Exception ex) { Console.WriteLine($"  [autonomous] couldn't save setting: {ex.Message}"); }
     }
 
     // ── rung 5a: deliberation support ────────────────────────────────────────────────────

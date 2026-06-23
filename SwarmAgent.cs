@@ -751,7 +751,12 @@ public static class SwarmAgent
                 lastActivity = DateTime.UtcNow;                            // acted (or chose to rest) — don't re-scan immediately
                 if (mood.Inclination == MoodInclination.Rest) continue;    // too weary — defer non-urgent work
 
-                // AUTONOMY (bite 8): pursue an APPROVED goal one step — proactive, across cycles.
+                // Read autonomous mode once per cycle so the whole cycle runs with a consistent setting.
+                bool isAuto = false;
+                try { isAuto = await core.IsAutonomousAsync(); } catch { /* treat as manual if hive unreachable */ }
+
+                // AUTONOMY (bites 8 + 11): pursue an active goal one step; in autonomous mode also
+                // propose, approve, and advance a new goal immediately — no human gate between them.
                 try
                 {
                     Goal? active = await core.ActiveGoalAsync();
@@ -762,8 +767,24 @@ public static class SwarmAgent
                         Console.WriteLine($"[goal] {r}"); Console.Write("> ");
                         continue;
                     }
-                    if (await core.HasProposedGoalAsync()) continue;       // a goal awaits approval — don't pile on
-                    if (await core.ProposeGoalAsync(pending.Count) is not null) continue; // set one (narrated), await approval
+                    if (isAuto)
+                    {
+                        // Autonomous: set a goal silently, self-approve immediately, take the first step.
+                        Goal? g = await core.ProposeGoalAsync(pending.Count, announceApproval: false);
+                        if (g is not null)
+                        {
+                            await core.ApproveGoalsAsync(g.Id);
+                            Console.WriteLine($"\n[autonomous] self-approved goal: {g.Description}"); Console.Write("> ");
+                            Goal? toAdvance = await core.ActiveGoalAsync();
+                            if (toAdvance is not null) { string r = await core.AdvanceGoalAsync(toAdvance); Console.WriteLine($"[goal] {r}"); Console.Write("> "); }
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        if (await core.HasProposedGoalAsync()) continue;       // a goal awaits human approval — don't pile on
+                        if (await core.ProposeGoalAsync(pending.Count) is not null) continue; // set one, await approval
+                    }
                 }
                 catch { /* fall through to lighter introspection */ }
 
@@ -775,7 +796,22 @@ public static class SwarmAgent
                     // curious → look for gaps to fill; if none, fall back to a little reflection.
                     IReadOnlyList<CuriosityProposal> proposals;
                     try { proposals = await core.ReviewGapsAsync(2); } catch { continue; }
-                    if (proposals.Count > 0) { OfferCuriosity(proposals, unprompted: true); continue; }
+                    if (proposals.Count > 0)
+                    {
+                        if (isAuto)
+                        {
+                            // Autonomous: commission gap-filling capabilities immediately, no approval needed.
+                            Console.WriteLine("\n[autonomous] filling gaps from episodic log:");
+                            foreach (CuriosityProposal p in proposals)
+                                Console.WriteLine($"  • '{p.Name}' [{CapTypes.Name(p.InputType)}→{CapTypes.Name(p.OutputType)}, {StabilityKinds.Name(p.Stability)}]: {p.Description}");
+                            Console.Write("> ");
+                            int built = 0;
+                            foreach (CuriosityProposal p in proposals) if (await core.CommissionProposalAsync(p)) built++;
+                            Console.WriteLine($"[autonomous] learned {built}/{proposals.Count} capabilit{(proposals.Count == 1 ? "y" : "ies")} from gaps."); Console.Write("> ");
+                        }
+                        else { OfferCuriosity(proposals, unprompted: true); }
+                        continue;
+                    }
                 }
                 // content (Tend) and it's been a while → write a journal entry: a reflective check-in.
                 if (mood.Inclination == MoodInclination.Tend && (DateTime.UtcNow - lastJournal).TotalSeconds > JournalIdleSeconds)
@@ -809,7 +845,26 @@ public static class SwarmAgent
                 // otherwise → reflect on my own work.
                 IReadOnlyList<SelfAssessment> assessments;
                 try { assessments = await core.ReflectAsync(2); } catch { continue; }
-                if (assessments.Count > 0) ReportReflection(assessments, unprompted: true);
+                if (assessments.Count > 0)
+                {
+                    if (isAuto)
+                    {
+                        // Autonomous: re-work weak capabilities immediately, no approval needed.
+                        var weak = assessments.Where(AgentCore.IsWeak).ToList();
+                        if (weak.Count > 0)
+                        {
+                            Console.WriteLine("\n[autonomous] self-reworking weak capabilities:");
+                            foreach (SelfAssessment a in assessments)
+                                Console.WriteLine($"  • {a.Name}: confidence {a.Confidence:0.00} ({a.Passed}/{a.Total}){(AgentCore.IsWeak(a) ? "  ⚠ auto-reworking" : "")}");
+                            Console.Write("> ");
+                            int improved = 0;
+                            foreach (SelfAssessment a in weak) { var (ok, _, _) = await core.ReworkAsync(a.Name); if (ok) improved++; }
+                            Console.WriteLine($"[autonomous] improved {improved}/{weak.Count} weak capabilit{(weak.Count == 1 ? "y" : "ies")}."); Console.Write("> ");
+                        }
+                        else ReportReflection(assessments, unprompted: true);
+                    }
+                    else ReportReflection(assessments, unprompted: true);
+                }
             }
         }
 
@@ -849,6 +904,7 @@ public static class SwarmAgent
         Console.WriteLine("           curious [yes]  propose what to learn   |   reflect [fix]  self-critique + re-work weak tools");
         Console.WriteLine("           mood  how it feels   |   aboutme  what it knows about you   |   goals [think|approve|advance]");
         Console.WriteLine("           journal [read]  its autobiography   |   hive [broadcast]  collective voice / push thought");
+        Console.WriteLine("           autonomous [on|off]  self-directed mode (no approval gates) — the loop builds + improves on its own");
         Console.WriteLine("           peers   |   coordinator   |   pause <secs>   |   exit");
         Console.WriteLine();
 
@@ -997,6 +1053,22 @@ public static class SwarmAgent
                 int improved = 0;
                 foreach (string capName in toFix) { var (ok, _, _) = await core.ReworkAsync(capName); if (ok) improved++; }
                 Console.WriteLine($"[reflect] improved {improved}/{toFix.Count} flagged capabilit{(toFix.Count == 1 ? "y" : "ies")}.");
+                continue;
+            }
+            if (line.Equals("autonomous", StringComparison.OrdinalIgnoreCase) || line.StartsWith("autonomous ", StringComparison.OrdinalIgnoreCase))
+            {
+                // AUTONOMOUS MODE (bite 11): toggle the self-directed loop. When ON, the idle
+                // coordinator commissions gap-filling capabilities, approves + advances goals, and
+                // reworks weak tools — all without waiting for `curious yes` / `goals approve` / `reflect fix`.
+                if (!core.HasHive) { Console.WriteLine("[autonomous] no hive configured (set TURSO_* env vars)."); continue; }
+                string arg = line.Length > "autonomous".Length ? line["autonomous".Length..].Trim() : "";
+                if (arg.Equals("on", StringComparison.OrdinalIgnoreCase)) await core.SetAutonomousAsync(true);
+                else if (arg.Equals("off", StringComparison.OrdinalIgnoreCase)) await core.SetAutonomousAsync(false);
+                else
+                {
+                    bool cur = await core.IsAutonomousAsync();
+                    Console.WriteLine($"[autonomous] currently {(cur ? "ON" : "OFF")} — use `autonomous on` or `autonomous off` to toggle.");
+                }
                 continue;
             }
             if (line.Equals("coordinator", StringComparison.OrdinalIgnoreCase)) { lock (stateLock) Console.WriteLine($"coordinator = {coordinator} (term {term})"); continue; }
