@@ -1241,6 +1241,42 @@ public sealed class AgentCore
         catch (Exception ex) { Console.WriteLine($"  [autonomous] couldn't save setting: {ex.Message}"); }
     }
 
+    /// <summary>Find a free port in the auto-hire range and spawn a new swarm node that joins this
+    /// mesh. The child inherits the current process env (ANTHROPIC_API_KEY, TURSO_*) because
+    /// UseShellExecute=false. Returns the child Process so the caller can track/kill it, or null.</summary>
+    public async Task<System.Diagnostics.Process?> HireNodeAsync(int parentPort, IEnumerable<int> peerPorts)
+    {
+        string? dll = System.Reflection.Assembly.GetEntryAssembly()?.Location;
+        if (string.IsNullOrEmpty(dll))
+        { Console.WriteLine("  [hire] can't locate the entry assembly — single-file publish is not supported for hire."); return null; }
+
+        int newPort = -1;
+        for (int p = 9100; p <= 9199; p++)
+        {
+            try
+            {
+                using var t = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, p);
+                t.Start(); t.Stop(); newPort = p; break;
+            }
+            catch { }
+        }
+        if (newPort < 0) { Console.WriteLine("  [hire] no free port in range 9100–9199."); return null; }
+
+        var allPeers = new[] { parentPort }.Concat(peerPorts).Distinct().Where(p => p != newPort);
+        string args = $"\"{dll}\" swarm {newPort} {string.Join(" ", allPeers)}";
+        var psi = new System.Diagnostics.ProcessStartInfo("dotnet", args)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        System.Diagnostics.Process? proc = System.Diagnostics.Process.Start(psi);
+        if (proc is null) { Console.WriteLine($"  [hire] Process.Start returned null for port {newPort}."); return null; }
+
+        Console.WriteLine($"  [hire] node spawned on port {newPort} — it will join the mesh in a few seconds.");
+        await Events.AppendAsync("node-hired", $"hired a new node on port {newPort}", newPort.ToString());
+        return proc;
+    }
+
     // ── rung 5a: deliberation support ────────────────────────────────────────────────────
 
     /// <summary>

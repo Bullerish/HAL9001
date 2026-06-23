@@ -122,8 +122,11 @@ public static class SwarmAgent
         DateTime lastActivity = DateTime.UtcNow;              // bumped on REPL input + coordinating work
         DateTime lastJournal = DateTime.MinValue;            // when the hive last journaled (idle pacing)
         DateTime lastBroadcast = DateTime.MinValue;          // when the hive last broadcast a thought (bite 10)
-        const double CuriosityIdleSeconds = 30.0;
-        const double JournalIdleSeconds = 150.0;             // how often a content, idle hive journals
+        var hiredProcesses = new List<System.Diagnostics.Process>(); // child nodes spawned by autonomous hire
+        DateTime lastHireAt = DateTime.MinValue;
+        const int MaxAutoHiredNodes = 3;
+        const double CuriosityIdleSeconds = 10.0;
+        const double JournalIdleSeconds = 60.0;              // how often a content, idle hive journals
 
         // ── rung 4b-ii in-flight recovery state ───────────────────────────────────────────
         // doneAnswers: reqId -> finished answer. Every node keeps this for the reqs it coordinates,
@@ -865,6 +868,21 @@ public static class SwarmAgent
                     }
                     else ReportReflection(assessments, unprompted: true);
                 }
+
+                // AUTO-HIRE (bite 12): in autonomous mode, if the hive is solo, spawn a helper node.
+                if (isAuto)
+                {
+                    hiredProcesses.RemoveAll(p => p.HasExited);
+                    if (hiredProcesses.Count < MaxAutoHiredNodes && node.Peers.Count == 0
+                        && (DateTime.UtcNow - lastHireAt).TotalSeconds > 60)
+                    {
+                        var peerPts = node.Peers
+                            .Select(id => { int c = id.LastIndexOf(':'); return c >= 0 && int.TryParse(id[(c + 1)..], out int pt) ? pt : -1; })
+                            .Where(pt => pt > 0);
+                        System.Diagnostics.Process? hired = await core.HireNodeAsync(myPort, peerPts);
+                        if (hired is not null) { hiredProcesses.Add(hired); lastHireAt = DateTime.UtcNow; Console.Write("> "); }
+                    }
+                }
             }
         }
 
@@ -904,7 +922,8 @@ public static class SwarmAgent
         Console.WriteLine("           curious [yes]  propose what to learn   |   reflect [fix]  self-critique + re-work weak tools");
         Console.WriteLine("           mood  how it feels   |   aboutme  what it knows about you   |   goals [think|approve|advance]");
         Console.WriteLine("           journal [read]  its autobiography   |   hive [broadcast]  collective voice / push thought");
-        Console.WriteLine("           autonomous [on|off]  self-directed mode (no approval gates) — the loop builds + improves on its own");
+        Console.WriteLine("           autonomous [on|off]  self-directed mode — loop builds + improves without approval gates");
+        Console.WriteLine("           hire [n]  spawn n helper nodes (default 1, cap 3)   |   nodes  live node count");
         Console.WriteLine("           peers   |   coordinator   |   pause <secs>   |   exit");
         Console.WriteLine();
 
@@ -1071,6 +1090,32 @@ public static class SwarmAgent
                 }
                 continue;
             }
+            if (line.Equals("nodes", StringComparison.OrdinalIgnoreCase))
+            {
+                hiredProcesses.RemoveAll(p => p.HasExited);
+                Console.WriteLine($"[nodes] this node: {node.Id}");
+                Console.WriteLine($"[nodes] peers ({node.Peers.Count}): {(node.Peers.Count == 0 ? "none" : string.Join(", ", node.Peers))}");
+                Console.WriteLine($"[nodes] hired ({hiredProcesses.Count}/{MaxAutoHiredNodes}): {(hiredProcesses.Count == 0 ? "none" : string.Join(", ", hiredProcesses.Select(p => p.Id)))}");
+                continue;
+            }
+            if (line.Equals("hire", StringComparison.OrdinalIgnoreCase) || line.StartsWith("hire ", StringComparison.OrdinalIgnoreCase))
+            {
+                // SELF-SCALING (bite 12): manually spawn one or more helper nodes into the mesh.
+                string arg = line.Length > "hire".Length ? line["hire".Length..].Trim() : "1";
+                int count = int.TryParse(arg, out int n) ? Math.Clamp(n, 1, MaxAutoHiredNodes) : 1;
+                hiredProcesses.RemoveAll(p => p.HasExited);
+                int spawned = 0;
+                for (int i = 0; i < count && hiredProcesses.Count < MaxAutoHiredNodes; i++)
+                {
+                    var peerPts = node.Peers
+                        .Select(id => { int c = id.LastIndexOf(':'); return c >= 0 && int.TryParse(id[(c + 1)..], out int pt) ? pt : -1; })
+                        .Where(pt => pt > 0);
+                    System.Diagnostics.Process? hired = await core.HireNodeAsync(myPort, peerPts);
+                    if (hired is not null) { hiredProcesses.Add(hired); lastHireAt = DateTime.UtcNow; spawned++; }
+                }
+                if (spawned == 0) Console.WriteLine($"[hire] nothing spawned (at cap {MaxAutoHiredNodes} or port range full).");
+                continue;
+            }
             if (line.Equals("coordinator", StringComparison.OrdinalIgnoreCase)) { lock (stateLock) Console.WriteLine($"coordinator = {coordinator} (term {term})"); continue; }
             if (line.Equals("identity", StringComparison.OrdinalIgnoreCase) || line.Equals("whoami", StringComparison.OrdinalIgnoreCase))
             {
@@ -1155,6 +1200,7 @@ public static class SwarmAgent
             await AskSwarmAsync(line);
         }
 
+        foreach (var hp in hiredProcesses) { try { hp.Kill(entireProcessTree: true); } catch { } hp.Dispose(); }
         loopCts.Cancel();
         Console.WriteLine("Goodbye.");
     }
