@@ -199,6 +199,8 @@ public static class Dashboard
   .live .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-right:6px;animation:pulse 1.6s infinite}
   .on{color:var(--accent2);border-color:#16324f}
   .off{color:var(--warn);border-color:#3a2e16}
+  .snd{cursor:pointer;background:transparent;font:inherit}
+  .snd.on{color:var(--gold);border-color:#3a3216}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
   .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
   .panel h2{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);margin-bottom:10px;font-weight:600}
@@ -232,6 +234,7 @@ public static class Dashboard
   <div class="badges">
     <span class="pill live"><span class="dot"></span>live · <span id="clock">—</span></span>
     <span class="pill" id="auto">autonomous —</span>
+    <button class="pill snd" id="snd">♪ sound off</button>
   </div>
 </header>
 
@@ -271,6 +274,59 @@ public static class Dashboard
 const $=id=>document.getElementById(id);
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 function score(c){return c.metric==="muls"?Math.round(c.score)+" muls":c.score.toFixed(2)+" ms";}
+
+let AC=null,master=null,sound=false;
+function initAudio(){
+  AC=new (window.AudioContext||window.webkitAudioContext)();
+  master=AC.createGain();master.gain.value=0;master.connect(AC.destination);
+  const chord=[110,164.81,220];
+  chord.forEach((f,i)=>{
+    const o=AC.createOscillator();o.type=i===2?"triangle":"sine";o.frequency.value=f;
+    const g=AC.createGain();g.gain.value=0.05;
+    const lp=AC.createBiquadFilter();lp.type="lowpass";lp.frequency.value=520;
+    const lfo=AC.createOscillator();lfo.frequency.value=0.04+i*0.017;
+    const lg=AC.createGain();lg.gain.value=0.03;lfo.connect(lg);lg.connect(g.gain);lfo.start();
+    o.connect(lp);lp.connect(g);g.connect(master);o.start();
+  });
+  master.gain.linearRampToValueAtTime(0.45,AC.currentTime+3);
+}
+function tone(freq,dur,type,vol){
+  if(!AC||!sound)return;const o=AC.createOscillator();o.type=type||"sine";o.frequency.value=freq;
+  const g=AC.createGain();g.gain.value=0;o.connect(g);g.connect(master);const t=AC.currentTime;
+  g.gain.linearRampToValueAtTime(vol||0.2,t+0.02);g.gain.exponentialRampToValueAtTime(0.0001,t+(dur||0.4));
+  o.start(t);o.stop(t+(dur||0.4)+0.05);
+}
+function arp(base,steps,vol){steps.forEach((s,i)=>setTimeout(()=>tone(base*Math.pow(2,s/12),0.55,"triangle",vol||0.16),i*110));}
+const sfx={
+  blip:()=>tone(660,0.18,"sine",0.08),         // a life event ticked by
+  record:()=>arp(523.25,[0,4,7,12]),           // new champion — C major run up
+  node:()=>tone(146.83,1.4,"sine",0.14),       // a node joined — warm low swell
+  rise:()=>arp(392,[0,2,4,7]),                 // climbed a ladder rung
+  discovery:()=>arp(523.25,[0,4,7,12,16,19,24],0.2), // a genuine discovery — fanfare
+};
+let prev=null;
+function react(s){
+  if(!sound)return;
+  const cur={records:s.stats?s.stats.records:0,disc:s.stats?s.stats.discoveries:0,
+             nodes:(s.nodes&&s.nodes.length)||0,size:s.ladder?s.ladder.currentSize:0,
+             top:(s.events&&s.events[0])?s.events[0].ts+s.events[0].summary:""};
+  if(prev){
+    if(cur.disc>prev.disc)sfx.discovery();
+    else if(cur.records>prev.records)sfx.record();
+    if(cur.nodes>prev.nodes)sfx.node();
+    if(cur.size>prev.size)sfx.rise();
+    if(cur.top!==prev.top)sfx.blip();
+  }
+  prev=cur;
+}
+$("snd").onclick=()=>{
+  if(!AC)initAudio();
+  sound=!sound;
+  if(AC.state==="suspended")AC.resume();
+  master.gain.setTargetAtTime(sound?0.45:0,AC.currentTime,0.4);
+  $("snd").textContent=sound?"♪ sound on":"♪ sound off";
+  $("snd").className="pill snd"+(sound?" on":"");
+};
 async function tick(){
   let s; try{ s=await (await fetch("/api/state")).json(); }catch(e){ return; }
   $("clock").textContent=s.now||"—";
@@ -308,6 +364,7 @@ async function tick(){
   }).join(""):'<div class="empty">no events yet.</div>';
 
   $("journal").textContent=s.journal?s.journal.entry:"—";
+  react(s);
 }
 tick(); setInterval(tick,2500);
 </script>

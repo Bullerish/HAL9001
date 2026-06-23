@@ -125,14 +125,23 @@ public static class SwarmAgent
         var hiredProcesses = new List<System.Diagnostics.Process>(); // child nodes spawned by autonomous hire
         DateTime lastHireAt = DateTime.MinValue;
         const int MaxAutoHiredNodes = 3;
-        const double CuriosityIdleSeconds = 10.0;
-        const double JournalIdleSeconds = 60.0;              // how often a content, idle hive journals
+        // AMBIENT PACING (bite 18): HAL_PACE scales every idle/LLM cadence up to throttle token burn for
+        // a long-running "leave it on and watch" deployment. 1 = default snappy demo pace; "slow" ≈ 6×
+        // (a few LLM cycles an hour, ~a dollar a day on the cheap model); any number sets the multiplier.
+        double pace = 1.0;
+        {
+            string? paceEnv = Environment.GetEnvironmentVariable("HAL_PACE");
+            if (string.Equals(paceEnv, "slow", StringComparison.OrdinalIgnoreCase)) pace = 6.0;
+            else if (double.TryParse(paceEnv, out double pv) && pv > 0) pace = pv;
+        }
+        double CuriosityIdleSeconds = 10.0 * pace;
+        double JournalIdleSeconds = 60.0 * pace;            // how often a content, idle hive journals
         // Prime Directive race (bite 14): each autonomous node runs matmul optimization rounds
         // continuously; a new record triggers a peer challenge so every node immediately fires back.
         var matmulTrigger = new System.Threading.SemaphoreSlim(0, 5); // peer challenges wake the race loop
         DateTime lastRaceAt = DateTime.MinValue;
-        const double MatmulRaceIntervalSecs = 120.0; // baseline: one round every 2 minutes
-        const double MinRaceIntervalSecs = 30.0;     // rate-limit so challenge cascades don't spiral
+        double MatmulRaceIntervalSecs = 120.0 * pace; // baseline: one round every 2 minutes (×pace)
+        double MinRaceIntervalSecs = 30.0 * pace;     // rate-limit so challenge cascades don't spiral
 
         // ── rung 4b-ii in-flight recovery state ───────────────────────────────────────────
         // doneAnswers: reqId -> finished answer. Every node keeps this for the reqs it coordinates,
@@ -1018,6 +1027,7 @@ public static class SwarmAgent
         if (core.Identity is not null)
             Console.WriteLine($"I am {core.Identity.Name} — {core.Identity.Concept} (born {core.Identity.Born[..Math.Min(10, core.Identity.Born.Length)]})");
         try { string? d = await core.GetDirectiveAsync(); if (d is not null) Console.WriteLine($"Prime Directive: {d}"); } catch { }
+        if (pace != 1.0) Console.WriteLine($"Ambient pace ×{pace:0.#} — idle cadences slowed (race every {MatmulRaceIntervalSecs:0}s) to throttle token burn.");
         Console.WriteLine("Commands:  <question>   ask the swarm (assign-to-one)   |   deliberate <question>  fan-out: every node competes");
         Console.WriteLine("           compose <question>  chain existing typed capabilities   |   remember <fact>  store knowledge in the hive");
         Console.WriteLine("           identity  who the hive is   |   timeline [n]  replay its episodic memory   |   @<port> <msg>  direct");

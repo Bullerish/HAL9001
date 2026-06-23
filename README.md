@@ -350,6 +350,8 @@ A "mission control" you can open in a browser and watch the swarm think, race, a
 - **Shows:** the hive's name + self-concept + Prime Directive, a live/autonomous indicator, metric cards (active nodes, records set, life events, discoveries), the **size ladder** (converged rungs marked ✓, the current rung highlighted), the **champions** table (score + ×-vs-naive per size), self-set goals, a live **event feed** (discoveries highlighted gold), and the latest journal entry.
 - **Security:** the Turso auth token stays **server-side** (read from the env by AgentCore) — the browser only ever receives already-derived JSON. The listener binds to `localhost` only.
 - **`dashboard [port]` command** (default 8765) — auto-opens your browser; no API key needed (read-only).
+- **Reactive ambient audio (the "leave it on and vibe to it" mode):** a `♪ sound` toggle starts a generative Web Audio drone (pure client-side, no deps) that *reacts to the hive* — a soft blip as life events tick by, a C-major run when a champion falls, a warm swell when a node joins, a rising arpeggio on a ladder climb, a fanfare on a genuine discovery.
+- **Ambient pacing for cheap 24/7 runs:** `HAL_PACE` scales every idle/LLM cadence on the swarm side — `HAL_PACE=slow` (≈6×) or any multiplier slows the loop to a few LLM cycles an hour, throttling token burn so the hive can be left running for ~a dollar a day on the cheap model. Printed in the swarm banner when active.
 - *Verified live against the real hive: serves the page + live JSON (identity "Forge", 714 life events, 4 nodes, ladder at 2×2). Run a swarm with `autonomous on` in one terminal and `dashboard` in another to watch the race climb.*
 
 ### LLM-Free Derivation — search the matmul tensor directly, no LLM (bite 17)
