@@ -374,10 +374,11 @@ const $=id=>document.getElementById(id);
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 function score(c){return c.metric==="muls"?Math.round(c.score)+" muls":c.score.toFixed(2)+" ms";}
 
-let AC=null,master=null,sound=false;
+let AC=null,master=null,sound=false,analyser=null,vdata=null,vraf=0,vlevel=0;
 function initAudio(){
   AC=new (window.AudioContext||window.webkitAudioContext)();
   master=AC.createGain();master.gain.value=0;master.connect(AC.destination);
+  analyser=AC.createAnalyser();analyser.fftSize=512;vdata=new Uint8Array(analyser.frequencyBinCount);master.connect(analyser);
   const chord=[110,164.81,220];
   chord.forEach((f,i)=>{
     const o=AC.createOscillator();o.type=i===2?"triangle":"sine";o.frequency.value=f;
@@ -418,6 +419,29 @@ function react(s){
   }
   prev=cur;
 }
+// Drive the inner lens brightness from the LIVE audio amplitude: darker at rest, pulsing up with
+// the drone's slow swell and spiking on each chime/swell/fanfare — so the eye beats to the sound.
+function startVisual(){
+  if(!analyser)return;
+  cancelAnimationFrame(vraf);
+  const glow=document.querySelector(".glow");
+  if(glow)glow.style.animation="none"; // let the analyser drive brightness instead of the breathe loop
+  const loop=()=>{
+    analyser.getByteTimeDomainData(vdata);
+    let sum=0; for(let i=0;i<vdata.length;i++){const d=(vdata[i]-128)/128;sum+=d*d;}
+    const rms=Math.sqrt(sum/vdata.length);
+    vlevel+=(rms-vlevel)*0.3;
+    const b=Math.max(0.22,Math.min(1.7,0.32+vlevel*9));
+    if(glow)glow.style.filter="brightness("+b.toFixed(3)+")";
+    vraf=requestAnimationFrame(loop);
+  };
+  loop();
+}
+function stopVisual(){
+  cancelAnimationFrame(vraf);vraf=0;
+  const glow=document.querySelector(".glow");
+  if(glow){glow.style.filter="";glow.style.animation="";} // restore the gentle CSS breathe
+}
 $("snd").onclick=()=>{
   if(!AC)initAudio();
   sound=!sound;
@@ -425,6 +449,7 @@ $("snd").onclick=()=>{
   master.gain.setTargetAtTime(sound?0.45:0,AC.currentTime,0.4);
   $("snd").textContent=sound?"♪ sound on":"♪ sound off";
   $("snd").className="pill snd"+(sound?" on":"");
+  if(sound)startVisual(); else stopVisual();
 };
 async function tick(){
   let s; try{ s=await (await fetch("/api/state")).json(); }catch(e){ return; }
