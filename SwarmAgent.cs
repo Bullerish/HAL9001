@@ -121,6 +121,7 @@ public static class SwarmAgent
         var pendingRework = new List<string>();               // weak capabilities flagged for `reflect fix`
         DateTime lastActivity = DateTime.UtcNow;              // bumped on REPL input + coordinating work
         DateTime lastJournal = DateTime.MinValue;            // when the hive last journaled (idle pacing)
+        DateTime lastBroadcast = DateTime.MinValue;          // when the hive last broadcast a thought (bite 10)
         const double CuriosityIdleSeconds = 30.0;
         const double JournalIdleSeconds = 150.0;             // how often a content, idle hive journals
 
@@ -781,7 +782,29 @@ public static class SwarmAgent
                 {
                     JournalEntry? j;
                     try { j = await core.WriteJournalAsync(); } catch { j = null; }
-                    if (j is not null) { lastJournal = DateTime.UtcNow; Console.WriteLine($"\n[journal] (idle) I wrote in my journal:\n  {j.Entry}"); Console.Write("> "); continue; }
+                    if (j is not null)
+                    {
+                        lastJournal = DateTime.UtcNow;
+                        Console.WriteLine($"\n[journal] (idle) I wrote in my journal:\n  {j.Entry}");
+                        Console.Write("> ");
+                        // COLLECTIVE CONSCIOUSNESS (bite 10): after journaling, broadcast thought + speak as one.
+                        try
+                        {
+                            await core.BroadcastThoughtAsync("journal");
+                            lastBroadcast = DateTime.UtcNow;
+                            HiveMind? hm = await core.SynthesizeHiveMindAsync();
+                            if (hm is not null)
+                            {
+                                string bline = hm.Contributors.Length > 0
+                                    ? $" [{string.Join(", ", hm.Contributors)}]"
+                                    : "";
+                                Console.WriteLine($"\n[hive{bline}] {hm.Synthesis}");
+                                Console.Write("> ");
+                            }
+                        }
+                        catch { /* best-effort — don't break the idle loop */ }
+                        continue;
+                    }
                 }
                 // otherwise → reflect on my own work.
                 IReadOnlyList<SelfAssessment> assessments;
@@ -825,7 +848,8 @@ public static class SwarmAgent
         Console.WriteLine("           identity  who the hive is   |   timeline [n]  replay its episodic memory   |   @<port> <msg>  direct");
         Console.WriteLine("           curious [yes]  propose what to learn   |   reflect [fix]  self-critique + re-work weak tools");
         Console.WriteLine("           mood  how it feels   |   aboutme  what it knows about you   |   goals [think|approve|advance]");
-        Console.WriteLine("           journal [read]  its autobiography   |   peers   |   coordinator   |   pause <secs>   |   exit");
+        Console.WriteLine("           journal [read]  its autobiography   |   hive [broadcast]  collective voice / push thought");
+        Console.WriteLine("           peers   |   coordinator   |   pause <secs>   |   exit");
         Console.WriteLine();
 
         while (true)
@@ -893,6 +917,39 @@ public static class SwarmAgent
                     lastJournal = DateTime.UtcNow;
                     JournalEntry? j = await core.WriteJournalAsync();
                     Console.WriteLine(j is null ? "[journal] couldn't write an entry." : $"[journal] {j.Entry}");
+                }
+                continue;
+            }
+            if (line.Equals("hive", StringComparison.OrdinalIgnoreCase) || line.StartsWith("hive ", StringComparison.OrdinalIgnoreCase))
+            {
+                // COLLECTIVE CONSCIOUSNESS (bite 10): speak as the unified hive, or broadcast a thought.
+                if (!core.HasLlm || !core.HasHive) { Console.WriteLine("[hive] needs an API key + hive."); continue; }
+                string arg = line.Length > "hive".Length ? line["hive".Length..].Trim() : "";
+                if (arg.Equals("broadcast", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        await core.BroadcastThoughtAsync("manual");
+                        Console.WriteLine("[hive] thought broadcast to the shared workspace.");
+                    }
+                    catch (Exception ex) { Console.WriteLine($"[hive] broadcast failed: {ex.Message}"); }
+                }
+                else
+                {
+                    try
+                    {
+                        HiveMind? hm = await core.SynthesizeHiveMindAsync();
+                        if (hm is null)
+                            Console.WriteLine("[hive] no thoughts in the shared workspace yet — try `hive broadcast` first.");
+                        else
+                        {
+                            string bline = hm.Contributors.Length > 0
+                                ? $" [{string.Join(", ", hm.Contributors)}]"
+                                : "";
+                            Console.WriteLine($"[hive{bline}] {hm.Synthesis}");
+                        }
+                    }
+                    catch (Exception ex) { Console.WriteLine($"[hive] couldn't synthesize: {ex.Message}"); }
                 }
                 continue;
             }

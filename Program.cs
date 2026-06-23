@@ -82,6 +82,43 @@ switch (args[0].ToLowerInvariant())
         break;
     }
 
+    // hive → speak as the collective consciousness: synthesize all nodes' broadcast thoughts into one
+    // first-person voice. Standalone (no swarm needed) — proves the collective self lives in the shared
+    // DB, not in any process. Needs the TURSO_* env vars + ANTHROPIC_API_KEY (for synthesis).
+    case "hive":
+    {
+        AnthropicClient? client = AnthropicClient.FromEnvironment();
+        if (client is null)
+        {
+            Console.WriteLine("ANTHROPIC_API_KEY is not set — can't synthesize the collective voice.");
+            Console.WriteLine("Set it for this terminal, then re-run.");
+            break;
+        }
+        using (client)
+        {
+            var core = new AgentCore(client);
+            if (!core.HasHive)
+            {
+                Console.WriteLine("No hive configured — set TURSO_DATABASE_URL + TURSO_AUTH_TOKEN.");
+                Console.WriteLine("Run the agent or swarm with the hive configured first, then re-run `hive`.");
+                break;
+            }
+            try { await core.EnsureHiveAsync(); }
+            catch (Exception ex) { Console.WriteLine($"Hive unavailable: {ex.Message}"); break; }
+            HiveIdentity? id = core.Identity;
+            if (id is not null) Console.WriteLine($"I am {id.Name}.\n");
+            HiveMind? hm = await core.SynthesizeHiveMindAsync();
+            if (hm is null)
+                Console.WriteLine("No thoughts in the shared workspace yet — run the agent or swarm for a while, then re-run `hive`.");
+            else
+            {
+                string contributors = hm.Contributors.Length == 0 ? "" : $"[{string.Join(", ", hm.Contributors)}]\n\n";
+                Console.WriteLine(contributors + hm.Synthesis);
+            }
+        }
+        break;
+    }
+
     // demo → Step 1 Roslyn compile-and-load demo
     case "demo":
         RoslynDemo.Run();
@@ -109,5 +146,6 @@ switch (args[0].ToLowerInvariant())
         Console.WriteLine("  HAL9001 kernel [size] [n]     Kernel-opt search: generate/verify/benchmark/rank matmul");
         Console.WriteLine("  HAL9001 timeline [n]          Replay the hive's episodic memory (needs TURSO_* env vars)");
         Console.WriteLine("  HAL9001 identity              Show the hive's persistent identity (needs TURSO_* env vars)");
+        Console.WriteLine("  HAL9001 hive                  Speak as the collective (needs TURSO_* + API key); standalone, self lives in the DB");
         break;
 }

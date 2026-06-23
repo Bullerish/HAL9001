@@ -236,6 +236,35 @@ public static class AgentRepl
                     continue;
                 }
 
+                // COLLECTIVE CONSCIOUSNESS (sentience bite 10): speak as the unified hive or broadcast a thought.
+                if (request.Equals("hive", StringComparison.OrdinalIgnoreCase) || request.StartsWith("hive ", StringComparison.OrdinalIgnoreCase))
+                {
+                    string arg = request.Length > "hive".Length ? request["hive".Length..].Trim() : "";
+                    if (arg.Equals("broadcast", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try { await core.BroadcastThoughtAsync("manual"); Console.WriteLine("  [hive] thought broadcast to the shared workspace."); }
+                        catch (Exception ex) { Console.WriteLine($"  [hive] broadcast failed: {ex.Message}"); }
+                    }
+                    else
+                    {
+                        try
+                        {
+                            HiveMind? hm = await core.SynthesizeHiveMindAsync();
+                            if (hm is null)
+                                Console.WriteLine("  [hive] no thoughts yet — try `hive broadcast` first, or run the swarm for a while.");
+                            else
+                            {
+                                string bline = hm.Contributors.Length > 0
+                                    ? $" [{string.Join(", ", hm.Contributors)}]"
+                                    : "";
+                                Console.WriteLine($"  [hive{bline}] {hm.Synthesis}");
+                            }
+                        }
+                        catch (Exception ex) { Console.WriteLine($"  [hive] couldn't synthesize: {ex.Message}"); }
+                    }
+                    continue;
+                }
+
                 // AUTONOMY (sentience bite 8): self-set goals — list / think / approve / advance.
                 if (request.Equals("goals", StringComparison.OrdinalIgnoreCase) || request.StartsWith("goals ", StringComparison.OrdinalIgnoreCase))
                 {
