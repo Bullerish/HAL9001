@@ -1,0 +1,24 @@
+[Unit]
+Description=HAL9001 dashboard (read-only web UI over the hive)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hal
+Group=hal
+WorkingDirectory=/opt/hal9001
+EnvironmentFile=/etc/hal9001/hal.env
+# Serves the HAL 9001 page + JSON API on localhost:8765; Caddy fronts it with TLS.
+ExecStart=/opt/hal9001/HAL9001 dashboard 8765
+StandardInput=null
+Restart=always
+RestartSec=5
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

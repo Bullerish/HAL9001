@@ -1,0 +1,10 @@
+# /etc/caddy/Caddyfile  — Caddy gets a free Let's Encrypt TLS cert automatically
+# (just needs ports 80+443 open and hal9001.io's DNS A record pointing at this box).
+#
+# The dashboard is read-only except the verified /api/contribute and the secret-gated
+# /api/donate, so it's safe to expose. Caddy proxies to the local dashboard process.
+
+hal9001.io, www.hal9001.io {
+	encode zstd gzip
+	reverse_proxy localhost:8765
+}

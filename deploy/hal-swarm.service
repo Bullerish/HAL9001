@@ -1,0 +1,25 @@
+[Unit]
+Description=HAL9001 hive (autonomous swarm node)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hal
+Group=hal
+WorkingDirectory=/opt/hal9001
+EnvironmentFile=/etc/hal9001/hal.env
+# Self-contained publish: the executable bundles the .NET runtime (no dotnet install needed).
+# stdin is null under systemd, so the node runs headless (no REPL) and just runs its loops.
+ExecStart=/opt/hal9001/HAL9001 swarm 9000
+StandardInput=null
+Restart=always
+RestartSec=5
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

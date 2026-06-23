@@ -1,0 +1,5 @@
+# Deploy artifacts must stay LF so they work on the Linux server (CRLF breaks bash + systemd).
+*.sh            text eol=lf
+*.service       text eol=lf
+Caddyfile       text eol=lf
+hal.env.example text eol=lf
