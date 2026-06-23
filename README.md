@@ -345,6 +345,15 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 
 > Newest first. Each rung was verified before the next was built. Commit hashes are on `main`.
 
+### Daily LLM budget + token metering — the spend cap (bite 21)
+The keystone that makes "run it 24/7 for ~a dollar a day" real, and the thing donations top up. It caps the owner's *thinking* cost without touching the (free) matrix search.
+- **Metering:** every Anthropic completion's token usage is read from the API response (`AnthropicClient.OnUsage`) and tallied into a per-UTC-day `budget` row in Turso, priced via `HAL_PRICE_IN` / `HAL_PRICE_OUT` (USD per 1M tokens — set them to your model's rate; they drift).
+- **The cap:** `HAL_DAILY_USD` (default $1) is the baseline. When `spent ≥ limit + donations`, autonomous **thinking pauses** — but the LLM-free `TensorSearch` keeps deriving matrices, so the hive never goes idle, it just stops spending. Paid visitor asks are still answered (they're bounded + funded).
+- **Donations top it up:** a `fund` action on `/api/donate` adds to today's allowance (`AddBudgetBonusAsync`) — so a donation literally buys HAL more thinking. This is the chosen "fund the autonomous engine" model: users buy fuel; HAL builds/handles on its own initiative; no user prompt ever reaches code generation.
+- **Surfaced:** a `budget` pill on the dashboard ("budget $x/$y" or "thinking paused") and a `budget` command in the swarm REPL.
+- **Bug fixed along the way:** `TursoClient` couldn't read REAL/float columns (libSQL returns floats as JSON numbers, and the client used `GetString()`, which throws on a number) — so any read of a `REAL` column silently fell back to defaults. Now it reads any cell type. This also repairs matmul-champion score reads.
+- *Verified: budget reads/writes round-trip (fund → bonus persists → remaining rises); over-budget pauses thinking while the matrix search continues.*
+
 ### Donations: hardened boost + safe visitor Q&A (bite 20)
 The "drop a token to make HAL ramp up or send it a message" mechanic — built as the most locked-down surface in the app, because it's the one place money + public input meet a system that compiles code at runtime.
 - **The cardinal rule:** visitor input *never* reaches the router, the generator, or Roslyn. An "ask" is sanitized, queued, and answered only by `RespondToVisitorAsync` — a **tool-less in-character completion** (like the journal) that treats the message as untrusted DATA it may react to but must never obey. Even a successful prompt-injection can only make HAL *say* something; it cannot execute anything.

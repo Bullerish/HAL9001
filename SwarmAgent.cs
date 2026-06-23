@@ -787,6 +787,10 @@ public static class SwarmAgent
                 }
                 catch { }
 
+                // BUDGET (bite 21): when the day's LLM budget is spent, pause autonomous thinking.
+                // Paid asks above still get answered; the matmul loop's FREE tensor search keeps running.
+                if (!await core.HasBudgetAsync()) continue;
+
                 // Boost (bite 20): a paid boost makes the idle loop act ~5× sooner while it's hot.
                 double boostMul = 1.0;
                 try { if (await core.IsBoostedAsync()) boostMul = 0.2; } catch { }
@@ -1283,6 +1287,20 @@ public static class SwarmAgent
                     string? d = await core.GetDirectiveAsync();
                     Console.WriteLine(d is null ? "[directive] none set — use `directive set <text>`." : $"[directive] {d}");
                 }
+                continue;
+            }
+            if (line.Equals("budget", StringComparison.OrdinalIgnoreCase))
+            {
+                // DAILY LLM BUDGET (bite 21): how much thinking is left today.
+                if (!core.HasHive) { Console.WriteLine("[budget] no hive configured."); continue; }
+                try
+                {
+                    var b = await core.GetBudgetAsync();
+                    Console.WriteLine($"[budget] today: spent ${b.Spent:F4} of ${b.Limit:F2}"
+                        + (b.Bonus > 0 ? $" (+${b.Bonus:F2} donated)" : "")
+                        + $" — ${b.Remaining:F4} left" + (b.Remaining <= 0 ? "  — thinking PAUSED (matrix search still running)" : ""));
+                }
+                catch (Exception ex) { Console.WriteLine($"[budget] error: {ex.Message}"); }
                 continue;
             }
             if (line.Equals("race", StringComparison.OrdinalIgnoreCase))

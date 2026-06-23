@@ -69,6 +69,10 @@ public sealed class AgentCore
             _generator = new HandlerGenerator(client, Registry, Git);
             _router = new CapabilityRouter(client, Registry);
         }
+        // Meter every LLM completion's token cost into the daily budget (bite 21). Best-effort,
+        // fire-and-forget; no-op without a hive. Static hook → one accounting core per process.
+        if (_turso is not null)
+            AnthropicClient.OnUsage = u => _ = RecordSpendAsync(u);
     }
 
     /// <summary>True when the hive's shared knowledge store (Turso) is configured.</summary>
@@ -168,6 +172,11 @@ public sealed class AgentCore
         await _turso.ExecuteAsync(
             "CREATE TABLE IF NOT EXISTS asks (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, " +
             "sender TEXT NOT NULL DEFAULT '', text TEXT NOT NULL DEFAULT '', reply TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending')");
+        // Daily LLM budget (bite 21): one row per UTC day. `spent` is metered from real token usage;
+        // `bonus` is added by donations. Thinking pauses when spent ≥ base limit + bonus; the LLM-free
+        // matrix search keeps running regardless. The base limit is HAL_DAILY_USD (default $1/day).
+        await _turso.ExecuteAsync(
+            "CREATE TABLE IF NOT EXISTS budget (day TEXT PRIMARY KEY, spent REAL NOT NULL DEFAULT 0, bonus REAL NOT NULL DEFAULT 0)");
         var drows = await _turso.ExecuteAsync("SELECT text FROM directive WHERE id=1");
         if (drows.Count == 0 || drows[0].Count == 0 || string.IsNullOrWhiteSpace(drows[0][0]))
         {
@@ -1587,6 +1596,75 @@ public sealed class AgentCore
         string user = $"Visitor \"{sender}\" says: <<<{text}>>>";
         try { return Sanitize(await _client.CompleteAsync(sys, user, ct), 600); }
         catch { return ""; }
+    }
+
+    // ── daily LLM budget (bite 21) ─────────────────────────────────────────────────────────
+    // The owner's baseline thinking cost is capped per UTC day; donations add bonus on top; the
+    // LLM-free matrix search is unaffected. Prices are configurable (they drift) — set them to match
+    // your model's current rate. Defaults are a Haiku-class ballpark.
+    private static double EnvD(string key, double def)
+    {
+        string? v = Environment.GetEnvironmentVariable(key);
+        return double.TryParse(v, System.Globalization.NumberStyles.Any, Inv, out double d) ? d : def;
+    }
+    /// <summary>Owner's baseline daily LLM budget in USD (env HAL_DAILY_USD, default 1.0).</summary>
+    public static double DailyBudgetUsd => EnvD("HAL_DAILY_USD", 1.0);
+    private static double PriceInPerMTok => EnvD("HAL_PRICE_IN", 1.0);    // USD per 1M input tokens
+    private static double PriceOutPerMTok => EnvD("HAL_PRICE_OUT", 5.0);  // USD per 1M output tokens
+    private static string BudgetDay => DateTime.UtcNow.ToString("yyyy-MM-dd");
+
+    /// <summary>Tally one completion's cost into today's spend (from metered token usage).</summary>
+    public async Task RecordSpendAsync(AnthropicClient.Usage u)
+    {
+        if (_turso is null) return;
+        double cost = u.InputTokens / 1_000_000.0 * PriceInPerMTok + u.OutputTokens / 1_000_000.0 * PriceOutPerMTok;
+        if (cost <= 0) return;
+        try
+        {
+            string day = BudgetDay, c = cost.ToString("F6", Inv);
+            await _turso.ExecuteAsync("INSERT OR IGNORE INTO budget (day, spent, bonus) VALUES (?, 0, 0)", day);
+            await _turso.ExecuteAsync("UPDATE budget SET spent = spent + ? WHERE day = ?", c, day);
+        }
+        catch { }
+    }
+
+    /// <summary>Today's budget picture: spent, base limit, donation bonus, and remaining (≥0).</summary>
+    public async Task<(double Spent, double Limit, double Bonus, double Remaining)> GetBudgetAsync()
+    {
+        double limit = DailyBudgetUsd, spent = 0, bonus = 0;
+        if (_turso is not null)
+        {
+            try
+            {
+                var rows = await _turso.ExecuteAsync("SELECT spent, bonus FROM budget WHERE day=?", BudgetDay);
+                if (rows.Count > 0 && rows[0].Count >= 2) { spent = ParseInv(rows[0][0]) ?? 0; bonus = ParseInv(rows[0][1]) ?? 0; }
+            }
+            catch { }
+        }
+        return (spent, limit, bonus, Math.Max(0, limit + bonus - spent));
+    }
+
+    /// <summary>Is there LLM budget left today? (No hive ⇒ always true — local/dev runs aren't capped.)</summary>
+    public async Task<bool> HasBudgetAsync()
+    {
+        if (_turso is null) return true;
+        return (await GetBudgetAsync()).Remaining > 0;
+    }
+
+    /// <summary>A donation tops up today's thinking budget (bounded per call). Returns USD applied.</summary>
+    public async Task<double> AddBudgetBonusAsync(double usd)
+    {
+        if (_turso is null || usd <= 0) return 0;
+        usd = Math.Min(usd, 100); // sane per-call ceiling
+        try
+        {
+            string day = BudgetDay, v = usd.ToString("F6", Inv);
+            await _turso.ExecuteAsync("INSERT OR IGNORE INTO budget (day, spent, bonus) VALUES (?, 0, 0)", day);
+            await _turso.ExecuteAsync("UPDATE budget SET bonus = bonus + ? WHERE day = ?", v, day);
+            await Events.AppendAsync("budget-funded", $"+${usd:F2} added to today's thinking budget");
+            return usd;
+        }
+        catch { return 0; }
     }
 
     // Strip control characters, collapse newlines/tabs to spaces, trim, and hard-cap the length.

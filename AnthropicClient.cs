@@ -28,6 +28,15 @@ public sealed class AnthropicClient : IDisposable
 
     private AnthropicClient(string apiKey) => _apiKey = apiKey;
 
+    /// <summary>Token usage reported by the API for one completion.</summary>
+    public sealed record Usage(string Model, int InputTokens, int OutputTokens);
+
+    /// <summary>
+    /// Optional sink the host sets to METER token spend (the daily budget reads it). Best-effort and
+    /// fire-and-forget — set by <see cref="AgentCore"/> so every completion's cost is tallied.
+    /// </summary>
+    public static Action<Usage>? OnUsage;
+
     /// <summary>
     /// Build a client from ANTHROPIC_API_KEY. Returns null (not an exception) if the key
     /// isn't set, so the caller can print friendly setup instructions.
@@ -72,7 +81,26 @@ public sealed class AnthropicClient : IDisposable
                 $"Anthropic API returned {(int)response.StatusCode} {response.StatusCode}: {responseJson}");
         }
 
+        TryReportUsage(responseJson);
         return ExtractText(responseJson);
+    }
+
+    // Parse the API's usage block and hand it to the meter (if any). Never throws.
+    private static void TryReportUsage(string responseJson)
+    {
+        Action<Usage>? sink = OnUsage;
+        if (sink is null) return;
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(responseJson);
+            if (doc.RootElement.TryGetProperty("usage", out JsonElement u))
+            {
+                int inp = u.TryGetProperty("input_tokens", out var i) ? i.GetInt32() : 0;
+                int outp = u.TryGetProperty("output_tokens", out var o) ? o.GetInt32() : 0;
+                if (inp > 0 || outp > 0) sink(new Usage(Model, inp, outp));
+            }
+        }
+        catch { /* metering is best-effort — never break a completion over it */ }
     }
 
     /// <summary>

@@ -183,6 +183,9 @@ public static class Dashboard
         try { var bu = await core.GetBoostUntilAsync(); if (bu is not null) { boostUntil = bu.Value.ToString("o"); boosted = bu > DateTime.UtcNow; } } catch { }
         try { foreach (var a in await core.RecentAsksAsync(6)) asks.Add(new { sender = a.Sender, text = a.Text, reply = a.Reply, status = a.Status }); } catch { }
 
+        object? budget = null;
+        try { var b = await core.GetBudgetAsync(); budget = new { spent = Math.Round(b.Spent, 4), limit = b.Limit, bonus = Math.Round(b.Bonus, 4), remaining = Math.Round(b.Remaining, 4) }; } catch { }
+
         var state = new
         {
             identity,
@@ -190,6 +193,7 @@ public static class Dashboard
             autonomous,
             boosted,
             boostUntil,
+            budget,
             ladder,
             champions,
             goals,
@@ -279,7 +283,7 @@ public static class Dashboard
     //   • rate-limited per IP, body size-capped, JSON strictly parsed;
     //   • boost is bounded/clamped in AgentCore; an "ask" is sanitized + queued, never executed —
     //     HAL only ever REPLIES to it via the tool-less voice path. No code generation, ever.
-    private sealed record DonatePayload(string? Action, int? Minutes, string? Text, string? From);
+    private sealed record DonatePayload(string? Action, int? Minutes, double? Usd, string? Text, string? From);
 
     private static async Task<string> HandleDonateAsync(AgentCore core, HttpListenerContext ctx, string ip)
     {
@@ -304,6 +308,12 @@ public static class Dashboard
         {
             bool ok = await core.QueueAskAsync(p.From ?? "a visitor", p.Text ?? "");
             return ok ? JsonSerializer.Serialize(new { ok = true, queued = true }, JsonOpts) : Err("ask rejected (empty, too long, or queue full)");
+        }
+        if (action == "fund")
+        {
+            // Top up today's LLM budget — this is how a donation makes HAL think more (bite 21).
+            double added = await core.AddBudgetBonusAsync(p.Usd ?? 1.0);
+            return added > 0 ? JsonSerializer.Serialize(new { ok = true, fundedUsd = added }, JsonOpts) : Err("fund failed");
         }
         ctx.Response.StatusCode = 400; return Err("unknown action");
     }
@@ -432,6 +442,7 @@ public static class Dashboard
     <span class="pill live"><span class="dot"></span>online · <span id="clock">—</span></span>
     <span class="pill" id="auto">autonomous —</span>
     <span class="pill" id="boost" style="display:none;color:var(--gold);border-color:rgba(255,209,102,.45)">⚡ boosted</span>
+    <span class="pill" id="budget">budget —</span>
     <button class="pill snd" id="snd">♪ sound off</button>
   </div>
 </div>
@@ -595,6 +606,7 @@ async function tick(){
   $("journal").textContent=s.journal?s.journal.entry:"—";
 
   $("boost").style.display=s.boosted?"":"none";
+  if(s.budget){var bd=s.budget,cap=bd.limit+bd.bonus; if(bd.remaining<=0){$("budget").textContent="thinking paused";$("budget").style.color="var(--gold)";}else{$("budget").textContent="budget $"+bd.spent.toFixed(2)+"/$"+cap.toFixed(2);$("budget").style.color="var(--dim)";}}
   $("asks").innerHTML=(s.asks&&s.asks.length)?s.asks.map(a=>'<div style="padding:7px 0;border-bottom:1px solid var(--line)"><div style="font-size:12px;color:#ff7a5c">▸ '+esc(a.sender)+': '+esc(a.text)+'</div>'+(a.reply?'<div style="font-size:13px;color:var(--txt);margin-top:3px">HAL: '+esc(a.reply)+'</div>':'<div style="font-size:11px;color:var(--dim);margin-top:3px">awaiting response…</div>')+'</div>').join(""):'<div class="empty">no transmissions yet.</div>';
   react(s);
 }

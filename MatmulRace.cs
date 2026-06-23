@@ -64,16 +64,21 @@ public static class MatmulRace
         double bestScore = double.MaxValue, baseline;
         string bestStrategy = "", bestSource = "";
 
+        // Daily budget (bite 21): when the LLM budget is spent, the FREE tensor search still runs
+        // (muls path), but LLM candidate generation pauses. The hive keeps grinding matrices for $0.
+        bool llmAllowed = true;
+        try { llmAllowed = await core.HasBudgetAsync(); } catch { }
+
         if (metric == Metric.Muls)
         {
             (bestScore, bestStrategy, bestSource) =
-                await EvaluateMulsAsync(client, champ, size, a, b, reference, randomCandidates, ct);
+                await EvaluateMulsAsync(client, champ, size, a, b, reference, randomCandidates, llmAllowed, ct);
             baseline = (double)size * size * size; // naive scalar-multiplication count
         }
         else
         {
             (bestScore, bestStrategy, bestSource, baseline) =
-                await EvaluateTimeAsync(client, champ, size, a, b, reference, randomCandidates, ct);
+                await EvaluateTimeAsync(client, champ, size, a, b, reference, randomCandidates, llmAllowed, ct);
         }
 
         if (bestScore == double.MaxValue) return null; // every candidate failed
@@ -214,8 +219,10 @@ public static class MatmulRace
     // ── wall-clock track (large sizes) ────────────────────────────────────────────────────
     private static async Task<(double bestMs, string strategy, string source, double refMs)> EvaluateTimeAsync(
         AnthropicClient client, Champion? champ, int size,
-        double[,] a, double[,] b, double[,] reference, int randomCandidates, CancellationToken ct)
+        double[,] a, double[,] b, double[,] reference, int randomCandidates, bool llmAllowed, CancellationToken ct)
     {
+        // The wall-clock track is entirely LLM-authored; with no budget there's nothing free to do.
+        if (!llmAllowed) return (double.MaxValue, "", "", 0);
         var generator = new KernelGenerator(client);
         var picker = new Random();
         var genTasks = new List<Task<CandidateSource>>(
@@ -249,15 +256,14 @@ public static class MatmulRace
     // ── multiplication-count track (small sizes) ──────────────────────────────────────────
     private static async Task<(double bestMuls, string strategy, string source)> EvaluateMulsAsync(
         AnthropicClient client, Champion? champ, int size,
-        double[,] a, double[,] b, double[,] reference, int randomCandidates, CancellationToken ct)
+        double[,] a, double[,] b, double[,] reference, int randomCandidates, bool llmAllowed, CancellationToken ct)
     {
         double bestMuls = double.MaxValue;
         string bestStrategy = "", bestSource = "";
 
-        // LLM-FREE FIRST (bite 17): try to DERIVE a better algorithm by searching the matrix-multiply
-        // tensor directly — target one multiplication below the current best. This is the no-LLM path;
-        // any exact decomposition it finds is mechanically synthesized and counted. The LLM track below
-        // is the fallback for the (hard) cases the discrete search can't yet crack.
+        // LLM-FREE FIRST (bite 17): DERIVE a better algorithm by searching the matmul tensor directly —
+        // target one multiplication below the current best. This runs even when the LLM budget is spent
+        // (it costs nothing), so the hive keeps grinding matrices for free.
         int target = (champ is not null ? (int)champ.Score : size * size * size) - 1;
         if (target >= 1)
         {
@@ -271,33 +277,34 @@ public static class MatmulRace
             }
         }
 
-        var generator = new KernelGenerator(client);
-        var picker = new Random();
-        var genTasks = new List<Task<CandidateSource>>(
-            KernelGenerator.CountingStrategies.OrderBy(_ => picker.Next()).Take(randomCandidates)
-                .Select(s => generator.GenerateCountingAsync(s, size, ct)));
-        if (!string.IsNullOrWhiteSpace(champ?.Source))
-            genTasks.Add(generator.RefineCountingAsync(champ!.Source, (long)champ.Score, size, ct));
-        CandidateSource[] candidates = await Task.WhenAll(genTasks);
-
-        Scalar[,] sa = Scalar.From(a), sb = Scalar.From(b);
-
-        foreach (CandidateSource cand in candidates)
+        // LLM candidate track — the fallback for what the free search can't crack. Paused when the
+        // daily budget is spent (bite 21).
+        if (llmAllowed)
         {
-            if (string.IsNullOrWhiteSpace(cand.Source)) continue;
-            if (!RuntimeCompiler.TryCompileAssembly(cand.Source, out Assembly? asm, out _)) continue;
-            Func<Scalar[,], Scalar[,], Scalar[,]>? fn = BindScalar(asm!);
-            if (fn is null) continue;
+            var generator = new KernelGenerator(client);
+            var picker = new Random();
+            var genTasks = new List<Task<CandidateSource>>(
+                KernelGenerator.CountingStrategies.OrderBy(_ => picker.Next()).Take(randomCandidates)
+                    .Select(s => generator.GenerateCountingAsync(s, size, ct)));
+            if (!string.IsNullOrWhiteSpace(champ?.Source))
+                genTasks.Add(generator.RefineCountingAsync(champ!.Source, (long)champ.Score, size, ct));
+            CandidateSource[] candidates = await Task.WhenAll(genTasks);
 
-            // One counted run; correctness verified on its output (a fixed linear op — one dense
-            // random pair is a strong check). A wrong candidate is disqualified before it can score.
-            Scalar.ResetCounters();
-            Scalar[,] got;
-            try { got = fn(sa, sb); } catch { continue; }
-            long muls = Scalar.Muls;
-            if (!CompareScalar(reference, got)) continue;
+            Scalar[,] sa = Scalar.From(a), sb = Scalar.From(b);
+            foreach (CandidateSource cand in candidates)
+            {
+                if (string.IsNullOrWhiteSpace(cand.Source)) continue;
+                if (!RuntimeCompiler.TryCompileAssembly(cand.Source, out Assembly? asm, out _)) continue;
+                Func<Scalar[,], Scalar[,], Scalar[,]>? fn = BindScalar(asm!);
+                if (fn is null) continue;
 
-            if (muls < bestMuls) { bestMuls = muls; bestStrategy = cand.Strategy; bestSource = cand.Source; }
+                Scalar.ResetCounters();
+                Scalar[,] got;
+                try { got = fn(sa, sb); } catch { continue; }
+                long muls = Scalar.Muls;
+                if (!CompareScalar(reference, got)) continue;
+                if (muls < bestMuls) { bestMuls = muls; bestStrategy = cand.Strategy; bestSource = cand.Source; }
+            }
         }
         return (bestMuls, bestStrategy, bestSource);
     }

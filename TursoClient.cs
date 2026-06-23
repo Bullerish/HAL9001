@@ -83,8 +83,13 @@ public sealed class TursoClient
             {
                 var cells = new List<string?>();
                 foreach (JsonElement cell in row.EnumerateArray())
-                    cells.Add(cell.GetProperty("type").GetString() == "null" ? null
-                        : cell.TryGetProperty("value", out var v) ? v.GetString() : null);
+                {
+                    if (cell.GetProperty("type").GetString() == "null" || !cell.TryGetProperty("value", out var v))
+                    { cells.Add(null); continue; }
+                    // libSQL encodes integers (and text) as JSON STRINGS but FLOATs as JSON NUMBERS.
+                    // GetString() throws on a number, so read non-string cells via their raw token.
+                    cells.Add(v.ValueKind == JsonValueKind.String ? v.GetString() : v.GetRawText());
+                }
                 rows.Add(cells);
             }
         return rows;
