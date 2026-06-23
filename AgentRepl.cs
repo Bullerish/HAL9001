@@ -307,6 +307,25 @@ public static class AgentRepl
                     continue;
                 }
 
+                // PRIME DIRECTIVE (bite 13): the hive's north star — shapes every goal, capability, and journal.
+                if (request.Equals("directive", StringComparison.OrdinalIgnoreCase) || request.StartsWith("directive ", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!core.HasHive) { Console.WriteLine("  [directive] no hive configured."); continue; }
+                    string arg = request.Length > "directive".Length ? request["directive".Length..].Trim() : "";
+                    if (arg.StartsWith("set ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string text = arg["set ".Length..].Trim();
+                        if (text.Length == 0) { Console.WriteLine("  usage: directive set <text>"); continue; }
+                        await core.SetDirectiveAsync(text);
+                    }
+                    else
+                    {
+                        string? d = await core.GetDirectiveAsync();
+                        Console.WriteLine(d is null ? "  [directive] none set — use `directive set <text>`." : $"  [directive] {d}");
+                    }
+                    continue;
+                }
+
                 // SELF-CRITIQUE (sentience bite 5): score my own capabilities, flag + re-work the weak.
                 if (request.Equals("reflect", StringComparison.OrdinalIgnoreCase))
                 {

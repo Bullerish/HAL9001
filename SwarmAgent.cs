@@ -922,6 +922,7 @@ public static class SwarmAgent
             + (core.HasHive ? " [hive knowledge: on]" : " [hive knowledge: off]"));
         if (core.Identity is not null)
             Console.WriteLine($"I am {core.Identity.Name} — {core.Identity.Concept} (born {core.Identity.Born[..Math.Min(10, core.Identity.Born.Length)]})");
+        try { string? d = await core.GetDirectiveAsync(); if (d is not null) Console.WriteLine($"Prime Directive: {d}"); } catch { }
         Console.WriteLine("Commands:  <question>   ask the swarm (assign-to-one)   |   deliberate <question>  fan-out: every node competes");
         Console.WriteLine("           compose <question>  chain existing typed capabilities   |   remember <fact>  store knowledge in the hive");
         Console.WriteLine("           identity  who the hive is   |   timeline [n]  replay its episodic memory   |   @<port> <msg>  direct");
@@ -930,6 +931,7 @@ public static class SwarmAgent
         Console.WriteLine("           journal [read]  its autobiography   |   hive [broadcast]  collective voice / push thought");
         Console.WriteLine("           autonomous [on|off]  self-directed mode — loop builds + improves without approval gates");
         Console.WriteLine("           hire [n]  spawn n helper nodes (default 1, cap 3)   |   nodes  live node count");
+        Console.WriteLine("           directive [set <text>]  show or update the Prime Directive");
         Console.WriteLine("           peers   |   coordinator   |   pause <secs>   |   exit");
         Console.WriteLine();
 
@@ -1130,6 +1132,24 @@ public static class SwarmAgent
                     if (hired is not null) { hiredProcesses.Add(hired); lastHireAt = DateTime.UtcNow; spawned++; }
                 }
                 if (spawned == 0) Console.WriteLine($"[hire] nothing spawned (at cap {MaxAutoHiredNodes} or port range full).");
+                continue;
+            }
+            if (line.Equals("directive", StringComparison.OrdinalIgnoreCase) || line.StartsWith("directive ", StringComparison.OrdinalIgnoreCase))
+            {
+                // PRIME DIRECTIVE (bite 13): the hive's north star — shapes goals, capabilities, journals.
+                if (!core.HasHive) { Console.WriteLine("[directive] no hive configured."); continue; }
+                string arg = line.Length > "directive".Length ? line["directive".Length..].Trim() : "";
+                if (arg.StartsWith("set ", StringComparison.OrdinalIgnoreCase))
+                {
+                    string text = arg["set ".Length..].Trim();
+                    if (text.Length == 0) { Console.WriteLine("usage: directive set <text>"); continue; }
+                    await core.SetDirectiveAsync(text);
+                }
+                else
+                {
+                    string? d = await core.GetDirectiveAsync();
+                    Console.WriteLine(d is null ? "[directive] none set — use `directive set <text>`." : $"[directive] {d}");
+                }
                 continue;
             }
             if (line.Equals("coordinator", StringComparison.OrdinalIgnoreCase)) { lock (stateLock) Console.WriteLine($"coordinator = {coordinator} (term {term})"); continue; }

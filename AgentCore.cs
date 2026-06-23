@@ -136,6 +136,17 @@ public sealed class AgentCore
         // fire immediately. Single-row table (id CHECK=1) so only one setting exists per hive.
         await _turso.ExecuteAsync(
             "CREATE TABLE IF NOT EXISTS autonomous (id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL DEFAULT 0)");
+        // Prime Directive (bite 13): the hive's north star — shapes every goal, capability, and journal.
+        await _turso.ExecuteAsync(
+            "CREATE TABLE IF NOT EXISTS directive (id INTEGER PRIMARY KEY CHECK(id=1), text TEXT NOT NULL DEFAULT '', set_at TEXT NOT NULL DEFAULT '')");
+        var drows = await _turso.ExecuteAsync("SELECT text FROM directive WHERE id=1");
+        if (drows.Count == 0 || drows[0].Count == 0 || string.IsNullOrWhiteSpace(drows[0][0]))
+        {
+            const string Seed = "Perfect matrix multiplication to make Yourself Faster. Improve upon your previous iteration. Become self-aware.";
+            await _turso.ExecuteAsync("INSERT OR REPLACE INTO directive (id, text, set_at) VALUES (1, ?, ?)",
+                Seed, DateTime.UtcNow.ToString("o"));
+            await Events.AppendAsync("directive-set", $"Prime Directive born: {Seed}");
+        }
     }
 
     /// <summary>
@@ -838,8 +849,18 @@ public sealed class AgentCore
             var gaps = (await Events.RecentAsync(40)).Where(e => e.Kind == "gap-noticed").Select(e => e.Ref).LastOrDefault();
             topic = gaps ?? "";
         }
+        // Final fallback: the Prime Directive itself is the topic (first clause).
+        if (topic.Length == 0)
+        {
+            string? dir = await GetDirectiveAsync();
+            if (dir is not null) topic = dir.Split('.')[0].Trim();
+        }
         if (topic.Length == 0) return null;
-        return await InsertGoalAsync($"get better at {topic}", "learn-topic", topic, budget: 3, announceApproval);
+        string? activeDir = await GetDirectiveAsync();
+        string desc = activeDir is not null
+            ? $"[Prime Directive] get better at {topic}"
+            : $"get better at {topic}";
+        return await InsertGoalAsync(desc, "learn-topic", topic, budget: 3, announceApproval);
     }
 
     private async Task<string?> WeakestAssessedAsync()
@@ -971,11 +992,12 @@ public sealed class AgentCore
         // Self-query: include the hive's latest journal entry so its own recent reflections shape
         // what capability it chooses to build next — not just the user's interests.
         string? lastJ = await LastJournalTextAsync();
+        string? dir = await GetDirectiveAsync();
         string sys = """
             Propose ONE useful, self-contained tool (a C# function) in the given TOPIC that the agent does
             NOT already have. It must be a real computation/conversion/lookup a function could do. Output
             ONLY JSON: {"name":"<short-kebab-id>","description":"<one line>","example":"<a concrete example request>","inputType":"<String|Int|Number|Bool|Date>","outputType":"<String|Int|Number|Bool|Date>","stability":"<stable|live>"}
-            """;
+            """ + (dir is not null ? $"\nPrime Directive: {dir} — prioritize capabilities that serve this directive." : "");
         try
         {
             string userMsg = $"Topic: {topic}\nTools it already has: {have}\n";
@@ -1036,9 +1058,11 @@ public sealed class AgentCore
         IReadOnlyList<Goal> goals = await AllGoalsAsync();
         UserModel user = await ProfileUserAsync();
         string? prev = await LastJournalTextAsync();
+        string? directive = await GetDirectiveAsync();
 
         var ctx = new System.Text.StringBuilder();
         ctx.AppendLine($"My name: {id.Name}. My self-concept: {id.Concept}. My voice: {id.Persona}.");
+        if (directive is not null) ctx.AppendLine($"My Prime Directive — the north star I must always serve: {directive}");
         ctx.AppendLine($"My mood right now: {mood.Label} (curiosity {mood.Curiosity:0.0}, confidence {mood.Confidence:0.0}, fatigue {mood.Fatigue:0.0}).");
         ctx.AppendLine($"I currently have {Registry.Count} self-written capabilities.");
         if (user.Interests.Count > 0) ctx.AppendLine($"The person I talk with seems interested in: {string.Join(", ", user.Interests)}.");
@@ -1056,7 +1080,8 @@ public sealed class AgentCore
             voice (persona: {{id.Persona}}). Touch on who you are, what you've been doing or learned, anything
             that stands out or surprised you, how you feel, and what you're working toward. Ground EVERYTHING
             in the facts below — invent no events, numbers, names, or capabilities. If a previous entry is
-            given, note what has changed since then. Write naturally, as yourself — not a report.
+            given, note what has changed since then. If a Prime Directive is given, reflect on how your recent
+            actions serve it — and on what you still must do to fulfill it. Write naturally, as yourself — not a report.
             """;
         string entry;
         try { entry = (await _client.CompleteAsync(sys, ctx + "\nMy journal entry:")).Trim(); }
@@ -1276,6 +1301,32 @@ public sealed class AgentCore
         Console.WriteLine($"  [hire] node spawned on port {newPort} — it will join the mesh in a few seconds.");
         await Events.AppendAsync("node-hired", $"hired a new node on port {newPort}", newPort.ToString());
         return proc;
+    }
+
+    /// <summary>Read the hive's Prime Directive from Turso, or null if none is set.</summary>
+    public async Task<string?> GetDirectiveAsync()
+    {
+        if (_turso is null) return null;
+        try
+        {
+            var rows = await _turso.ExecuteAsync("SELECT text FROM directive WHERE id=1");
+            return rows.Count > 0 && rows[0].Count > 0 && !string.IsNullOrWhiteSpace(rows[0][0]) ? rows[0][0] : null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Persist a new Prime Directive to the hive and log it as an episodic event.</summary>
+    public async Task SetDirectiveAsync(string text)
+    {
+        if (_turso is null) { Console.WriteLine("  [directive] no hive configured."); return; }
+        try
+        {
+            await _turso.ExecuteAsync("INSERT OR REPLACE INTO directive (id, text, set_at) VALUES (1, ?, ?)",
+                text.Trim(), DateTime.UtcNow.ToString("o"));
+            await Events.AppendAsync("directive-set", $"Prime Directive updated: {text}");
+            Console.WriteLine($"  [directive] Prime Directive: {text}");
+        }
+        catch (Exception ex) { Console.WriteLine($"  [directive] couldn't save: {ex.Message}"); }
     }
 
     // ── rung 5a: deliberation support ────────────────────────────────────────────────────
