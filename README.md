@@ -245,6 +245,7 @@ dotnet run -- kernel 512 6        # 512×512 matrices, 6 candidates
 dotnet run -- racetest            # verify the counter (bite 15) + exact verifier (bite 16): naive=8, Strassen=7 muls; buggy rejected
 dotnet run -- derive strassen     # framework proof (bite 17): Strassen's known decomposition → error 0, 7 muls, exact-verify True
 dotnet run -- derive 2 7          # LLM-free tensor search for a rank-7 decomposition of T₂ (reaches low residual; honest WIP)
+dotnet run -- dashboard           # live mission-control web UI over the hive (needs TURSO_*; default port 8765)
 ```
 
 A different use of the same generate-and-compile machinery: instead of *adding a capability*, it
@@ -342,6 +343,14 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 ## Release notes
 
 > Newest first. Each rung was verified before the next was built. Commit hashes are on `main`.
+
+### Live Dashboard — watch the hive in real time (bite 18)
+A "mission control" you can open in a browser and watch the swarm think, race, and climb.
+- **`Dashboard.cs`:** an in-process `HttpListener` serves one self-contained page plus a `/api/state` JSON endpoint. The page polls every 2.5s and re-renders. It's a pure **reader** over `AgentCore`/Turso — no LLM, no swarm membership, nothing to coordinate.
+- **Shows:** the hive's name + self-concept + Prime Directive, a live/autonomous indicator, metric cards (active nodes, records set, life events, discoveries), the **size ladder** (converged rungs marked ✓, the current rung highlighted), the **champions** table (score + ×-vs-naive per size), self-set goals, a live **event feed** (discoveries highlighted gold), and the latest journal entry.
+- **Security:** the Turso auth token stays **server-side** (read from the env by AgentCore) — the browser only ever receives already-derived JSON. The listener binds to `localhost` only.
+- **`dashboard [port]` command** (default 8765) — auto-opens your browser; no API key needed (read-only).
+- *Verified live against the real hive: serves the page + live JSON (identity "Forge", 714 life events, 4 nodes, ladder at 2×2). Run a swarm with `autonomous on` in one terminal and `dashboard` in another to watch the race climb.*
 
 ### LLM-Free Derivation — search the matmul tensor directly, no LLM (bite 17)
 The headline frontier: make the hive *derive* algorithms by searching the math itself, not by asking an LLM (which only rediscovers schemes from its training data). This bite builds the correct, verified framework for that — and is honest about where the search currently stands.

@@ -138,6 +138,16 @@ switch (args[0].ToLowerInvariant())
         break;
     }
 
+    // dashboard [port] → LIVE mission-control web UI (bite 18). Serves a local page that polls the
+    // shared hive (Turso) and renders the race, ladder, champions, goals, journal, and event feed.
+    // Needs TURSO_* env vars; no API key required (read-only). Default port 8765.
+    case "dashboard":
+    {
+        int port = args.Length >= 2 && int.TryParse(args[1], out int dp) ? dp : 8765;
+        await Dashboard.RunAsync(port);
+        break;
+    }
+
     // demo → Step 1 Roslyn compile-and-load demo
     case "demo":
         RoslynDemo.Run();
@@ -166,5 +176,6 @@ switch (args[0].ToLowerInvariant())
         Console.WriteLine("  HAL9001 timeline [n]          Replay the hive's episodic memory (needs TURSO_* env vars)");
         Console.WriteLine("  HAL9001 identity              Show the hive's persistent identity (needs TURSO_* env vars)");
         Console.WriteLine("  HAL9001 hive                  Speak as the collective (needs TURSO_* + API key); standalone, self lives in the DB");
+        Console.WriteLine("  HAL9001 dashboard [port]      Live mission-control web UI over the hive (needs TURSO_*; default port 8765)");
         break;
 }
