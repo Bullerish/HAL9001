@@ -266,10 +266,24 @@ public static class Dashboard
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:radial-gradient(ellipse at 50% -5%,#1a0707 0%,#000 58%);color:var(--txt);font:14px/1.55 ui-monospace,"Cascadia Code",Menlo,Consolas,monospace;padding:26px 20px 44px;min-height:100vh}
   .eyewrap{display:flex;flex-direction:column;align-items:center;gap:12px;margin:6px auto 26px}
-  .eye{width:128px;height:128px;border-radius:50%;background:radial-gradient(circle at 50% 42%,#fff3d6 0%,#ff7a1a 13%,#ff2d18 30%,#c20d00 52%,#3a0400 78%,#150000 100%);box-shadow:0 0 60px 14px rgba(255,45,24,.45),inset 0 0 26px 6px rgba(0,0,0,.55);animation:breathe 5s ease-in-out infinite;transition:box-shadow .25s,transform .25s}
-  .eye.flare{box-shadow:0 0 96px 28px rgba(255,80,36,.9),inset 0 0 26px 6px rgba(0,0,0,.5);transform:scale(1.05)}
-  .eye.gold{background:radial-gradient(circle at 50% 42%,#fff7e6 0%,#ffd166 22%,#ff9b1a 44%,#b35e00 70%,#160600 100%);box-shadow:0 0 120px 34px rgba(255,200,80,.85)}
-  @keyframes breathe{0%,100%{box-shadow:0 0 50px 12px rgba(255,45,24,.32),inset 0 0 26px 6px rgba(0,0,0,.6)}50%{box-shadow:0 0 74px 19px rgba(255,45,24,.55),inset 0 0 26px 6px rgba(0,0,0,.5)}}
+  .eye{position:relative;width:172px;height:172px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+    background:conic-gradient(from 212deg,#54585d,#c6cbd0,#7e8388,#eceff2,#696d72,#b0b5ba,#565a5f,#d4d8db,#54585d);
+    box-shadow:0 10px 30px rgba(0,0,0,.85),inset 0 2px 5px rgba(255,255,255,.35),inset 0 -4px 8px rgba(0,0,0,.65)}
+  .eye::after{content:"";position:absolute;inset:-34px;border-radius:50%;z-index:-1;background:radial-gradient(circle,rgba(255,42,16,.30),transparent 70%);transition:background .25s}
+  .lens{position:relative;width:132px;height:132px;border-radius:50%;background:#040404;overflow:hidden;box-shadow:inset 0 0 24px 8px #000,inset 0 0 3px 2px rgba(0,0,0,.9)}
+  .glow{position:absolute;inset:0;border-radius:50%;animation:breathe 5s ease-in-out infinite;
+    background:radial-gradient(circle at 50% 53%,#ffd9a8 0%,#ff5a1e 12%,#e51500 25%,#8c0500 41%,rgba(55,0,0,.55) 55%,#050404 70%)}
+  .hot{position:absolute;left:50%;top:53%;width:15px;height:15px;transform:translate(-50%,-50%);border-radius:50%;
+    background:radial-gradient(circle,#fffaf0 0%,#ffd884 45%,#ff7a1a 100%);box-shadow:0 0 16px 6px rgba(255,185,95,.9),0 0 38px 14px rgba(255,80,20,.5);transition:box-shadow .25s}
+  .hi{position:absolute;border-radius:50%;pointer-events:none;background:radial-gradient(circle,rgba(255,255,255,.32),rgba(255,255,255,0) 70%)}
+  .hi1{width:98px;height:40px;left:17px;top:11px;transform:rotate(-12deg)}
+  .hi2{width:32px;height:15px;left:30px;top:36px;transform:rotate(-20deg);background:radial-gradient(circle,rgba(255,255,255,.22),rgba(255,255,255,0) 70%)}
+  @keyframes breathe{0%,100%{filter:brightness(.9)}50%{filter:brightness(1.12)}}
+  .eye.flare .glow{filter:brightness(1.55)}
+  .eye.flare .hot{box-shadow:0 0 26px 10px rgba(255,200,120,1),0 0 60px 22px rgba(255,90,30,.7)}
+  .eye.flare::after{background:radial-gradient(circle,rgba(255,70,28,.5),transparent 72%)}
+  .eye.gold .glow{background:radial-gradient(circle at 50% 53%,#fff6df 0%,#ffd166 16%,#ff9b1a 33%,#b35e00 52%,rgba(40,20,0,.45) 64%,#050404 76%)}
+  .eye.gold::after{background:radial-gradient(circle,rgba(255,200,90,.5),transparent 72%)}
   h1{font-size:23px;font-weight:400;letter-spacing:9px;color:#e7ddd6;text-align:center}
   .tag{color:#9a4034;font-size:10px;letter-spacing:3px;text-transform:uppercase;text-align:center}
   .sub{color:#8a6f64;font-size:12px;text-align:center;max-width:680px}
@@ -310,7 +324,7 @@ public static class Dashboard
   footer{max-width:1100px;margin:16px auto 0;color:var(--dim);font-size:10px;text-align:center;letter-spacing:2px;text-transform:uppercase}
 </style></head><body>
 <div class="eyewrap">
-  <div class="eye" id="eye"></div>
+  <div class="eye" id="eye"><div class="lens"><div class="glow"></div><div class="hi hi1"></div><div class="hi hi2"></div><div class="hot"></div></div></div>
   <h1>HAL 9001</h1>
   <div class="tag" id="ident">heuristically programmed algorithmic hive</div>
   <div class="sub" id="directive"></div>
