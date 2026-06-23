@@ -228,6 +228,7 @@ dotnet bin/Debug/net8.0/HAL9001.dll swarm 5003 5001 5002
 | `hire` / `hire <n>` | **Self-scaling (bite 12)**: spawn one (or `n`) additional swarm nodes from within the running hive. Each child is a full peer — it inherits the parent's API key and Turso credentials, dials the parent as its bootstrap peer, and the gossip protocol propagates the full mesh roster automatically. Up to 3 nodes may be auto-hired; the parent kills its children on exit. In autonomous mode the hive auto-hires when it finds itself running solo. |
 | `nodes` | Show this node's ID, the list of connected peers, and how many nodes were hired by this process. |
 | `directive` / `directive set <text>` | **Prime Directive (bite 13)**: show the hive's current north star, or replace it. The directive is auto-seeded at first boot and injected into every autonomous LLM call — goal proposals always reference it, capability commissioning is biased toward its domain, and journal entries reflect on progress toward it. |
+| `race` | **Prime Directive Race (bite 14)**: show the hive's current matrix multiplication speed champion — which node holds the record, how fast, and what strategy it used. |
 | `identity` | **Who the hive is**: print the persisted identity (name, birth, self-concept, persona) the node loaded — the same on every node. |
 | `timeline [n]` | **Replay episodic memory**: print the last `n` (default 20) events from the hive's shared autobiographical log — oldest first, each with its timestamp, the node that did it, kind, and summary. |
 | `peers` | Show currently connected peers. |
@@ -336,6 +337,16 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 ## Release notes
 
 > Newest first. Each rung was verified before the next was built. Commit hashes are on `main`.
+
+### Prime Directive Race — the hive competes to perfect matrix multiplication (bite 14)
+The hive now runs a continuous competitive optimization race directly in service of its Prime Directive. In autonomous mode every node loops back-to-back-to-back: generate → compile → verify → benchmark → challenge. The nodes try to outwit each other.
+- **`MatmulRace.RunRoundAsync`:** one full race round per call. Picks strategies at random from `KernelGenerator.Strategies` (8 total, including transpose-B, cache-tiling, unsafe pointer, unrolling, column-major packing, and recursive divide-and-conquer), generates candidates concurrently via the LLM, compiles each with Roslyn, gates on correctness (output must match the naive reference within 1e-9), and benchmarks with proper warmup + median-of-10 timing. The fastest correct implementation is compared to the hive's shared champion.
+- **Refinement loop (`KernelGenerator.RefineAsync`):** when a champion exists, every round also generates one extra "refine the champion" candidate — the LLM is shown the current winning source and asked to improve it explicitly. Nodes don't just explore; they also perfect what already works.
+- **Champion tracking (`matmul_records` table in Turso):** one row per matrix size (default 128×128). Shared across all nodes — the whole swarm has one authoritative speed record.
+- **Peer challenges (`matmul-challenge` swarm message):** when a node sets a new record it immediately broadcasts a challenge to all peers. Peers respond by firing their own race round (rate-limited to one per 30 s per node). Challenge cascades create a continuous competitive loop — nodes genuinely try to outwit each other.
+- **`MatmulRaceLoop` (in `SwarmAgent`):** runs alongside the curiosity and journal loops. Waits on a 2-minute timer OR a peer challenge (whichever comes first). Only active when `autonomous on` and the node has an LLM key.
+- **`race` command:** show the current hive champion and speed record.
+- *Verify: `autonomous on` → watch `[matmul-race] race timer — generating candidates...` every 2 minutes; when a new record is set, watch peers receive `[matmul-race] CHALLENGED by ...` and immediately fire their own round. `race` to see standings.*
 
 ### Prime Directive — the hive's north star (bite 13)
 The hive now has a single persisted directive that pervades every autonomous decision it makes. The directive is not a suggestion — it is injected into every LLM call that drives autonomous behavior so the hive's goals, capability choices, and journal entries are always oriented toward it.

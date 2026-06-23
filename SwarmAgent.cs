@@ -127,6 +127,12 @@ public static class SwarmAgent
         const int MaxAutoHiredNodes = 3;
         const double CuriosityIdleSeconds = 10.0;
         const double JournalIdleSeconds = 60.0;              // how often a content, idle hive journals
+        // Prime Directive race (bite 14): each autonomous node runs matmul optimization rounds
+        // continuously; a new record triggers a peer challenge so every node immediately fires back.
+        var matmulTrigger = new System.Threading.SemaphoreSlim(0, 5); // peer challenges wake the race loop
+        DateTime lastRaceAt = DateTime.MinValue;
+        const double MatmulRaceIntervalSecs = 120.0; // baseline: one round every 2 minutes
+        const double MinRaceIntervalSecs = 30.0;     // rate-limit so challenge cascades don't spiral
 
         // ── rung 4b-ii in-flight recovery state ───────────────────────────────────────────
         // doneAnswers: reqId -> finished answer. Every node keeps this for the reqs it coordinates,
@@ -608,6 +614,12 @@ public static class SwarmAgent
                     if (adopt) { Console.WriteLine($"\n[election] coordinator is now {m.Coordinator} (term {m.Term})"); Console.Write("> "); }
                     break;
                 }
+
+                case "matmul-challenge": // a peer set a new speed record — respond immediately with our own round
+                    Console.WriteLine($"\n[matmul-race] CHALLENGED by {m.Origin}: {m.Answer}"); Console.Write("> ");
+                    _ = core.Events.AppendAsync("matmul-challenged", $"challenged by {m.Origin}: {m.Answer}", m.Origin);
+                    matmulTrigger.Release();
+                    break;
             }
         }
 
@@ -886,6 +898,65 @@ public static class SwarmAgent
             }
         }
 
+        // ── Prime Directive race loop (bite 14) ──────────────────────────────────────────────
+        // Fires every MatmulRaceIntervalSecs or immediately when a peer challenge arrives.
+        // Each round: generate candidates (random strategies + one refinement of champion) →
+        // compile → verify correctness → benchmark → update Turso champion → broadcast challenge.
+        async Task MatmulRaceLoop()
+        {
+            while (!loopCts.IsCancellationRequested)
+            {
+                bool challenged;
+                try { challenged = await matmulTrigger.WaitAsync(TimeSpan.FromSeconds(MatmulRaceIntervalSecs), loopCts.Token); }
+                catch { break; }
+
+                if (!core.HasLlm || !core.HasHive) continue;
+                bool isAuto;
+                try { isAuto = await core.IsAutonomousAsync(); } catch { continue; }
+                if (!isAuto) continue;
+
+                // Rate-limit: don't race more than once per MinRaceIntervalSecs even under a challenge cascade.
+                if ((DateTime.UtcNow - lastRaceAt).TotalSeconds < MinRaceIntervalSecs) continue;
+                lastRaceAt = DateTime.UtcNow;
+
+                string why = challenged ? "challenge received" : "race timer";
+                Console.WriteLine($"\n[matmul-race] {why} — generating candidates for {MatmulRace.DefaultSize}x{MatmulRace.DefaultSize}...");
+                Console.Write("> ");
+
+                try
+                {
+                    MatmulRace.RoundResult? r = await MatmulRace.RunRoundAsync(
+                        client!, core, myPort, ct: loopCts.Token);
+
+                    if (r is null)
+                    {
+                        Console.WriteLine("[matmul-race] all candidates failed compile or correctness this round.");
+                        Console.Write("> ");
+                        await core.Events.AppendAsync("matmul-race", "all candidates disqualified this round");
+                        continue;
+                    }
+
+                    Console.WriteLine($"[matmul-race] {r.Summary}");
+                    Console.Write("> ");
+
+                    if (r.NewRecord)
+                    {
+                        // Challenge every peer to beat our new record.
+                        string payload = $"{r.BestMs:F2}ms ({r.Speedup:F2}x) — beat it";
+                        await BroadcastSwarm(new SwarmMsg("matmul-challenge", Answer: payload, Origin: node.Id));
+                        Console.WriteLine($"[matmul-race] challenge broadcast to {node.Peers.Count} peer(s).");
+                        Console.Write("> ");
+                    }
+                }
+                catch (OperationCanceledException) { break; }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[matmul-race] round error: {ex.Message}");
+                    Console.Write("> ");
+                }
+            }
+        }
+
         // ── Wire up + run ──
         node.MessageReceived += (from, msg) =>
         {
@@ -910,6 +981,7 @@ public static class SwarmAgent
         _ = MonitorLoop();
         _ = AskerRecoveryLoop();
         _ = CuriosityLoop();
+        _ = MatmulRaceLoop();
 
         void KillHired() { foreach (var hp in hiredProcesses) { try { hp.Kill(entireProcessTree: true); } catch { } } }
         // Ctrl+C: prevent immediate kill, clean up children, then let the REPL exit via null readline.
@@ -932,6 +1004,7 @@ public static class SwarmAgent
         Console.WriteLine("           autonomous [on|off]  self-directed mode — loop builds + improves without approval gates");
         Console.WriteLine("           hire [n]  spawn n helper nodes (default 1, cap 3)   |   nodes  live node count");
         Console.WriteLine("           directive [set <text>]  show or update the Prime Directive");
+        Console.WriteLine("           race  show the hive's current matmul speed champion (Prime Directive race)");
         Console.WriteLine("           peers   |   coordinator   |   pause <secs>   |   exit");
         Console.WriteLine();
 
@@ -1150,6 +1223,24 @@ public static class SwarmAgent
                     string? d = await core.GetDirectiveAsync();
                     Console.WriteLine(d is null ? "[directive] none set — use `directive set <text>`." : $"[directive] {d}");
                 }
+                continue;
+            }
+            if (line.Equals("race", StringComparison.OrdinalIgnoreCase))
+            {
+                // PRIME DIRECTIVE RACE (bite 14): show the hive's current matmul speed champion.
+                if (!core.HasHive) { Console.WriteLine("[race] no hive configured."); continue; }
+                try
+                {
+                    MatmulRace.Champion? champ = await core.GetMatmulChampionAsync();
+                    if (champ is null)
+                        Console.WriteLine($"[race] no champion yet for {MatmulRace.DefaultSize}x{MatmulRace.DefaultSize} — run `autonomous on` to start.");
+                    else
+                    {
+                        Console.WriteLine($"[race] {MatmulRace.DefaultSize}x{MatmulRace.DefaultSize} champion: {champ.Node} — {champ.MedianMs:F2}ms ({champ.Speedup:F2}x)");
+                        Console.WriteLine($"       strategy: {champ.Strategy[..Math.Min(80, champ.Strategy.Length)]}");
+                    }
+                }
+                catch (Exception ex) { Console.WriteLine($"[race] error: {ex.Message}"); }
                 continue;
             }
             if (line.Equals("coordinator", StringComparison.OrdinalIgnoreCase)) { lock (stateLock) Console.WriteLine($"coordinator = {coordinator} (term {term})"); continue; }

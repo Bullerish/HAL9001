@@ -28,6 +28,8 @@ public sealed class KernelGenerator
         "Cache blocking / tiling: split the i, j, k loops into blocks (e.g. block size 32 or 64) so each block of the working set fits in L1/L2 cache and is reused before eviction. Must handle dimensions that are not a multiple of the block size.",
         "Flatten the matrices to 1D and use unsafe pointers (or Span<double>) to eliminate array bounds checks on the hot path, combined with a cache-friendly loop order. Keep it single-threaded.",
         "Register blocking / loop unrolling: an i-k-j order whose innermost loop is unrolled by 4 (handling any remainder) to expose instruction-level parallelism and reduce loop overhead.",
+        "Pack B into a contiguous column-major 1D scratch buffer (B_col[k * m + j] = B[k, j]) before the main loops, then multiply each A row against its matching B column segment with unit stride on both sides of every dot product.",
+        "Recursive divide-and-conquer: split A into top/bottom halves and B into left/right halves, recurse on the 4 sub-problems and accumulate into C, with a base case (n <= 32) that falls back to a tight i-k-j triple loop. Handle non-square and non-power-of-two sizes.",
     };
 
     private const string SystemPrompt = """
@@ -63,6 +65,41 @@ public sealed class KernelGenerator
         var picked = Strategies.Take(Math.Min(count, Strategies.Count)).ToList();
         var tasks = picked.Select(s => GenerateOneAsync(s, ct)).ToList();
         return await Task.WhenAll(tasks);
+    }
+
+    /// <summary>Generate a candidate for one specific <paramref name="strategy"/>.</summary>
+    public Task<CandidateSource> GenerateForStrategyAsync(string strategy, CancellationToken ct = default)
+        => GenerateOneAsync(strategy, ct);
+
+    /// <summary>
+    /// Ask the LLM to improve upon <paramref name="championSource"/> — the hive's current fastest
+    /// implementation. Gives the model the existing code and timing so it can make targeted changes
+    /// rather than generating from scratch. This is the "perfect the method" loop.
+    /// </summary>
+    public async Task<CandidateSource> RefineAsync(
+        string championSource, double championMs, string championStrategy,
+        CancellationToken ct = default)
+    {
+        string user = $"""
+            The current fastest correct matrix-multiply implementation runs in {championMs:F2} ms
+            (strategy: {championStrategy}).
+
+            Source:
+            {championSource}
+
+            Improve it further. Try: better tiling parameters, SIMD-friendly inner loops, reducing
+            memory traffic, or a fundamentally different approach. The signature must remain:
+                public static double[,] Multiply(double[,] a, double[,] b)
+            All hard requirements from the system prompt still apply. Return ONLY the C# source.
+            """;
+        string raw;
+        try { raw = await _client.CompleteAsync(SystemPrompt, user, ct); }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  [refine] failed: {ex.Message}");
+            raw = "";
+        }
+        return new CandidateSource("refine-champion", CleanSource(raw));
     }
 
     private async Task<CandidateSource> GenerateOneAsync(string strategy, CancellationToken ct)

@@ -139,6 +139,15 @@ public sealed class AgentCore
         // Prime Directive (bite 13): the hive's north star — shapes every goal, capability, and journal.
         await _turso.ExecuteAsync(
             "CREATE TABLE IF NOT EXISTS directive (id INTEGER PRIMARY KEY CHECK(id=1), text TEXT NOT NULL DEFAULT '', set_at TEXT NOT NULL DEFAULT '')");
+        // Prime Directive race (bite 14): one champion row per matrix size — updated whenever any node
+        // sets a new speed record. All nodes read from and write to this shared table so the hive
+        // maintains one authoritative champion across the whole swarm.
+        await _turso.ExecuteAsync(
+            "CREATE TABLE IF NOT EXISTS matmul_records (" +
+            "size INTEGER NOT NULL PRIMARY KEY, node TEXT NOT NULL DEFAULT '', " +
+            "strategy TEXT NOT NULL DEFAULT '', median_ms REAL NOT NULL DEFAULT 999999, " +
+            "speedup REAL NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT '', " +
+            "recorded_at TEXT NOT NULL DEFAULT '')");
         var drows = await _turso.ExecuteAsync("SELECT text FROM directive WHERE id=1");
         if (drows.Count == 0 || drows[0].Count == 0 || string.IsNullOrWhiteSpace(drows[0][0]))
         {
@@ -1329,6 +1338,46 @@ public sealed class AgentCore
         Console.WriteLine($"  [hire] node spawned on port {newPort} — it will join the mesh in a few seconds.");
         await Events.AppendAsync("node-hired", $"hired a new node on port {newPort}", newPort.ToString());
         return proc;
+    }
+
+    /// <summary>Read the hive's current matmul champion for the given matrix size, or null if no record exists.</summary>
+    public async Task<MatmulRace.Champion?> GetMatmulChampionAsync(int size = MatmulRace.DefaultSize)
+    {
+        if (_turso is null) return null;
+        try
+        {
+            var rows = await _turso.ExecuteAsync(
+                "SELECT node, strategy, median_ms, speedup, source FROM matmul_records WHERE size=?",
+                size.ToString());
+            if (rows.Count == 0 || rows[0].Count < 5) return null;
+            if (!double.TryParse(rows[0][2], System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out double ms)) return null;
+            if (!double.TryParse(rows[0][3], System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out double su)) return null;
+            return new MatmulRace.Champion(rows[0][0] ?? "", rows[0][1] ?? "", ms, su, rows[0][4] ?? "");
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Write a new matmul champion to Turso (overwrites any prior record for this size).</summary>
+    public async Task SetMatmulChampionAsync(
+        string node, int size, string strategy, double medianMs, double speedup, string source)
+    {
+        if (_turso is null) return;
+        try
+        {
+            await _turso.ExecuteAsync(
+                "INSERT OR REPLACE INTO matmul_records " +
+                "(size, node, strategy, median_ms, speedup, source, recorded_at) VALUES (?,?,?,?,?,?,?)",
+                size.ToString(), node, strategy,
+                medianMs.ToString("F6", System.Globalization.CultureInfo.InvariantCulture),
+                speedup.ToString("F6", System.Globalization.CultureInfo.InvariantCulture),
+                source, DateTime.UtcNow.ToString("o"));
+            await Events.AppendAsync("matmul-record",
+                $"new {size}x{size} champion: {medianMs:F2}ms ({speedup:F2}x) by {node} — " +
+                strategy[..Math.Min(60, strategy.Length)]);
+        }
+        catch { }
     }
 
     /// <summary>Read the hive's Prime Directive from Turso, or null if none is set.</summary>
