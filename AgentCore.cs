@@ -1287,8 +1287,26 @@ public sealed class AgentCore
         }
         if (newPort < 0) { Console.WriteLine("  [hire] no free port in range 9100–9199."); return null; }
 
+        // Place the worker dir INSIDE the repo tree (3 levels up from bin/Debug/net8.0) so
+        // GitSync.Discover() can still walk up and find .git.  Copy only the DLL itself — the
+        // build only locks HAL9001.dll, so a private copy breaks that lock without forcing us
+        // to duplicate the full 30-50 MB dependency tree.  deps.json / runtimeconfig.json are
+        // referenced in-place via `dotnet exec` flags (read-only; builds don't overwrite them).
+        string srcDir = Path.GetDirectoryName(dll)!;
+        string dllName = Path.GetFileNameWithoutExtension(dll);
+        string repoRoot = Path.GetFullPath(Path.Combine(srcDir, "..", "..", ".."));
+        string workerDir = Path.Combine(repoRoot, "bin", "hired-workers", newPort.ToString());
+        Directory.CreateDirectory(workerDir);
+        string workerDll = Path.Combine(workerDir, Path.GetFileName(dll));
+        File.Copy(dll, workerDll, overwrite: true);
+
+        string depsFile    = Path.Combine(srcDir, $"{dllName}.deps.json");
+        string runtimeCfg  = Path.Combine(srcDir, $"{dllName}.runtimeconfig.json");
         var allPeers = new[] { parentPort }.Concat(peerPorts).Distinct().Where(p => p != newPort);
-        string args = $"\"{dll}\" swarm {newPort} {string.Join(" ", allPeers)}";
+        string swarmArgs = $"swarm {newPort} {string.Join(" ", allPeers)}";
+        // dotnet exec with explicit --depsfile + --runtimeconfig + --additionalprobingpath so the
+        // runtime finds NuGet-copied assemblies in srcDir without loading from the locked original DLL.
+        string args = $"exec --depsfile \"{depsFile}\" --runtimeconfig \"{runtimeCfg}\" --additionalprobingpath \"{srcDir}\" \"{workerDll}\" {swarmArgs}";
         var psi = new System.Diagnostics.ProcessStartInfo("dotnet", args)
         {
             UseShellExecute = false,
@@ -1297,6 +1315,11 @@ public sealed class AgentCore
         };
         System.Diagnostics.Process? proc = System.Diagnostics.Process.Start(psi);
         if (proc is null) { Console.WriteLine($"  [hire] Process.Start returned null for port {newPort}."); return null; }
+
+        // Clean up the worker dir when the process exits (killed or natural).
+        proc.EnableRaisingEvents = true;
+        string capturedDir = workerDir;
+        proc.Exited += (_, _) => { try { Directory.Delete(capturedDir, recursive: true); } catch { } };
 
         Console.WriteLine($"  [hire] node spawned on port {newPort} — it will join the mesh in a few seconds.");
         await Events.AppendAsync("node-hired", $"hired a new node on port {newPort}", newPort.ToString());
