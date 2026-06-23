@@ -40,8 +40,9 @@ public static class AgentRepl
             try { await core.EnsureHiveAsync(); }
             catch (Exception ex) { Console.WriteLine($"[hive] store unavailable: {ex.Message}"); }
 
-            // Curiosity proposals awaiting `curious yes` (the propose→approve gate).
+            // Curiosity proposals awaiting `curious yes`, and weak capabilities flagged for `reflect fix`.
             var pendingCuriosity = new List<CuriosityProposal>();
+            var pendingRework = new List<string>();
 
             PeerNode? peer = null;
 
@@ -199,6 +200,28 @@ public static class AgentRepl
                     int built = 0;
                     foreach (CuriosityProposal p in toBuild) if (await core.CommissionProposalAsync(p)) built++;
                     Console.WriteLine($"  [curiosity] learned {built}/{toBuild.Count} proposed capabilit{(toBuild.Count == 1 ? "y" : "ies")}.");
+                    continue;
+                }
+
+                // SELF-CRITIQUE (sentience bite 5): score my own capabilities, flag + re-work the weak.
+                if (request.Equals("reflect", StringComparison.OrdinalIgnoreCase))
+                {
+                    IReadOnlyList<SelfAssessment> a = await core.ReflectAsync(5);
+                    if (a.Count == 0) { Console.WriteLine("  [reflect] nothing to assess right now."); continue; }
+                    pendingRework = a.Where(AgentCore.IsWeak).Select(x => x.Name).ToList();
+                    Console.WriteLine("  [reflect] I checked my own work:");
+                    foreach (SelfAssessment x in a)
+                        Console.WriteLine($"    • {x.Name}: confidence {x.Confidence:0.00} ({x.Passed}/{x.Total}){(AgentCore.IsWeak(x) ? "  ⚠ weak" : "")}");
+                    if (pendingRework.Count > 0) Console.WriteLine($"    weak: {string.Join(", ", pendingRework)} — re-work with `reflect fix`.");
+                    continue;
+                }
+                if (request.Equals("reflect fix", StringComparison.OrdinalIgnoreCase) || request.Equals("reflect yes", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (pendingRework.Count == 0) { Console.WriteLine("  [reflect] nothing flagged — run `reflect` first."); continue; }
+                    var toFix = pendingRework.ToList(); pendingRework.Clear();
+                    int improved = 0;
+                    foreach (string capName in toFix) { var (ok, _, _) = await core.ReworkAsync(capName); if (ok) improved++; }
+                    Console.WriteLine($"  [reflect] improved {improved}/{toFix.Count} flagged capabilit{(toFix.Count == 1 ? "y" : "ies")}.");
                     continue;
                 }
 

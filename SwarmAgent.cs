@@ -118,6 +118,7 @@ public static class SwarmAgent
         // When the hive (coordinator) has been idle a while, it mines its episodic log for gaps and
         // PROPOSES capabilities to fill them — unprompted. Nothing is built without `curious yes`.
         var pendingCuriosity = new List<CuriosityProposal>(); // proposals awaiting approval on this node
+        var pendingRework = new List<string>();               // weak capabilities flagged for `reflect fix`
         DateTime lastActivity = DateTime.UtcNow;              // bumped on REPL input + coordinating work
         const double CuriosityIdleSeconds = 30.0;
 
@@ -710,7 +711,23 @@ public static class SwarmAgent
             Console.Write("> ");
         }
 
-        // ── curiosity loop (sentience bite 4): unprompted, coordinator-only, propose→approve gated ──
+        // Print the result of a reflection pass + flag the weak ones for `reflect fix`.
+        void ReportReflection(IReadOnlyList<SelfAssessment> assessments, bool unprompted)
+        {
+            var weak = assessments.Where(AgentCore.IsWeak).Select(a => a.Name).ToList();
+            foreach (string w in weak) if (!pendingRework.Contains(w)) pendingRework.Add(w);
+            Console.WriteLine(unprompted
+                ? "\n[reflect] I've been idle, so I checked my own work:"
+                : "[reflect] I checked my own work:");
+            foreach (SelfAssessment a in assessments)
+                Console.WriteLine($"  • {a.Name}: confidence {a.Confidence:0.00} ({a.Passed}/{a.Total}){(AgentCore.IsWeak(a) ? "  ⚠ weak" : "")}");
+            if (pendingRework.Count > 0) Console.WriteLine($"  weak: {string.Join(", ", pendingRework)} — re-work with `reflect fix`.");
+            Console.Write("> ");
+        }
+
+        // ── idle introspection loop (bites 4+5): unprompted, coordinator-only, gated ──
+        // When the hive's leader is idle it looks inward: first it tries CURIOSITY (propose tools for
+        // gaps); if there's nothing to propose, it REFLECTS (score its own capabilities, flag the weak).
         async Task CuriosityLoop()
         {
             while (!loopCts.IsCancellationRequested)
@@ -718,14 +735,20 @@ public static class SwarmAgent
                 try { await Task.Delay(10000, loopCts.Token); } catch { break; }
                 if (!core.HasLlm || !core.HasHive) continue;
                 bool amLeader; lock (stateLock) amLeader = coordinator == node.Id;
-                if (!amLeader) continue;                                   // only the hive's leader proposes
-                if (pendingCuriosity.Count > 0) continue;                  // already proposed, awaiting a yes
+                if (!amLeader) continue;                                   // only the hive's leader introspects
+                if (pendingCuriosity.Count > 0 || pendingRework.Count > 0) continue; // already proposed, awaiting a yes
                 if (!pending.IsEmpty) continue;                            // work in flight — not idle
                 if ((DateTime.UtcNow - lastActivity).TotalSeconds < CuriosityIdleSeconds) continue;
+
                 IReadOnlyList<CuriosityProposal> proposals;
                 try { proposals = await core.ReviewGapsAsync(2); } catch { continue; }
                 lastActivity = DateTime.UtcNow;                            // don't immediately re-scan
-                if (proposals.Count > 0) OfferCuriosity(proposals, unprompted: true);
+                if (proposals.Count > 0) { OfferCuriosity(proposals, unprompted: true); continue; }
+
+                // Nothing new to learn → reflect on something I've built but not yet judged.
+                IReadOnlyList<SelfAssessment> assessments;
+                try { assessments = await core.ReflectAsync(2); } catch { continue; }
+                if (assessments.Count > 0) ReportReflection(assessments, unprompted: true);
             }
         }
 
@@ -762,7 +785,8 @@ public static class SwarmAgent
         Console.WriteLine("Commands:  <question>   ask the swarm (assign-to-one)   |   deliberate <question>  fan-out: every node competes");
         Console.WriteLine("           compose <question>  chain existing typed capabilities   |   remember <fact>  store knowledge in the hive");
         Console.WriteLine("           identity  who the hive is   |   timeline [n]  replay its episodic memory   |   @<port> <msg>  direct");
-        Console.WriteLine("           curious [yes]  review gaps + propose what to learn (yes = approve)   |   peers   |   coordinator   |   pause <secs>   |   exit");
+        Console.WriteLine("           curious [yes]  propose what to learn   |   reflect [fix]  self-critique + re-work weak tools");
+        Console.WriteLine("           peers   |   coordinator   |   pause <secs>   |   exit");
         Console.WriteLine();
 
         while (true)
@@ -795,6 +819,25 @@ public static class SwarmAgent
                 int built = 0;
                 foreach (CuriosityProposal p in toBuild) if (await core.CommissionProposalAsync(p)) built++;
                 Console.WriteLine($"[curiosity] learned {built}/{toBuild.Count} proposed capabilit{(toBuild.Count == 1 ? "y" : "ies")}.");
+                continue;
+            }
+            if (line.Equals("reflect", StringComparison.OrdinalIgnoreCase))
+            {
+                // SELF-CRITIQUE: score my own capabilities against fresh tests, flag the weak ones.
+                if (!core.HasLlm) { Console.WriteLine("[reflect] this node has no API key — can't self-assess."); continue; }
+                IReadOnlyList<SelfAssessment> a = await core.ReflectAsync(5);
+                if (a.Count == 0) Console.WriteLine("[reflect] nothing to assess right now.");
+                else ReportReflection(a, unprompted: false);
+                continue;
+            }
+            if (line.Equals("reflect fix", StringComparison.OrdinalIgnoreCase) || line.Equals("reflect yes", StringComparison.OrdinalIgnoreCase))
+            {
+                // RE-WORK: re-generate each flagged capability; adopt only a measurably better version.
+                if (pendingRework.Count == 0) { Console.WriteLine("[reflect] nothing flagged — run `reflect` first."); continue; }
+                var toFix = pendingRework.ToList(); pendingRework.Clear();
+                int improved = 0;
+                foreach (string capName in toFix) { var (ok, _, _) = await core.ReworkAsync(capName); if (ok) improved++; }
+                Console.WriteLine($"[reflect] improved {improved}/{toFix.Count} flagged capabilit{(toFix.Count == 1 ? "y" : "ies")}.");
                 continue;
             }
             if (line.Equals("coordinator", StringComparison.OrdinalIgnoreCase)) { lock (stateLock) Console.WriteLine($"coordinator = {coordinator} (term {term})"); continue; }

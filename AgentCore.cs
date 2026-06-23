@@ -113,6 +113,10 @@ public sealed class AgentCore
         // sets Events.Actor before calling EnsureHiveAsync.)
         await _identityStore.EnsureTableAsync();
         Identity = await _identityStore.EnsureBornAsync(Events);
+        // Self-critique (bite 5): per-capability self-assessments (latest confidence score).
+        await _turso.ExecuteAsync(
+            "CREATE TABLE IF NOT EXISTS assessments (capability TEXT PRIMARY KEY, confidence REAL NOT NULL, " +
+            "passed INT NOT NULL, total INT NOT NULL, notes TEXT, assessed_at TEXT NOT NULL, assessed_by TEXT NOT NULL)");
     }
 
     /// <summary>
@@ -444,6 +448,189 @@ public sealed class AgentCore
                 $"I couldn't answer \"{p.Request}\", so I learned '{p.Name}' [{CapTypes.Name(p.InputType)}→{CapTypes.Name(p.OutputType)}, {StabilityKinds.Name(p.Stability)}] to do it",
                 p.Request);
             return true;
+        }
+        finally { _gate.Release(); }
+    }
+
+    // ── SELF-CRITIQUE / REFLECTION (sentience ladder, bite 5): judge its own work, fix the weak ──
+    //
+    // Metacognition: the hive reasons about its OWN outputs. It SCORES a capability by generating
+    // fresh test cases for it and RUNNING the compiled handler against them — confidence = pass rate,
+    // grounded in real execution, not the model's opinion. Weak capabilities (below the same majority
+    // quality floor used in deliberation) are flagged, and can be RE-WORKED: a fresh implementation is
+    // generated and scored on the SAME tests, and adopted only if it MEASURABLY beats the current one.
+    // Assessments persist (latest per capability) and each scoring/rework is an episodic event.
+
+    private readonly HashSet<string> _assessedThisSession = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Generate a few fresh, typed test cases for a KNOWN capability (its types are already
+    /// declared, so unlike deliberation we don't re-infer them). Empty without a key / on parse error.</summary>
+    private async Task<IReadOnlyList<TestCase>> GenerateTestsForAsync(Capability cap, CancellationToken ct = default)
+    {
+        if (_client is null) return Array.Empty<TestCase>();
+        string sys = $$"""
+            Write 3 SMALL, INDEPENDENT test cases that check whether a tool works correctly. The tool's
+            input type is {{CapTypes.Name(cap.InputType)}} and its output type is {{CapTypes.Name(cap.OutputType)}}.
+            Each test is a concrete input request and the key substring the CORRECT output must contain.
+            If the output type is Bool, "expected" MUST be exactly "yes" or "no". Choose inputs whose
+            correct answers you are certain of. Output ONLY JSON (no prose/fences):
+              {"tests":[{"input":"<a concrete request>","expected":"<key substring the right answer must contain>"}]}
+            """;
+        try
+        {
+            string raw = await _client.CompleteAsync(sys, $"Tool: {cap.Name} — {cap.Description}\nExample request: {cap.ExampleRequest}\nJSON:", ct);
+            using JsonDocument doc = JsonDocument.Parse(StripFences(raw));
+            var list = new List<TestCase>();
+            if (doc.RootElement.TryGetProperty("tests", out JsonElement tests) && tests.ValueKind == JsonValueKind.Array)
+                foreach (JsonElement e in tests.EnumerateArray())
+                {
+                    string input = e.TryGetProperty("input", out var ii) ? ii.GetString() ?? "" : "";
+                    string expected = e.TryGetProperty("expected", out var xx) ? xx.GetString() ?? "" : "";
+                    if (input.Length > 0 && expected.Length > 0) list.Add(new TestCase(input, expected));
+                    if (list.Count == 4) break;
+                }
+            return list;
+        }
+        catch { return Array.Empty<TestCase>(); }
+    }
+
+    // Run a handler against a test set and return the pass rate (0..1). Pure measurement.
+    private static async Task<(int Passed, int Total)> ScoreOnAsync(IHandler h, CapType inType, IReadOnlyList<TestCase> tests)
+    {
+        int passed = 0;
+        foreach (TestCase tc in tests)
+        {
+            string got = CapTypes.Matches(inType, tc.Input) ? await RunHandlerAsync(h, tc.Input) : CapTypes.Mismatch(inType, tc.Input);
+            if (got.Contains(tc.Expected, StringComparison.OrdinalIgnoreCase)) passed++;
+        }
+        return (passed, tests.Count);
+    }
+
+    /// <summary>
+    /// SCORE one capability: generate fresh tests, run the live handler, confidence = pass rate.
+    /// Persist the assessment (latest per capability) and log a self-critique event. Null if it can't
+    /// be judged (no key / no tests generated).
+    /// </summary>
+    public async Task<SelfAssessment?> ScoreCapabilityAsync(Capability cap, CancellationToken ct = default)
+    {
+        IReadOnlyList<TestCase> tests = await GenerateTestsForAsync(cap, ct);
+        if (tests.Count == 0) return null;
+
+        int passed = 0; var fails = new List<string>();
+        foreach (TestCase tc in tests)
+        {
+            string got = CapTypes.Matches(cap.InputType, tc.Input) ? await RunHandlerAsync(cap.Handler, tc.Input) : CapTypes.Mismatch(cap.InputType, tc.Input);
+            if (got.Contains(tc.Expected, StringComparison.OrdinalIgnoreCase)) passed++;
+            else fails.Add($"'{tc.Input}'→want '{tc.Expected}', got '{(got.Length > 40 ? got[..40] + "…" : got)}'");
+        }
+        double conf = (double)passed / tests.Count;
+        string notes = fails.Count == 0 ? "passed all fresh tests" : "failing: " + string.Join("; ", fails);
+        _assessedThisSession.Add(cap.Name);
+        await SaveAssessmentAsync(cap.Name, conf, passed, tests.Count, notes);
+        await Events.AppendAsync("self-critique",
+            $"assessed '{cap.Name}': confidence {conf.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)} ({passed}/{tests.Count}) — {(ClearsQualityFloor(passed, tests.Count) ? "looks solid" : "weak, worth re-working")}",
+            cap.Name);
+        return new SelfAssessment(cap.Name, conf, passed, tests.Count, notes);
+    }
+
+    private async Task SaveAssessmentAsync(string name, double conf, int passed, int total, string notes)
+    {
+        if (_turso is null) return;
+        try
+        {
+            await _turso.ExecuteAsync(
+                "INSERT OR REPLACE INTO assessments (capability, confidence, passed, total, notes, assessed_at, assessed_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                name, conf.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture), passed.ToString(), total.ToString(), notes,
+                DateTime.UtcNow.ToString("o"), Events.Actor);
+        }
+        catch (Exception ex) { Console.WriteLine($"  [reflect] couldn't save assessment: {ex.Message}"); }
+    }
+
+    private async Task<HashSet<string>> LoadAssessedNamesAsync()
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (_turso is null) return set;
+        try
+        {
+            List<List<string?>> rows = await _turso.ExecuteAsync("SELECT capability FROM assessments");
+            foreach (var r in rows) if (r.Count > 0 && r[0] is not null) set.Add(r[0]!);
+        }
+        catch { /* unreachable → treat as none assessed */ }
+        return set;
+    }
+
+    /// <summary>
+    /// REFLECT: score up to <paramref name="maxToScore"/> capabilities that haven't been assessed yet
+    /// (this session or ever), returning their assessments. Caller flags the weak ones (those that
+    /// don't clear the quality floor). If everything's already assessed, re-scores some so reflection
+    /// is never a silent no-op.
+    /// </summary>
+    public async Task<IReadOnlyList<SelfAssessment>> ReflectAsync(int maxToScore = 5, CancellationToken ct = default)
+    {
+        if (_client is null) return Array.Empty<SelfAssessment>();
+        HashSet<string> assessed = await LoadAssessedNamesAsync();
+        var caps = Registry.Catalog()
+            .Where(c => !_assessedThisSession.Contains(c.Name) && !assessed.Contains(c.Name))
+            .Take(maxToScore).ToList();
+        if (caps.Count == 0) // all assessed before — re-examine a few not yet looked at THIS session
+            caps = Registry.Catalog().Where(c => !_assessedThisSession.Contains(c.Name)).Take(maxToScore).ToList();
+
+        var results = new List<SelfAssessment>();
+        foreach (Capability c in caps)
+        {
+            SelfAssessment? a = await ScoreCapabilityAsync(c, ct);
+            if (a is not null) results.Add(a);
+        }
+        return results;
+    }
+
+    /// <summary>Is a capability weak enough to flag for re-work? (Below the deliberation quality floor.)</summary>
+    public static bool IsWeak(SelfAssessment a) => !ClearsQualityFloor(a.Passed, a.Total);
+
+    /// <summary>
+    /// RE-WORK a capability: generate fresh tests, score the CURRENT handler on them, generate a fresh
+    /// implementation, score IT on the SAME tests, and adopt the new one only if it MEASURABLY beats
+    /// the current (a real, comparable improvement — not just a different answer). Logs a self-improved
+    /// event on adoption. Returns (improved, beforeConfidence, afterConfidence).
+    /// </summary>
+    public async Task<(bool Improved, double Before, double After)> ReworkAsync(string name, CancellationToken ct = default)
+    {
+        if (_generator is null || !Registry.TryGetCapability(name, out Capability cap)) return (false, 0, 0);
+        await _gate.WaitAsync(ct);
+        try
+        {
+            IReadOnlyList<TestCase> tests = await GenerateTestsForAsync(cap, ct);
+            if (tests.Count == 0) { Console.WriteLine($"  [reflect] couldn't generate tests to re-work '{name}'."); return (false, 0, 0); }
+
+            (int bp, int bt) = await ScoreOnAsync(cap.Handler, cap.InputType, tests);
+            double before = (double)bp / bt;
+
+            GeneratedHandler? gen;
+            try { gen = await _generator.GenerateAsync(cap.Name, cap.Description, cap.ExampleRequest, ct, persist: false, cap.InputType, cap.OutputType, cap.Stability); }
+            catch (Exception ex) { Console.WriteLine($"  [reflect] re-generation of '{name}' failed: {ex.Message}"); return (false, before, before); }
+            if (gen is null) { Console.WriteLine($"  [reflect] couldn't build a better '{name}'."); return (false, before, before); }
+
+            (int ap, int at) = await ScoreOnAsync(gen.Handler, cap.InputType, tests);
+            double after = (double)ap / at;
+
+            if (after > before)
+            {
+                Registry.Register(cap.Name, cap.Description, cap.ExampleRequest, gen.Handler, cap.InputType, cap.OutputType, cap.Stability);
+                TryPersistWinner(cap.Name, cap.Description, cap.ExampleRequest, gen.Source, cap.InputType, cap.OutputType, cap.Stability);
+                await SaveAssessmentAsync(cap.Name, after, ap, at, "re-worked into a better implementation");
+                await Events.AppendAsync("self-improved",
+                    $"re-worked '{cap.Name}': confidence {before.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)} → {after.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)} (adopted a better implementation)",
+                    cap.Name);
+                Console.WriteLine($"  [reflect] re-worked '{cap.Name}': {before:0.00} → {after:0.00} — adopted the better version.");
+                return (true, before, after);
+            }
+
+            await SaveAssessmentAsync(cap.Name, before, bp, bt, "re-work attempt did not beat the original");
+            await Events.AppendAsync("self-critique",
+                $"re-worked '{cap.Name}': new attempt {after.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)} did not beat {before.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)} — kept the original",
+                cap.Name);
+            Console.WriteLine($"  [reflect] '{cap.Name}': new attempt {after:0.00} ≤ current {before:0.00} — kept the original.");
+            return (false, before, after);
         }
         finally { _gate.Release(); }
     }
@@ -897,6 +1084,11 @@ public sealed record Fact(string Key, string Value, CapType Type, string Source)
 /// <see cref="Request"/> is the original unmet input; the rest is the general capability it would
 /// commission (after approval) to answer that whole class.</summary>
 public sealed record CuriosityProposal(string Request, string Name, string Description, CapType InputType, CapType OutputType, StabilityKind Stability);
+
+/// <summary>A capability's self-assessment (bite 5): its <see cref="Confidence"/> (pass rate over
+/// fresh tests), the raw <see cref="Passed"/>/<see cref="Total"/>, and human-readable <see cref="Notes"/>
+/// (what failed). The hive's judgment of its own work.</summary>
+public sealed record SelfAssessment(string Name, double Confidence, int Passed, int Total, string Notes);
 
 /// <summary>The coordinator's one-call deliberation setup: the declared input/output types every
 /// candidate must target, plus the test cases (consistent with those types) to score them on.</summary>
