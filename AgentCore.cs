@@ -1268,6 +1268,7 @@ public sealed class AgentCore
         {
             UseShellExecute = false,
             CreateNoWindow = true,
+            RedirectStandardInput = true,  // keeps Console.IsInputRedirected=true in child → skips REPL
         };
         System.Diagnostics.Process? proc = System.Diagnostics.Process.Start(psi);
         if (proc is null) { Console.WriteLine($"  [hire] Process.Start returned null for port {newPort}."); return null; }

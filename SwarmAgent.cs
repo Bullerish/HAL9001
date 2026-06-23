@@ -927,6 +927,16 @@ public static class SwarmAgent
         Console.WriteLine("           peers   |   coordinator   |   pause <secs>   |   exit");
         Console.WriteLine();
 
+        // Hired background nodes have stdin redirected — skip the REPL and just run until killed.
+        if (Console.IsInputRedirected)
+        {
+            Console.WriteLine($"[hired] running as a background worker on port {myPort} — no REPL.");
+            try { await Task.Delay(Timeout.Infinite, loopCts.Token); } catch { }
+            foreach (var hp in hiredProcesses) { try { hp.Kill(entireProcessTree: true); } catch { } hp.Dispose(); }
+            loopCts.Cancel();
+            return;
+        }
+
         while (true)
         {
             Console.Write("> ");
