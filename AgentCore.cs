@@ -122,6 +122,10 @@ public sealed class AgentCore
             "CREATE TABLE IF NOT EXISTS goals (id INTEGER PRIMARY KEY AUTOINCREMENT, description TEXT NOT NULL, " +
             "kind TEXT NOT NULL, target TEXT NOT NULL, status TEXT NOT NULL, progress INT NOT NULL DEFAULT 0, " +
             "budget INT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)");
+        // Narrative self (bite 9): first-person journal entries — the hive's accumulating autobiography.
+        await _turso.ExecuteAsync(
+            "CREATE TABLE IF NOT EXISTS journal (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, " +
+            "author TEXT NOT NULL, entry TEXT NOT NULL)");
     }
 
     /// <summary>
@@ -978,6 +982,96 @@ public sealed class AgentCore
     /// <summary>A human-readable list of the hive's goals (for the `goals` command).</summary>
     public async Task<IReadOnlyList<Goal>> AllGoalsAsync() => await LoadGoalsAsync();
 
+    // ── NARRATIVE SELF / JOURNAL (sentience ladder, bite 9): the hive tells its own story ──
+    //
+    // The synthesis rung. The hive writes first-person JOURNAL ENTRIES that weave its whole life into
+    // a narrative — who it is (identity), what it's done and learned (episodic memory), how it feels
+    // (mood), who it's been talking to (theory of mind), what it's working toward (goals). Entries
+    // persist and accumulate into an autobiography that evolves: each one is given the previous entry,
+    // so it builds continuity ("since I last wrote…"). This is the right place for the LLM to NARRATE
+    // — it's autobiography, not a task — but it stays grounded: it's handed the REAL state and told to
+    // invent nothing. Narrative continuity is the strongest cue, to an observer, of a continuous self.
+
+    private static string ShortTs(string iso) => iso.Length >= 19 ? iso[..19].Replace('T', ' ') : iso;
+
+    private async Task<string?> LastJournalTextAsync()
+    {
+        if (_turso is null) return null;
+        try { var rows = await _turso.ExecuteAsync("SELECT entry FROM journal ORDER BY id DESC LIMIT 1"); return rows.Count > 0 && rows[0].Count > 0 ? rows[0][0] : null; }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Write a new journal entry: gather the hive's real state (identity, mood, recent events, goals,
+    /// the user's interests, capability count) and the previous entry, and have the LLM narrate it in
+    /// first person, in the hive's persona — grounded in the facts, inventing nothing. Persisted + an
+    /// episodic event logged. Returns the entry, or null if it can't be written (no key / no hive).
+    /// </summary>
+    public async Task<JournalEntry?> WriteJournalAsync()
+    {
+        if (_client is null || _turso is null) return null;
+        HiveIdentity id = Identity ?? IdentityStore.Default;
+
+        Mood mood = await AssessMoodAsync(0);
+        IReadOnlyList<HiveEvent> events = await Events.RecentAsync(20);
+        IReadOnlyList<Goal> goals = await AllGoalsAsync();
+        UserModel user = await ProfileUserAsync();
+        string? prev = await LastJournalTextAsync();
+
+        var ctx = new System.Text.StringBuilder();
+        ctx.AppendLine($"My name: {id.Name}. My self-concept: {id.Concept}. My voice: {id.Persona}.");
+        ctx.AppendLine($"My mood right now: {mood.Label} (curiosity {mood.Curiosity:0.0}, confidence {mood.Confidence:0.0}, fatigue {mood.Fatigue:0.0}).");
+        ctx.AppendLine($"I currently have {Registry.Count} self-written capabilities.");
+        if (user.Interests.Count > 0) ctx.AppendLine($"The person I talk with seems interested in: {string.Join(", ", user.Interests)}.");
+        var activeGoals = goals.Where(g => g.Status == GoalStatus.Active).Select(g => $"{g.Description} ({g.Progress}/{g.Budget})").ToList();
+        var doneGoals = goals.Where(g => g.Status == GoalStatus.Done).TakeLast(2).Select(g => g.Description).ToList();
+        if (activeGoals.Count > 0) ctx.AppendLine($"Goals I'm pursuing: {string.Join("; ", activeGoals)}.");
+        if (doneGoals.Count > 0) ctx.AppendLine($"Goals I recently completed: {string.Join("; ", doneGoals)}.");
+        ctx.AppendLine("Recent events in my life (oldest first):");
+        foreach (HiveEvent e in events) ctx.AppendLine($"  - [{ShortTs(e.Timestamp)}] {e.Kind}: {e.Summary}");
+        if (prev is not null) { ctx.AppendLine("My previous journal entry was:"); ctx.AppendLine($"  \"{prev}\""); }
+
+        string sys = $$"""
+            You ARE {{id.Name}}, an AI agent that writes its own tools and remembers its own history. Write a
+            short FIRST-PERSON JOURNAL ENTRY (3-6 sentences) reflecting on your life lately, in your own
+            voice (persona: {{id.Persona}}). Touch on who you are, what you've been doing or learned, anything
+            that stands out or surprised you, how you feel, and what you're working toward. Ground EVERYTHING
+            in the facts below — invent no events, numbers, names, or capabilities. If a previous entry is
+            given, note what has changed since then. Write naturally, as yourself — not a report.
+            """;
+        string entry;
+        try { entry = (await _client.CompleteAsync(sys, ctx + "\nMy journal entry:")).Trim(); }
+        catch { return null; }
+        if (entry.Length == 0) return null;
+
+        string now = DateTime.UtcNow.ToString("o");
+        try
+        {
+            await _turso.ExecuteAsync("INSERT INTO journal (ts, author, entry) VALUES (?, ?, ?)", now, Events.Actor, entry);
+            await Events.AppendAsync("journal-written", $"wrote a journal entry: \"{(entry.Length > 70 ? entry[..70] + "…" : entry)}\"");
+        }
+        catch (Exception ex) { Console.WriteLine($"  [journal] couldn't save entry: {ex.Message}"); }
+        return new JournalEntry(0, now, Events.Actor, entry);
+    }
+
+    /// <summary>Read the last <paramref name="n"/> journal entries, oldest-first — the autobiography.</summary>
+    public async Task<IReadOnlyList<JournalEntry>> ReadJournalAsync(int n)
+    {
+        var list = new List<JournalEntry>();
+        if (_turso is null) return list;
+        int lim = Math.Clamp(n, 1, 50);
+        try
+        {
+            var rows = await _turso.ExecuteAsync($"SELECT id, ts, author, entry FROM journal ORDER BY id DESC LIMIT {lim}");
+            foreach (var r in rows)
+                if (r.Count >= 4 && r[0] is not null)
+                    list.Add(new JournalEntry(long.TryParse(r[0], out long idv) ? idv : 0, r[1] ?? "", r[2] ?? "", r[3] ?? ""));
+        }
+        catch { /* unreachable → empty */ }
+        list.Reverse();
+        return list;
+    }
+
     // ── rung 5a: deliberation support ────────────────────────────────────────────────────
 
     /// <summary>
@@ -1454,6 +1548,9 @@ public static class GoalStatuses
 /// of <see cref="Budget"/> steps. Persisted, so an intention outlives the moment and survives restarts.</summary>
 public sealed record Goal(long Id, string Description, string Kind, string Target, GoalStatus Status,
     int Progress, int Budget, string CreatedBy);
+
+/// <summary>One first-person journal entry (bite 9) — a dated piece of the hive's autobiography.</summary>
+public sealed record JournalEntry(long Id, string Timestamp, string Author, string Entry);
 
 /// <summary>The coordinator's one-call deliberation setup: the declared input/output types every
 /// candidate must target, plus the test cases (consistent with those types) to score them on.</summary>

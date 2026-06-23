@@ -217,6 +217,25 @@ public static class AgentRepl
                     continue;
                 }
 
+                // NARRATIVE SELF (sentience bite 9): write/read the hive's first-person journal.
+                if (request.Equals("journal", StringComparison.OrdinalIgnoreCase) || request.StartsWith("journal ", StringComparison.OrdinalIgnoreCase))
+                {
+                    string arg = request.Length > "journal".Length ? request["journal".Length..].Trim() : "";
+                    if (arg.StartsWith("read", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int n = int.TryParse(arg["read".Length..].Trim(), out int cnt) ? cnt : 5;
+                        IReadOnlyList<JournalEntry> entries = await core.ReadJournalAsync(n);
+                        if (entries.Count == 0) Console.WriteLine("  [journal] no entries yet — `journal` to write one.");
+                        else foreach (JournalEntry e in entries) Console.WriteLine($"  ── {e.Timestamp[..Math.Min(16, e.Timestamp.Length)].Replace('T', ' ')} ──\n  {e.Entry}");
+                    }
+                    else
+                    {
+                        JournalEntry? j = await core.WriteJournalAsync();
+                        Console.WriteLine(j is null ? "  [journal] couldn't write an entry (needs a hive)." : $"  [journal] {j.Entry}");
+                    }
+                    continue;
+                }
+
                 // AUTONOMY (sentience bite 8): self-set goals — list / think / approve / advance.
                 if (request.Equals("goals", StringComparison.OrdinalIgnoreCase) || request.StartsWith("goals ", StringComparison.OrdinalIgnoreCase))
                 {

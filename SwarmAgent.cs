@@ -120,7 +120,9 @@ public static class SwarmAgent
         var pendingCuriosity = new List<CuriosityProposal>(); // proposals awaiting approval on this node
         var pendingRework = new List<string>();               // weak capabilities flagged for `reflect fix`
         DateTime lastActivity = DateTime.UtcNow;              // bumped on REPL input + coordinating work
+        DateTime lastJournal = DateTime.MinValue;            // when the hive last journaled (idle pacing)
         const double CuriosityIdleSeconds = 30.0;
+        const double JournalIdleSeconds = 150.0;             // how often a content, idle hive journals
 
         // ── rung 4b-ii in-flight recovery state ───────────────────────────────────────────
         // doneAnswers: reqId -> finished answer. Every node keeps this for the reqs it coordinates,
@@ -774,7 +776,14 @@ public static class SwarmAgent
                     try { proposals = await core.ReviewGapsAsync(2); } catch { continue; }
                     if (proposals.Count > 0) { OfferCuriosity(proposals, unprompted: true); continue; }
                 }
-                // consolidate / tend (or curious-but-no-gaps) → reflect on my own work.
+                // content (Tend) and it's been a while → write a journal entry: a reflective check-in.
+                if (mood.Inclination == MoodInclination.Tend && (DateTime.UtcNow - lastJournal).TotalSeconds > JournalIdleSeconds)
+                {
+                    JournalEntry? j;
+                    try { j = await core.WriteJournalAsync(); } catch { j = null; }
+                    if (j is not null) { lastJournal = DateTime.UtcNow; Console.WriteLine($"\n[journal] (idle) I wrote in my journal:\n  {j.Entry}"); Console.Write("> "); continue; }
+                }
+                // otherwise → reflect on my own work.
                 IReadOnlyList<SelfAssessment> assessments;
                 try { assessments = await core.ReflectAsync(2); } catch { continue; }
                 if (assessments.Count > 0) ReportReflection(assessments, unprompted: true);
@@ -815,8 +824,8 @@ public static class SwarmAgent
         Console.WriteLine("           compose <question>  chain existing typed capabilities   |   remember <fact>  store knowledge in the hive");
         Console.WriteLine("           identity  who the hive is   |   timeline [n]  replay its episodic memory   |   @<port> <msg>  direct");
         Console.WriteLine("           curious [yes]  propose what to learn   |   reflect [fix]  self-critique + re-work weak tools");
-        Console.WriteLine("           mood  how it feels   |   aboutme  what it knows about you   |   goals [think|approve|advance]  self-set goals");
-        Console.WriteLine("           peers   |   coordinator   |   pause <secs>   |   exit");
+        Console.WriteLine("           mood  how it feels   |   aboutme  what it knows about you   |   goals [think|approve|advance]");
+        Console.WriteLine("           journal [read]  its autobiography   |   peers   |   coordinator   |   pause <secs>   |   exit");
         Console.WriteLine();
 
         while (true)
@@ -865,6 +874,26 @@ public static class SwarmAgent
                 if (!core.HasLlm) { Console.WriteLine("[user] this node has no API key — can't model you."); continue; }
                 try { Console.WriteLine($"[user] {await core.DescribeUserAsync()}"); }
                 catch (Exception ex) { Console.WriteLine($"[user] couldn't read my model of you: {ex.Message}"); }
+                continue;
+            }
+            if (line.Equals("journal", StringComparison.OrdinalIgnoreCase) || line.StartsWith("journal ", StringComparison.OrdinalIgnoreCase))
+            {
+                // NARRATIVE SELF: `journal` writes a new entry now; `journal read [n]` reads the autobiography.
+                if (!core.HasLlm || !core.HasHive) { Console.WriteLine("[journal] needs an API key + hive."); continue; }
+                string arg = line.Length > "journal".Length ? line["journal".Length..].Trim() : "";
+                if (arg.StartsWith("read", StringComparison.OrdinalIgnoreCase))
+                {
+                    int n = int.TryParse(arg["read".Length..].Trim(), out int cnt) ? cnt : 5;
+                    IReadOnlyList<JournalEntry> entries = await core.ReadJournalAsync(n);
+                    if (entries.Count == 0) Console.WriteLine("[journal] no entries yet — `journal` to write one.");
+                    else foreach (JournalEntry e in entries) Console.WriteLine($"  ── {e.Timestamp[..Math.Min(16, e.Timestamp.Length)].Replace('T', ' ')} ({e.Author}) ──\n  {e.Entry}");
+                }
+                else
+                {
+                    lastJournal = DateTime.UtcNow;
+                    JournalEntry? j = await core.WriteJournalAsync();
+                    Console.WriteLine(j is null ? "[journal] couldn't write an entry." : $"[journal] {j.Entry}");
+                }
                 continue;
             }
             if (line.Equals("goals", StringComparison.OrdinalIgnoreCase) || line.StartsWith("goals ", StringComparison.OrdinalIgnoreCase))
