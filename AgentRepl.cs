@@ -210,6 +210,13 @@ public static class AgentRepl
                     continue;
                 }
 
+                // THEORY OF MIND (sentience bite 7): what the hive knows about the user.
+                if (request.Equals("aboutme", StringComparison.OrdinalIgnoreCase) || request.Equals("about me", StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine($"  [user] {await core.DescribeUserAsync()}");
+                    continue;
+                }
+
                 // SELF-CRITIQUE (sentience bite 5): score my own capabilities, flag + re-work the weak.
                 if (request.Equals("reflect", StringComparison.OrdinalIgnoreCase))
                 {
@@ -231,6 +238,9 @@ public static class AgentRepl
                     Console.WriteLine($"  [reflect] improved {improved}/{toFix.Count} flagged capabilit{(toFix.Count == 1 ? "y" : "ies")}.");
                     continue;
                 }
+
+                // THEORY OF MIND (bite 7): remember the user's question so the hive can model them.
+                _ = core.Events.AppendAsync("user-asked", request);
 
                 // Same path a peer input uses.
                 var (answer, usedCapability) = await ProduceAnswerAsync(request);

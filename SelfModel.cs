@@ -12,6 +12,7 @@ public enum SelfTopic
     History,       // "what have you done/learned lately?" → recent episodic memory
     Scale,         // "how many capabilities do you have?" → the counts
     Mood,          // "how are you? / how do you feel?"     → its current drives/mood
+    User,          // "what do you know about me?"          → its model of the USER (theory of mind)
 }
 
 /// <summary>Parse a router "topic" string into a <see cref="SelfTopic"/> (default Identity).</summary>
@@ -24,6 +25,7 @@ public static class SelfTopics
         "history" or "memory" or "recent" or "lately" => SelfTopic.History,
         "scale" or "count" or "counts" or "how-many" => SelfTopic.Scale,
         "mood" or "feeling" or "feelings" or "how-are-you" => SelfTopic.Mood,
+        "user" or "me" or "about-me" or "my-interests" => SelfTopic.User,
         _ => SelfTopic.Identity,
     };
 }

@@ -283,6 +283,8 @@ public static class SwarmAgent
 
         async Task AskSwarmAsync(string question)
         {
+            // THEORY OF MIND (bite 7): remember what the user asks, so the hive can model them.
+            _ = core.Events.AppendAsync("user-asked", question);
             string reqId = Guid.NewGuid().ToString("N")[..8];
             string c; lock (stateLock) c = coordinator;
             // Track BEFORE sending, stamped with the coordinator we're sending to — so recovery can
@@ -797,7 +799,7 @@ public static class SwarmAgent
         Console.WriteLine("           compose <question>  chain existing typed capabilities   |   remember <fact>  store knowledge in the hive");
         Console.WriteLine("           identity  who the hive is   |   timeline [n]  replay its episodic memory   |   @<port> <msg>  direct");
         Console.WriteLine("           curious [yes]  propose what to learn   |   reflect [fix]  self-critique + re-work weak tools");
-        Console.WriteLine("           mood  how the hive is feeling   |   peers   |   coordinator   |   pause <secs>   |   exit");
+        Console.WriteLine("           mood  how the hive feels   |   aboutme  what it knows about you   |   peers   |   coordinator   |   pause <secs>   |   exit");
         Console.WriteLine();
 
         while (true)
@@ -838,6 +840,14 @@ public static class SwarmAgent
                 if (!core.HasHive) { Console.WriteLine("[mood] no hive configured — I can't read my own history."); continue; }
                 try { Mood m = await core.AssessMoodAsync(pending.Count); Console.WriteLine($"[mood] {m.Describe(core.Identity?.Name ?? "I")}"); }
                 catch (Exception ex) { Console.WriteLine($"[mood] couldn't read my mood: {ex.Message}"); }
+                continue;
+            }
+            if (line.Equals("aboutme", StringComparison.OrdinalIgnoreCase) || line.Equals("about me", StringComparison.OrdinalIgnoreCase))
+            {
+                // THEORY OF MIND: what the hive has learned about the user from their question history.
+                if (!core.HasLlm) { Console.WriteLine("[user] this node has no API key — can't model you."); continue; }
+                try { Console.WriteLine($"[user] {await core.DescribeUserAsync()}"); }
+                catch (Exception ex) { Console.WriteLine($"[user] couldn't read my model of you: {ex.Message}"); }
                 continue;
             }
             if (line.Equals("reflect", StringComparison.OrdinalIgnoreCase))

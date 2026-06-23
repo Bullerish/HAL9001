@@ -258,11 +258,12 @@ public sealed class AgentCore
             // memory), rendered by code. The LLM only recognized the question as introspective and
             // picked the topic — it never fabricates a capability or a fact it doesn't have.
             if (decision.Action == RouteAction.Introspect)
-                return AnswerResult.Answered(
-                    decision.SelfTopic == SelfTopic.Mood
-                        ? await DescribeMoodAsync()                              // "how are you?" → real drives
-                        : await _selfModel.DescribeAsync(decision.SelfTopic),    // other self-questions
-                    decision.SelfTopic == SelfTopic.Mood ? "mood" : "self-model");
+                return decision.SelfTopic switch
+                {
+                    SelfTopic.Mood => AnswerResult.Answered(await DescribeMoodAsync(), "mood"),       // "how are you?" → drives
+                    SelfTopic.User => AnswerResult.Answered(await DescribeUserAsync(), "user-model"), // "what do you know about me?"
+                    _ => AnswerResult.Answered(await _selfModel.DescribeAsync(decision.SelfTopic), "self-model"),
+                };
 
             IHandler? handler;
             string usedName;
@@ -676,6 +677,87 @@ public sealed class AgentCore
     /// <summary>A first-person description of the current mood, spoken as the hive's identity.</summary>
     public async Task<string> DescribeMoodAsync(int liveLoad = 0)
         => (await AssessMoodAsync(liveLoad)).Describe(Identity?.Name ?? IdentityStore.Default.Name);
+
+    // ── THEORY OF MIND (sentience ladder, bite 7): a model of the USER ──────────────────
+    //
+    // The hive remembers what YOU ask (every user question is a `user-asked` event; declined ones
+    // are `gap-noticed`). From that real history it models the person it's talking to — recurring
+    // interests, apparent expertise, what they asked recently — so it can reference prior exchanges
+    // and anticipate ("you've been into number theory; want a tool for X?"). Grounded: the model is
+    // summarized from the actual question list, never invented; the LLM only distills what's there.
+
+    /// <summary>Build a model of the user from their real question history. Empty-ish if they've
+    /// barely interacted, or if there's no key to summarize with.</summary>
+    public async Task<UserModel> ProfileUserAsync()
+    {
+        IReadOnlyList<HiveEvent> recent = await Events.RecentAsync(120);
+        // The user's questions: explicit `user-asked`, plus declined ones recorded as `gap-noticed`.
+        var questions = new List<string>();
+        string firstSeen = "";
+        foreach (HiveEvent e in recent)
+        {
+            string? q = e.Kind switch { "user-asked" => e.Summary, "gap-noticed" => e.Ref ?? e.Summary, _ => null };
+            if (string.IsNullOrWhiteSpace(q)) continue;
+            questions.Add(q!.Trim());
+            if (e.Kind == "user-asked" && firstSeen.Length == 0) firstSeen = e.Timestamp; // oldest-first list → first is earliest
+        }
+        // De-dupe (case-insensitive) keeping order; newest are at the end.
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var unique = questions.Where(q => seen.Add(q)).ToList();
+        var recentQs = Enumerable.Reverse(unique).Take(5).ToList(); // newest first
+
+        if (unique.Count == 0 || _client is null)
+            return new UserModel(unique.Count, firstSeen, Array.Empty<string>(), "", "", recentQs, "");
+
+        const string sys = """
+            You are modelling a USER from the questions they have asked an agent. From the list, infer
+            who they are. Ignore meta questions about the agent itself (mood, identity, "what can you
+            do") — focus on their TOPICAL interests. Output ONLY JSON:
+              {"interests":["<up to 4 short topics>"],
+               "expertise":"<one short phrase, e.g. 'comfortable with math' or 'a curious beginner'>",
+               "summary":"<one sentence on what they seem to care about>",
+               "suggestion":"<one capability or topic they'd likely find useful next>"}
+            Base everything ONLY on the questions given.
+            """;
+        try
+        {
+            string list = string.Join("\n", unique.TakeLast(40).Select(q => "- " + q));
+            using JsonDocument doc = JsonDocument.Parse(StripFences(await _client.CompleteAsync(sys, $"The user's questions:\n{list}\n\nJSON:")));
+            JsonElement root = doc.RootElement;
+            var interests = new List<string>();
+            if (root.TryGetProperty("interests", out JsonElement it) && it.ValueKind == JsonValueKind.Array)
+                foreach (JsonElement e in it.EnumerateArray()) { string? s = e.GetString(); if (!string.IsNullOrWhiteSpace(s)) interests.Add(s!.Trim()); }
+            string expertise = (root.TryGetProperty("expertise", out var ex) ? ex.GetString() : null)?.Trim() ?? "";
+            string summary = (root.TryGetProperty("summary", out var su) ? su.GetString() : null)?.Trim() ?? "";
+            string suggestion = (root.TryGetProperty("suggestion", out var sg) ? sg.GetString() : null)?.Trim() ?? "";
+            return new UserModel(unique.Count, firstSeen, interests, expertise, summary, recentQs, suggestion);
+        }
+        catch { return new UserModel(unique.Count, firstSeen, Array.Empty<string>(), "", "", recentQs, ""); }
+    }
+
+    /// <summary>A grounded, conversational description of what the hive knows about the user — it
+    /// references real prior questions and offers a tailored suggestion (theory of mind in action).</summary>
+    public async Task<string> DescribeUserAsync()
+    {
+        UserModel u = await ProfileUserAsync();
+        if (u.QuestionCount == 0)
+            return "We haven't really talked yet — ask me a few things and I'll start to get a sense of what you're into.";
+
+        var sb = new System.Text.StringBuilder();
+        sb.Append($"Here's what I've gathered about you: we've exchanged {u.QuestionCount} question(s)");
+        if (u.FirstSeen.Length >= 10) sb.Append($" since {u.FirstSeen[..10]}");
+        sb.Append(". ");
+        if (u.Interests.Count > 0) sb.Append($"You seem interested in {string.Join(", ", u.Interests)}. ");
+        if (u.Expertise.Length > 0) sb.Append($"You come across as {u.Expertise}. ");
+        if (u.RecentQuestions.Count > 0) sb.Append($"Recently you asked about: {string.Join("; ", u.RecentQuestions.Take(3))}. ");
+        if (u.Summary.Length > 0) sb.Append(u.Summary + " ");
+        if (u.Suggestion.Length > 0)
+        {
+            string s = char.ToLowerInvariant(u.Suggestion[0]) + u.Suggestion[1..]; // grammar mid-sentence
+            sb.Append($"If you'd like, I could help with {s}.");
+        }
+        return sb.ToString().TrimEnd();
+    }
 
     // ── rung 5a: deliberation support ────────────────────────────────────────────────────
 
@@ -1131,6 +1213,12 @@ public sealed record CuriosityProposal(string Request, string Name, string Descr
 /// fresh tests), the raw <see cref="Passed"/>/<see cref="Total"/>, and human-readable <see cref="Notes"/>
 /// (what failed). The hive's judgment of its own work.</summary>
 public sealed record SelfAssessment(string Name, double Confidence, int Passed, int Total, string Notes);
+
+/// <summary>The hive's model of the USER (bite 7): how much they've interacted, since when, their
+/// inferred <see cref="Interests"/> and <see cref="Expertise"/>, a one-line <see cref="Summary"/>,
+/// their most-recent questions, and a tailored <see cref="Suggestion"/>. All grounded in real history.</summary>
+public sealed record UserModel(int QuestionCount, string FirstSeen, IReadOnlyList<string> Interests,
+    string Expertise, string Summary, IReadOnlyList<string> RecentQuestions, string Suggestion);
 
 /// <summary>The coordinator's one-call deliberation setup: the declared input/output types every
 /// candidate must target, plus the test cases (consistent with those types) to score them on.</summary>

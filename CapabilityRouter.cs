@@ -71,6 +71,9 @@ public sealed class CapabilityRouter
             about yourself", "how are you", "how do you feel", "what's your mood") → "self". Both
             "who are you" AND "how are you" are "self" now. A factual lookup like "what is the
             capital of Ohio" is a TASK, NOT "self".
+          - Is it about the USER / their relationship with the agent? ("what do you know about me",
+            "what are my interests", "do you remember me", "what have I been asking about") →
+            "self" with topic "user". ("who am I" usually means this too.)
           - Would no tool meaningfully answer it and it's not about the agent? ("hi", "thanks",
             "that's cool", "hey there") → "decline".
           - When you genuinely can't find an actionable task in the input, prefer "decline".
@@ -79,7 +82,8 @@ public sealed class CapabilityRouter
         For a "self" question, also give the "topic" — the closest of:
           capabilities (what it can do) | knowledge (what facts it holds) | history (what it has
           done/learned recently) | scale (how many capabilities/facts/events) | mood (how it is /
-          how it feels) | identity (who/what it is, or anything general about itself).
+          how it feels) | user (what it knows about ME/the user, my interests) | identity (who/what
+          it is, or anything general about itself).
 
         For a "new" capability, also declare its INPUT and OUTPUT types from this fixed set:
           String (free-form text), Int (a whole number), Number (integer or decimal),
