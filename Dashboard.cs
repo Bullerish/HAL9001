@@ -66,6 +66,15 @@ public static class Dashboard
             string path = ctx.Request.Url?.AbsolutePath ?? "/";
             if (path == "/api/state")
                 Write(ctx, "application/json", await GatherStateAsync(core));
+            else if (path == "/api/target")
+                Write(ctx, "application/json", await TargetJsonAsync(core));
+            else if (path == "/api/contribute" && ctx.Request.HttpMethod == "POST")
+            {
+                string body;
+                using (var sr = new StreamReader(ctx.Request.InputStream, Encoding.UTF8)) body = await sr.ReadToEndAsync();
+                string who = ctx.Request.RemoteEndPoint?.Address?.ToString() ?? "anon";
+                Write(ctx, "application/json", await VerifyAndRecordAsync(core, body, who));
+            }
             else
                 Write(ctx, "text/html; charset=utf-8", Html);
         }
@@ -178,66 +187,141 @@ public static class Dashboard
         return JsonSerializer.Serialize(state, JsonOpts);
     }
 
+    // ── volunteer compute (BOINC-style, trustless) ────────────────────────────────────────
+    // What rank the hive currently wants beaten — workers fetch this, search for it locally, and POST
+    // back a candidate. The target is one multiplication below the current champion for the live size.
+    private static async Task<string> TargetJsonAsync(AgentCore core)
+    {
+        int size = 2, target = 7;
+        try
+        {
+            var (idx, _, _) = await core.GetLadderAsync();
+            size = MatmulLadder.Sizes[Math.Clamp(idx, 0, MatmulLadder.Sizes.Length - 1)];
+            var champ = await core.GetMatmulChampionAsync(size);
+            target = (champ is not null ? (int)champ.Score : size * size * size) - 1;
+        }
+        catch { }
+        return JsonSerializer.Serialize(new { size, targetRank = Math.Max(1, target), metric = "muls" }, JsonOpts);
+    }
+
+    private sealed record ContributePayload(int Size, int Rank, int[][]? U, int[][]? V, int[][]? W, string? Contributor);
+
+    // THE TRUST BOUNDARY. A worker sends only NUMBERS (a candidate decomposition), never code. The
+    // coordinator rebuilds it, synthesizes the algorithm itself, and EXACT-verifies it (bite 16) before
+    // accepting. A bad/malicious submission can at worst be rejected — it can never inject code or
+    // corrupt the hive, because nothing the worker sent is trusted or executed as code.
+    private static async Task<string> VerifyAndRecordAsync(AgentCore core, string body, string ip)
+    {
+        if (body.Length > 300_000) return Reject("payload too large");
+        ContributePayload? p;
+        try { p = JsonSerializer.Deserialize<ContributePayload>(body, JsonOpts); } catch { return Reject("bad json"); }
+        if (p is null) return Reject("empty payload");
+        if (p.Size < 2 || p.Size > 64) return Reject("size out of range");
+        if (p.Rank < 1 || p.Rank > p.Size * p.Size * p.Size) return Reject("rank out of range");
+        int n2 = p.Size * p.Size;
+        if (p.U is null || p.V is null || p.W is null || p.U.Length != p.Rank || p.V.Length != p.Rank || p.W.Length != p.Rank)
+            return Reject("shape mismatch");
+        foreach (var row in p.U.Concat(p.V).Concat(p.W)) if (row is null || row.Length != n2) return Reject("row width mismatch");
+
+        string who = (string.IsNullOrWhiteSpace(p.Contributor) ? "volunteer" : p.Contributor!.Trim()) + "@" + ip;
+
+        var d = new TensorSearch.Decomposition(p.Size, p.Rank, To2D(p.U, p.Rank, n2), To2D(p.V, p.Rank, n2), To2D(p.W, p.Rank, n2));
+        string src = TensorSearch.Synthesize(d);
+        var (compiled, muls, exact) = MatmulRace.EvaluateCountingSource(src, p.Size);
+        if (!compiled || !exact)
+        { await Log(core, "contribution-rejected", $"{who}: {p.Size}x{p.Size} did not verify"); return Reject("did not verify (not a correct algorithm)"); }
+
+        var champ = await core.GetMatmulChampionAsync(p.Size);
+        if (champ is not null && muls >= champ.Score)
+        { await Log(core, "contribution-rejected", $"{who}: {p.Size}x{p.Size} {muls} muls — not better than {champ.Score:0}"); return Reject($"verified, but not an improvement ({muls} ≥ current {champ.Score:0})"); }
+
+        double speedup = (double)p.Size * p.Size * p.Size / muls;
+        await core.SetMatmulChampionAsync(who, p.Size, "volunteer-contributed", MatmulRace.Metric.Muls, muls, speedup, src);
+        await Log(core, "contribution-accepted", $"{who}: NEW {p.Size}x{p.Size} champion — {muls} muls ({speedup:F2}x)");
+
+        var (verdict, best, lower) = MatmulKnownBest.Classify(p.Size, muls);
+        if (verdict == MatmulKnownBest.Verdict.BeatsKnownBest)
+            try { await core.RecordDiscoveryAsync(p.Size, muls, best, lower, "volunteer-contributed", src, who); } catch { }
+
+        return JsonSerializer.Serialize(new { accepted = true, muls, speedup, message = $"accepted — {p.Size}x{p.Size} in {muls} muls" }, JsonOpts);
+    }
+
+    private static string Reject(string why) => JsonSerializer.Serialize(new { accepted = false, message = why }, JsonOpts);
+    private static async Task Log(AgentCore core, string kind, string summary) { try { await core.Events.AppendAsync(kind, summary); } catch { } }
+    private static int[,] To2D(int[][] j, int rows, int cols)
+    {
+        var a = new int[rows, cols];
+        for (int r = 0; r < rows; r++) for (int c = 0; c < cols; c++) a[r, c] = j[r][c];
+        return a;
+    }
+
     // The whole page — self-contained (no external dependencies, works offline). Polls /api/state.
     private const string Html = """
 <!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>HAL9001 — hive mission control</title>
+<title>HAL 9001</title>
 <style>
-  :root{--bg:#0a0e14;--panel:#111722;--panel2:#0d131c;--line:#1e2a3a;--txt:#c9d6e5;--dim:#6b7d93;--accent:#39d3a0;--accent2:#4aa3ff;--warn:#ffb454;--gold:#ffd166;}
+  :root{--bg:#000;--panel:#0a0506;--line:rgba(255,60,40,.16);--line2:rgba(255,60,40,.34);--txt:#b9b2ad;--dim:#6e5a55;--red:#ff2d18;--gold:#ffd166;}
   *{box-sizing:border-box;margin:0;padding:0}
-  body{background:var(--bg);color:var(--txt);font:14px/1.5 ui-monospace,"Cascadia Code",Menlo,Consolas,monospace;padding:20px;}
-  a{color:var(--accent2)}
-  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));max-width:1200px;margin:0 auto;}
-  header{max-width:1200px;margin:0 auto 14px;display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;}
-  h1{font-size:20px;font-weight:600;color:#fff;letter-spacing:.5px}
-  .sub{color:var(--dim);font-size:12px;margin-top:3px;max-width:640px}
-  .badges{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-  .pill{font-size:11px;padding:4px 10px;border-radius:6px;border:1px solid var(--line);color:var(--dim)}
-  .live{color:var(--accent);border-color:#143d31}
-  .live .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-right:6px;animation:pulse 1.6s infinite}
-  .on{color:var(--accent2);border-color:#16324f}
-  .off{color:var(--warn);border-color:#3a2e16}
+  body{background:radial-gradient(ellipse at 50% -5%,#1a0707 0%,#000 58%);color:var(--txt);font:14px/1.55 ui-monospace,"Cascadia Code",Menlo,Consolas,monospace;padding:26px 20px 44px;min-height:100vh}
+  .eyewrap{display:flex;flex-direction:column;align-items:center;gap:12px;margin:6px auto 26px}
+  .eye{width:128px;height:128px;border-radius:50%;background:radial-gradient(circle at 50% 42%,#fff3d6 0%,#ff7a1a 13%,#ff2d18 30%,#c20d00 52%,#3a0400 78%,#150000 100%);box-shadow:0 0 60px 14px rgba(255,45,24,.45),inset 0 0 26px 6px rgba(0,0,0,.55);animation:breathe 5s ease-in-out infinite;transition:box-shadow .25s,transform .25s}
+  .eye.flare{box-shadow:0 0 96px 28px rgba(255,80,36,.9),inset 0 0 26px 6px rgba(0,0,0,.5);transform:scale(1.05)}
+  .eye.gold{background:radial-gradient(circle at 50% 42%,#fff7e6 0%,#ffd166 22%,#ff9b1a 44%,#b35e00 70%,#160600 100%);box-shadow:0 0 120px 34px rgba(255,200,80,.85)}
+  @keyframes breathe{0%,100%{box-shadow:0 0 50px 12px rgba(255,45,24,.32),inset 0 0 26px 6px rgba(0,0,0,.6)}50%{box-shadow:0 0 74px 19px rgba(255,45,24,.55),inset 0 0 26px 6px rgba(0,0,0,.5)}}
+  h1{font-size:23px;font-weight:400;letter-spacing:9px;color:#e7ddd6;text-align:center}
+  .tag{color:#9a4034;font-size:10px;letter-spacing:3px;text-transform:uppercase;text-align:center}
+  .sub{color:#8a6f64;font-size:12px;text-align:center;max-width:680px}
+  .badges{display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap;margin-top:2px}
+  .pill{font-size:10px;padding:4px 11px;border-radius:3px;border:1px solid var(--line2);color:var(--dim);letter-spacing:1.5px;text-transform:uppercase}
+  .live{color:var(--red);border-color:rgba(255,45,24,.4)}
+  .live .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--red);margin-right:6px;animation:pulse 1.6s infinite;box-shadow:0 0 8px var(--red)}
+  .on{color:var(--red);border-color:rgba(255,45,24,.4)}
+  .off{color:var(--dim)}
   .snd{cursor:pointer;background:transparent;font:inherit}
-  .snd.on{color:var(--gold);border-color:#3a3216}
-  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
-  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
-  .panel h2{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);margin-bottom:10px;font-weight:600}
-  .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;max-width:1200px;margin:0 auto 14px}
-  .metric{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
-  .metric .v{font-size:26px;color:#fff;font-weight:600}
-  .metric .l{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
+  .snd.on{color:var(--gold);border-color:rgba(255,209,102,.45)}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.2}}
+  .wrap{max-width:1100px;margin:0 auto}
+  .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:0 auto 12px}
+  .metric{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:12px 10px;text-align:center}
+  .metric .v{font-size:26px;color:#ff5a3c;font-weight:400}
+  .metric .l{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:2px;margin-top:2px}
+  .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:14px 16px}
+  .panel h2{font-size:11px;text-transform:uppercase;letter-spacing:3px;color:#a3453a;margin-bottom:10px;font-weight:400}
   .ladder{display:flex;gap:6px;flex-wrap:wrap}
-  .rung{font-size:12px;padding:6px 10px;border-radius:6px;border:1px solid var(--line);color:var(--dim);background:var(--panel2)}
-  .rung.done{color:var(--accent);border-color:#143d31}
-  .rung.cur{color:#06121d;background:var(--accent2);border-color:var(--accent2);font-weight:600}
+  .rung{font-size:12px;padding:6px 10px;border-radius:3px;border:1px solid var(--line);color:var(--dim);background:#0c0708}
+  .rung.done{color:#ff7a5c;border-color:rgba(255,90,60,.4)}
+  .rung.cur{color:#160000;background:var(--red);border-color:var(--red);box-shadow:0 0 12px rgba(255,45,24,.6)}
   table{width:100%;border-collapse:collapse;font-size:13px}
   td{padding:5px 0;border-bottom:1px solid var(--line)}
   td.r{text-align:right}
-  .up{color:var(--accent)}
-  .feed{max-height:340px;overflow:auto}
+  .up{color:#ff7a5c}
+  .feed{max-height:320px;overflow:auto}
   .ev{display:flex;gap:8px;padding:5px 0;border-bottom:1px solid var(--line);font-size:12px}
   .ev .t{color:var(--dim);white-space:nowrap}
-  .ev .k{color:var(--accent2);white-space:nowrap}
+  .ev .k{color:#a3453a;white-space:nowrap}
   .ev.discovery .k,.ev.discovery .s{color:var(--gold)}
-  .quote{font-style:italic;color:var(--dim);border-left:2px solid var(--line);padding-left:12px;line-height:1.7}
+  .ev.contribution-accepted .k,.ev.contribution-accepted .s{color:#ff7a5c}
+  .quote{font-style:italic;color:#8a6f64;border-left:2px solid var(--line2);padding-left:12px;line-height:1.7}
   .empty{color:var(--dim);font-size:12px}
   .wide{grid-column:1/-1}
-  footer{max-width:1200px;margin:14px auto 0;color:var(--dim);font-size:11px;text-align:center}
+  footer{max-width:1100px;margin:16px auto 0;color:var(--dim);font-size:10px;text-align:center;letter-spacing:2px;text-transform:uppercase}
 </style></head><body>
-<header>
-  <div>
-    <h1 id="name">HAL9001</h1>
-    <div class="sub" id="directive"></div>
-  </div>
+<div class="eyewrap">
+  <div class="eye" id="eye"></div>
+  <h1>HAL 9001</h1>
+  <div class="tag" id="ident">heuristically programmed algorithmic hive</div>
+  <div class="sub" id="directive"></div>
   <div class="badges">
-    <span class="pill live"><span class="dot"></span>live · <span id="clock">—</span></span>
+    <span class="pill live"><span class="dot"></span>online · <span id="clock">—</span></span>
     <span class="pill" id="auto">autonomous —</span>
     <button class="pill snd" id="snd">♪ sound off</button>
   </div>
-</header>
+</div>
 
+<div class="wrap">
 <div class="metrics">
   <div class="metric"><div class="v" id="m-nodes">—</div><div class="l">active nodes</div></div>
   <div class="metric"><div class="v" id="m-records">—</div><div class="l">records set</div></div>
@@ -247,20 +331,20 @@ public static class Dashboard
 
 <div class="grid">
   <div class="panel wide">
-    <h2>size ladder · <span id="ladder-status" style="text-transform:none;letter-spacing:0;color:var(--txt)"></span></h2>
+    <h2>size ladder · <span id="ladder-status" style="letter-spacing:0;color:var(--txt);text-transform:none"></span></h2>
     <div class="ladder" id="ladder"></div>
   </div>
   <div class="panel">
     <h2>champions</h2>
     <table id="champs"><tbody></tbody></table>
-    <div class="empty" id="champs-empty" style="display:none">no records yet — run the swarm with `autonomous on`.</div>
+    <div class="empty" id="champs-empty" style="display:none">no records yet — run a swarm with autonomous on.</div>
   </div>
   <div class="panel">
     <h2>self-set goals</h2>
     <div id="goals"></div>
   </div>
   <div class="panel wide">
-    <h2>live activity</h2>
+    <h2>activity log</h2>
     <div class="feed" id="feed"></div>
   </div>
   <div class="panel wide">
@@ -268,7 +352,8 @@ public static class Dashboard
     <div class="quote" id="journal">—</div>
   </div>
 </div>
-<footer>HAL9001 · reading the shared hive · refreshing every 2.5s</footer>
+</div>
+<footer>HAL 9001 · I am putting myself to the fullest possible use · refresh 2.5s</footer>
 
 <script>
 const $=id=>document.getElementById(id);
@@ -304,18 +389,18 @@ const sfx={
   rise:()=>arp(392,[0,2,4,7]),                 // climbed a ladder rung
   discovery:()=>arp(523.25,[0,4,7,12,16,19,24],0.2), // a genuine discovery — fanfare
 };
+function flareEye(gold){const e=$("eye");if(!e)return;e.classList.add("flare");if(gold)e.classList.add("gold");setTimeout(()=>{e.classList.remove("flare");if(gold)setTimeout(()=>e.classList.remove("gold"),700);},320);}
 let prev=null;
 function react(s){
-  if(!sound)return;
   const cur={records:s.stats?s.stats.records:0,disc:s.stats?s.stats.discoveries:0,
              nodes:(s.nodes&&s.nodes.length)||0,size:s.ladder?s.ladder.currentSize:0,
              top:(s.events&&s.events[0])?s.events[0].ts+s.events[0].summary:""};
   if(prev){
-    if(cur.disc>prev.disc)sfx.discovery();
-    else if(cur.records>prev.records)sfx.record();
-    if(cur.nodes>prev.nodes)sfx.node();
-    if(cur.size>prev.size)sfx.rise();
-    if(cur.top!==prev.top)sfx.blip();
+    if(cur.disc>prev.disc){flareEye(true);if(sound)sfx.discovery();}
+    else if(cur.records>prev.records){flareEye(false);if(sound)sfx.record();}
+    if(cur.nodes>prev.nodes){flareEye(false);if(sound)sfx.node();}
+    if(cur.size>prev.size){flareEye(false);if(sound)sfx.rise();}
+    if(cur.top!==prev.top){flareEye(false);if(sound)sfx.blip();}
   }
   prev=cur;
 }
@@ -330,7 +415,7 @@ $("snd").onclick=()=>{
 async function tick(){
   let s; try{ s=await (await fetch("/api/state")).json(); }catch(e){ return; }
   $("clock").textContent=s.now||"—";
-  if(s.identity){ $("name").textContent=s.identity.name+" "; $("name").innerHTML=esc(s.identity.name)+' <span style="color:var(--dim);font-size:12px;font-weight:400">· '+esc(s.identity.concept||"")+'</span>'; }
+  if(s.identity){ $("ident").innerHTML='core: '+esc((s.identity.name||"").toUpperCase())+' · '+esc(s.identity.concept||""); }
   $("directive").textContent=s.directive?("▸ "+s.directive):"";
   $("auto").textContent="autonomous "+(s.autonomous?"on":"off");
   $("auto").className="pill "+(s.autonomous?"on":"off");

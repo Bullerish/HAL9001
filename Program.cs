@@ -148,6 +148,17 @@ switch (args[0].ToLowerInvariant())
         break;
     }
 
+    // contribute <url> [seconds] → VOLUNTEER COMPUTE (bite 19): donate this machine's CPU to a hive's
+    // matrix-algorithm search. Fetches the target, searches locally, POSTs back ONLY the numbers; the
+    // coordinator re-verifies them. No code is exchanged — you add compute, you can't manipulate code.
+    case "contribute":
+    {
+        if (args.Length < 2) { Console.WriteLine("usage: HAL9001 contribute <coordinator-url> [seconds-per-round]"); break; }
+        double secs = args.Length >= 3 && double.TryParse(args[2], out double sv) && sv > 0 ? sv : 20;
+        await ContributeWorker.RunAsync(args[1], secs);
+        break;
+    }
+
     // demo → Step 1 Roslyn compile-and-load demo
     case "demo":
         RoslynDemo.Run();
@@ -177,5 +188,6 @@ switch (args[0].ToLowerInvariant())
         Console.WriteLine("  HAL9001 identity              Show the hive's persistent identity (needs TURSO_* env vars)");
         Console.WriteLine("  HAL9001 hive                  Speak as the collective (needs TURSO_* + API key); standalone, self lives in the DB");
         Console.WriteLine("  HAL9001 dashboard [port]      Live mission-control web UI over the hive (needs TURSO_*; default port 8765)");
+        Console.WriteLine("  HAL9001 contribute <url> [s]  Donate CPU: search for faster matmul algorithms; the coordinator verifies");
         break;
 }

@@ -245,7 +245,8 @@ dotnet run -- kernel 512 6        # 512×512 matrices, 6 candidates
 dotnet run -- racetest            # verify the counter (bite 15) + exact verifier (bite 16): naive=8, Strassen=7 muls; buggy rejected
 dotnet run -- derive strassen     # framework proof (bite 17): Strassen's known decomposition → error 0, 7 muls, exact-verify True
 dotnet run -- derive 2 7          # LLM-free tensor search for a rank-7 decomposition of T₂ (reaches low residual; honest WIP)
-dotnet run -- dashboard           # live mission-control web UI over the hive (needs TURSO_*; default port 8765)
+dotnet run -- dashboard           # live HAL-9000-style web UI over the hive (needs TURSO_*; default port 8765)
+dotnet run -- contribute <url>    # donate this machine's CPU to a hive's matmul search (coordinator verifies the numbers)
 ```
 
 A different use of the same generate-and-compile machinery: instead of *adding a capability*, it
@@ -343,6 +344,13 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 ## Release notes
 
 > Newest first. Each rung was verified before the next was built. Commit hashes are on `main`.
+
+### Volunteer compute + HAL 9000 face (bite 19)
+Two product-shaped additions: let strangers donate CPU to the hive trustlessly, and give the dashboard the iconic look.
+- **Donate CPU, can't touch code (`contribute` command + `/api/target` & `/api/contribute`):** a volunteer runs `HAL9001 contribute <coordinator-url>`; their machine asks what rank the hive wants beaten, runs the local `TensorSearch` for it, and POSTs back **only the numbers** (the u/v/w coefficient arrays). The coordinator re-synthesizes and **exact-verifies** those numbers itself (the bite-16 BigInteger check) before accepting — so a contributor adds raw search throughput (the genuinely expensive part) but can **never inject code or corrupt the hive**: a bad submission is simply rejected. This is the BOINC/SETI@home model, and it's the honest distributed version of bite-17's "needs a stronger search backend." Accepted/rejected contributions show up in the activity log; a contributed result that beats known-best goes through the same discovery gate.
+- **Guards:** submissions are size/rank/shape-validated and body-size capped before any work; the verification itself is bounded. (Rate-limiting the public endpoint is a noted hardening follow-up.)
+- **HAL 9000 aesthetic:** the dashboard is now a black console centered on a glowing red **eye** that breathes, flares on every hive event, and turns gold on a discovery — titled **HAL 9001** (an homage; the hive's actual self-name, e.g. "Forge", shows as the core identity line). Same live data, same reactive audio.
+- *Verified: HAL page serves (red eye + title present); `/api/target` returns the live target; `/api/contribute` rejects a malformed submission. Donate flow: run `dashboard` on a public box, share the URL, others run `contribute <url>`.*
 
 ### Live Dashboard — watch the hive in real time (bite 18)
 A "mission control" you can open in a browser and watch the swarm think, race, and climb.
