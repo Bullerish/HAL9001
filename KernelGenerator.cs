@@ -102,6 +102,82 @@ public sealed class KernelGenerator
         return new CandidateSource("refine-champion", CleanSource(raw));
     }
 
+    // ── Algorithm-novelty track (bite 15): minimise scalar MULTIPLICATIONS, not wall-clock ──
+    // For small sizes the metric is the multiplication count over the cheat-proof HAL9001.Scalar
+    // type. This is where Strassen-style decompositions show up; the LLM is steered toward them.
+
+    /// <summary>The mult-count strategies — classic sub-cubic schemes, in order. Take as many as asked.</summary>
+    public static readonly IReadOnlyList<string> CountingStrategies = new[]
+    {
+        "Strassen's algorithm: split each matrix into 2x2 blocks and use only 7 recursive block multiplications instead of 8 (the classic 7-multiply scheme), recursing down to a small naive base case. Pad to even dimensions when a level is odd.",
+        "Strassen-Winograd variant: the same 7 recursive multiplications but with only 15 additions/subtractions instead of Strassen's 18, recursing to a naive base case.",
+        "Laderman's 3x3 algorithm: multiply 3x3 blocks in 23 scalar multiplications instead of 27, applied via 3x3 block decomposition with a naive base case for the leaves.",
+        "Recursive divide-and-conquer applying Strassen at every level down to a base case of size 2 or 3, handling odd / non-power-of-two sizes by dynamic peeling or zero-padding.",
+        "Naive triple loop (exactly n*n*n scalar multiplications) — the correct baseline to measure novelty against.",
+    };
+
+    private string CountingSystemPrompt(int n) => $$"""
+        You are an expert in fast matrix-multiplication ALGORITHMS (the Strassen / bilinear-complexity
+        line of work). You write ONLY code — no prose, no explanation, no markdown fences.
+
+        Write a self-contained C# implementation that multiplies two {{n}}x{{n}} matrices over a
+        custom element type, with EXACTLY this shape (called by reflection — signature must match):
+
+            public static class Kernel
+            {
+                public static HAL9001.Scalar[,] Multiply(HAL9001.Scalar[,] a, HAL9001.Scalar[,] b)
+                {
+                    // a, b, result are all {{n}}x{{n}}
+                }
+            }
+
+        THE GOAL IS TO MINIMISE THE NUMBER OF SCALAR MULTIPLICATIONS (uses of the * operator on
+        HAL9001.Scalar). Fewer multiplications = better. Additions and subtractions are FREE for
+        scoring, so trade multiplications for additions wherever a sub-cubic scheme allows (Strassen,
+        Winograd, Laderman, etc.). The naive algorithm uses {{n}}*{{n}}*{{n}} multiplications; beat it.
+
+        HARD REQUIREMENTS:
+        - Signature EXACTLY `public static HAL9001.Scalar[,] Multiply(HAL9001.Scalar[,] a, HAL9001.Scalar[,] b)`.
+        - It MUST be numerically correct for {{n}}x{{n}} inputs (verified against a reference multiply).
+        - HAL9001.Scalar supports ONLY `+`, `-`, `*` and `new HAL9001.Scalar(double)`. You CANNOT read
+          its value back — so never try to inspect, compare, or branch on a Scalar's magnitude.
+        - To scale by a small integer constant, use repeated ADDITION (x + x), never `new Scalar(2.0) * x`,
+          so you don't waste a counted multiplication.
+        - SINGLE-THREADED ONLY. No Parallel, Task, Thread, or concurrency. Only System / built-in types.
+        - Return ONLY the C# source (you may include `using` directives). No backticks, no commentary.
+        """;
+
+    /// <summary>Generate a mult-count candidate for one <paramref name="strategy"/> at size <paramref name="n"/>.</summary>
+    public async Task<CandidateSource> GenerateCountingAsync(string strategy, int n, CancellationToken ct = default)
+    {
+        string user = $"Matrix size: {n}x{n}.\nMultiplication-reducing strategy to use:\n{strategy}\n\nReturn the C# code:";
+        string raw;
+        try { raw = await _client.CompleteAsync(CountingSystemPrompt(n), user, ct); }
+        catch (Exception ex) { Console.WriteLine($"  [generate-counting] failed: {ex.Message}"); raw = ""; }
+        return new CandidateSource(strategy, CleanSource(raw));
+    }
+
+    /// <summary>Ask the LLM to reduce the multiplication count of the current champion further.</summary>
+    public async Task<CandidateSource> RefineCountingAsync(
+        string championSource, long championMuls, int n, CancellationToken ct = default)
+    {
+        string user = $"""
+            The current best correct {n}x{n} multiply uses {championMuls} scalar multiplications.
+
+            Source:
+            {championSource}
+
+            Reduce the number of scalar multiplications further (deeper recursion, a better bilinear
+            scheme, Winograd-style add/sub savings, or a known low-rank decomposition). The signature
+            must remain `public static HAL9001.Scalar[,] Multiply(HAL9001.Scalar[,] a, HAL9001.Scalar[,] b)`
+            and all hard requirements still apply. Return ONLY the C# source.
+            """;
+        string raw;
+        try { raw = await _client.CompleteAsync(CountingSystemPrompt(n), user, ct); }
+        catch (Exception ex) { Console.WriteLine($"  [refine-counting] failed: {ex.Message}"); raw = ""; }
+        return new CandidateSource("refine-champion", CleanSource(raw));
+    }
+
     private async Task<CandidateSource> GenerateOneAsync(string strategy, CancellationToken ct)
     {
         string user = $"Optimization strategy to use for this implementation:\n{strategy}\n\nReturn the C# code:";

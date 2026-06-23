@@ -139,15 +139,28 @@ public sealed class AgentCore
         // Prime Directive (bite 13): the hive's north star — shapes every goal, capability, and journal.
         await _turso.ExecuteAsync(
             "CREATE TABLE IF NOT EXISTS directive (id INTEGER PRIMARY KEY CHECK(id=1), text TEXT NOT NULL DEFAULT '', set_at TEXT NOT NULL DEFAULT '')");
-        // Prime Directive race (bite 14): one champion row per matrix size — updated whenever any node
-        // sets a new speed record. All nodes read from and write to this shared table so the hive
-        // maintains one authoritative champion across the whole swarm.
+        // Prime Directive race (bite 14/15): one champion row per matrix size — updated whenever any
+        // node sets a new record. All nodes read from and write to this shared table so the hive
+        // maintains one authoritative champion across the whole swarm. The metric column distinguishes
+        // a wall-clock record ('ms', large sizes) from a multiplication-count record ('muls', small
+        // sizes); score holds whichever value is being minimised.
         await _turso.ExecuteAsync(
             "CREATE TABLE IF NOT EXISTS matmul_records (" +
             "size INTEGER NOT NULL PRIMARY KEY, node TEXT NOT NULL DEFAULT '', " +
-            "strategy TEXT NOT NULL DEFAULT '', median_ms REAL NOT NULL DEFAULT 999999, " +
+            "strategy TEXT NOT NULL DEFAULT '', metric TEXT NOT NULL DEFAULT 'ms', " +
+            "score REAL NOT NULL DEFAULT 999999, median_ms REAL NOT NULL DEFAULT 999999, " +
             "speedup REAL NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT '', " +
             "recorded_at TEXT NOT NULL DEFAULT '')");
+        // Migrate a bite-14 table (which lacked metric/score) — duplicate-column errors are ignored.
+        try { await _turso.ExecuteAsync("ALTER TABLE matmul_records ADD COLUMN metric TEXT NOT NULL DEFAULT 'ms'"); } catch { }
+        try { await _turso.ExecuteAsync("ALTER TABLE matmul_records ADD COLUMN score REAL NOT NULL DEFAULT 999999"); } catch { }
+        // Prime Directive ladder (bite 15): the single shared cursor up the size ladder. idx is the
+        // index into MatmulLadder.Sizes the swarm is currently racing; stale counts rounds since the
+        // last improvement at that size (plateau detection); done=1 once the top size has converged.
+        await _turso.ExecuteAsync(
+            "CREATE TABLE IF NOT EXISTS matmul_ladder (" +
+            "id INTEGER PRIMARY KEY CHECK(id=1), idx INTEGER NOT NULL DEFAULT 0, " +
+            "stale INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0)");
         var drows = await _turso.ExecuteAsync("SELECT text FROM directive WHERE id=1");
         if (drows.Count == 0 || drows[0].Count == 0 || string.IsNullOrWhiteSpace(drows[0][0]))
         {
@@ -1340,6 +1353,10 @@ public sealed class AgentCore
         return proc;
     }
 
+    private static readonly System.Globalization.CultureInfo Inv = System.Globalization.CultureInfo.InvariantCulture;
+    private static double? ParseInv(string? s)
+        => double.TryParse(s, System.Globalization.NumberStyles.Any, Inv, out double v) ? v : (double?)null;
+
     /// <summary>Read the hive's current matmul champion for the given matrix size, or null if no record exists.</summary>
     public async Task<MatmulRace.Champion?> GetMatmulChampionAsync(int size = MatmulRace.DefaultSize)
     {
@@ -1347,35 +1364,95 @@ public sealed class AgentCore
         try
         {
             var rows = await _turso.ExecuteAsync(
-                "SELECT node, strategy, median_ms, speedup, source FROM matmul_records WHERE size=?",
+                "SELECT node, strategy, metric, score, speedup, source, median_ms FROM matmul_records WHERE size=?",
                 size.ToString());
-            if (rows.Count == 0 || rows[0].Count < 5) return null;
-            if (!double.TryParse(rows[0][2], System.Globalization.NumberStyles.Any,
-                    System.Globalization.CultureInfo.InvariantCulture, out double ms)) return null;
-            if (!double.TryParse(rows[0][3], System.Globalization.NumberStyles.Any,
-                    System.Globalization.CultureInfo.InvariantCulture, out double su)) return null;
-            return new MatmulRace.Champion(rows[0][0] ?? "", rows[0][1] ?? "", ms, su, rows[0][4] ?? "");
+            if (rows.Count == 0 || rows[0].Count < 7) return null;
+            string metric = string.IsNullOrWhiteSpace(rows[0][2]) ? "ms" : rows[0][2]!;
+            // score is the canonical minimised value; fall back to a legacy bite-14 median_ms row.
+            double? score = ParseInv(rows[0][3]) ?? ParseInv(rows[0][6]);
+            double? su = ParseInv(rows[0][4]);
+            if (score is null || su is null) return null;
+            var m = metric == "muls" ? MatmulRace.Metric.Muls : MatmulRace.Metric.Time;
+            return new MatmulRace.Champion(rows[0][0] ?? "", rows[0][1] ?? "", m, score.Value, su.Value, rows[0][5] ?? "");
         }
         catch { return null; }
     }
 
+    /// <summary>All matmul champions across sizes, smallest first — for the `race` standings view.</summary>
+    public async Task<IReadOnlyList<(int Size, string Node, string Metric, double Score, double Speedup)>> GetAllMatmulChampionsAsync()
+    {
+        var list = new List<(int, string, string, double, double)>();
+        if (_turso is null) return list;
+        try
+        {
+            var rows = await _turso.ExecuteAsync(
+                "SELECT size, node, metric, score, speedup, median_ms FROM matmul_records ORDER BY size");
+            foreach (var r in rows)
+            {
+                if (r.Count < 6 || !int.TryParse(r[0], out int sz)) continue;
+                string metric = string.IsNullOrWhiteSpace(r[2]) ? "ms" : r[2]!;
+                double score = ParseInv(r[3]) ?? ParseInv(r[5]) ?? 0;
+                double su = ParseInv(r[4]) ?? 0;
+                list.Add((sz, r[1] ?? "", metric, score, su));
+            }
+        }
+        catch { }
+        return list;
+    }
+
     /// <summary>Write a new matmul champion to Turso (overwrites any prior record for this size).</summary>
     public async Task SetMatmulChampionAsync(
-        string node, int size, string strategy, double medianMs, double speedup, string source)
+        string node, int size, string strategy, MatmulRace.Metric metric, double score, double speedup, string source)
+    {
+        if (_turso is null) return;
+        try
+        {
+            string metricName = MatmulRace.MetricName(metric);
+            // median_ms kept populated for ms records (legacy/back-compat display); 0 for muls records.
+            double medianMs = metric == MatmulRace.Metric.Time ? score : 0;
+            await _turso.ExecuteAsync(
+                "INSERT OR REPLACE INTO matmul_records " +
+                "(size, node, strategy, metric, score, median_ms, speedup, source, recorded_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                size.ToString(), node, strategy, metricName,
+                score.ToString("F6", Inv), medianMs.ToString("F6", Inv),
+                speedup.ToString("F6", Inv), source, DateTime.UtcNow.ToString("o"));
+            string scoreText = metric == MatmulRace.Metric.Muls ? $"{score:F0} muls" : $"{score:F2}ms";
+            await Events.AppendAsync("matmul-record",
+                $"new {size}x{size} champion: {scoreText} ({speedup:F2}x vs naive) by {node} — " +
+                strategy[..Math.Min(60, strategy.Length)]);
+        }
+        catch { }
+    }
+
+    /// <summary>Read the shared ladder cursor (index into MatmulLadder.Sizes, plateau counter, done flag).</summary>
+    public async Task<(int Idx, int Stale, bool Done)> GetLadderAsync()
+    {
+        if (_turso is null) return (0, 0, false);
+        try
+        {
+            var rows = await _turso.ExecuteAsync("SELECT idx, stale, done FROM matmul_ladder WHERE id=1");
+            if (rows.Count == 0 || rows[0].Count < 3)
+            {
+                await _turso.ExecuteAsync("INSERT OR IGNORE INTO matmul_ladder (id, idx, stale, done) VALUES (1,0,0,0)");
+                return (0, 0, false);
+            }
+            int idx = int.TryParse(rows[0][0], out int i) ? i : 0;
+            int stale = int.TryParse(rows[0][1], out int s) ? s : 0;
+            bool done = rows[0][2] == "1";
+            return (idx, stale, done);
+        }
+        catch { return (0, 0, false); }
+    }
+
+    /// <summary>Write the shared ladder cursor.</summary>
+    public async Task SetLadderAsync(int idx, int stale, bool done)
     {
         if (_turso is null) return;
         try
         {
             await _turso.ExecuteAsync(
-                "INSERT OR REPLACE INTO matmul_records " +
-                "(size, node, strategy, median_ms, speedup, source, recorded_at) VALUES (?,?,?,?,?,?,?)",
-                size.ToString(), node, strategy,
-                medianMs.ToString("F6", System.Globalization.CultureInfo.InvariantCulture),
-                speedup.ToString("F6", System.Globalization.CultureInfo.InvariantCulture),
-                source, DateTime.UtcNow.ToString("o"));
-            await Events.AppendAsync("matmul-record",
-                $"new {size}x{size} champion: {medianMs:F2}ms ({speedup:F2}x) by {node} — " +
-                strategy[..Math.Min(60, strategy.Length)]);
+                "INSERT OR REPLACE INTO matmul_ladder (id, idx, stale, done) VALUES (1,?,?,?)",
+                idx.ToString(), stale.ToString(), done ? "1" : "0");
         }
         catch { }
     }

@@ -898,10 +898,12 @@ public static class SwarmAgent
             }
         }
 
-        // ── Prime Directive race loop (bite 14) ──────────────────────────────────────────────
-        // Fires every MatmulRaceIntervalSecs or immediately when a peer challenge arrives.
-        // Each round: generate candidates (random strategies + one refinement of champion) →
-        // compile → verify correctness → benchmark → update Turso champion → broadcast challenge.
+        // ── Prime Directive ladder loop (bites 14+15) ────────────────────────────────────────
+        // Fires every MatmulRaceIntervalSecs or immediately when a peer challenge arrives. Each tick
+        // runs ONE ladder step: race the swarm's current size once (mult-count metric for small sizes,
+        // wall-clock for large), update the shared plateau counter, and climb to the next size once a
+        // size converges. A new record broadcasts a challenge so peers fire their own step immediately.
+        bool ladderDonePrinted = false;
         async Task MatmulRaceLoop()
         {
             while (!loopCts.IsCancellationRequested)
@@ -919,30 +921,51 @@ public static class SwarmAgent
                 if ((DateTime.UtcNow - lastRaceAt).TotalSeconds < MinRaceIntervalSecs) continue;
                 lastRaceAt = DateTime.UtcNow;
 
-                string why = challenged ? "challenge received" : "race timer";
-                Console.WriteLine($"\n[matmul-race] {why} — generating candidates for {MatmulRace.DefaultSize}x{MatmulRace.DefaultSize}...");
-                Console.Write("> ");
-
                 try
                 {
-                    MatmulRace.RoundResult? r = await MatmulRace.RunRoundAsync(
-                        client!, core, myPort, ct: loopCts.Token);
+                    MatmulLadder.LadderStep? step = await MatmulLadder.StepAsync(client!, core, myPort, loopCts.Token);
+                    if (step is null) continue;
 
-                    if (r is null)
+                    if (step.Done)
                     {
-                        Console.WriteLine("[matmul-race] all candidates failed compile or correctness this round.");
-                        Console.Write("> ");
-                        await core.Events.AppendAsync("matmul-race", "all candidates disqualified this round");
+                        if (!ladderDonePrinted)
+                        {
+                            Console.WriteLine($"\n[matmul-race] LADDER COMPLETE — every size up to {step.Size}x{step.Size} has converged. The hive has reached its empirical optimum.");
+                            Console.Write("> ");
+                            await core.Events.AppendAsync("matmul-ladder-done", $"ladder converged through {step.Size}x{step.Size}");
+                            ladderDonePrinted = true;
+                        }
                         continue;
                     }
 
-                    Console.WriteLine($"[matmul-race] {r.Summary}");
+                    string why = challenged ? "challenge received" : "race timer";
+                    string unit = MatmulRace.MetricName(step.Metric);
+                    Console.WriteLine($"\n[matmul-race] {why} — racing {step.Size}x{step.Size} [{unit}] (plateau {step.Stale}/{MatmulLadder.PlateauRounds})...");
                     Console.Write("> ");
 
-                    if (r.NewRecord)
+                    if (step.Round is null)
                     {
-                        // Challenge every peer to beat our new record.
-                        string payload = $"{r.BestMs:F2}ms ({r.Speedup:F2}x) — beat it";
+                        Console.WriteLine("[matmul-race] all candidates failed compile or correctness this round.");
+                        Console.Write("> ");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[matmul-race] {step.Round.Summary}");
+                        Console.Write("> ");
+                    }
+
+                    if (step.Advanced)
+                    {
+                        Console.WriteLine($"[matmul-race] {step.Size}x{step.Size} CONVERGED — climbing the ladder to {step.NextSize}x{step.NextSize}.");
+                        Console.Write("> ");
+                        await core.Events.AppendAsync("matmul-size-converged",
+                            $"{step.Size}x{step.Size} converged after {MatmulLadder.PlateauRounds} flat rounds — climbing to {step.NextSize}x{step.NextSize}");
+                    }
+
+                    if (step.Improved && step.Round is not null)
+                    {
+                        // Challenge every peer to beat our new record at this size.
+                        string payload = $"{step.Size}x{step.Size} [{unit}] {step.Round.Score:F2} ({step.Round.Speedup:F2}x) — beat it";
                         await BroadcastSwarm(new SwarmMsg("matmul-challenge", Answer: payload, Origin: node.Id));
                         Console.WriteLine($"[matmul-race] challenge broadcast to {node.Peers.Count} peer(s).");
                         Console.Write("> ");
@@ -1227,17 +1250,26 @@ public static class SwarmAgent
             }
             if (line.Equals("race", StringComparison.OrdinalIgnoreCase))
             {
-                // PRIME DIRECTIVE RACE (bite 14): show the hive's current matmul speed champion.
+                // PRIME DIRECTIVE RACE (bites 14+15): show the ladder cursor + champions at every size.
                 if (!core.HasHive) { Console.WriteLine("[race] no hive configured."); continue; }
                 try
                 {
-                    MatmulRace.Champion? champ = await core.GetMatmulChampionAsync();
-                    if (champ is null)
-                        Console.WriteLine($"[race] no champion yet for {MatmulRace.DefaultSize}x{MatmulRace.DefaultSize} — run `autonomous on` to start.");
+                    var (idx, stale, done) = await core.GetLadderAsync();
+                    int curSize = MatmulLadder.Sizes[Math.Clamp(idx, 0, MatmulLadder.Sizes.Length - 1)];
+                    Console.WriteLine(done
+                        ? "[race] ladder COMPLETE — every size has converged to its empirical optimum."
+                        : $"[race] climbing: now racing {curSize}x{curSize} [{MatmulRace.MetricName(MatmulLadder.MetricFor(curSize))}], plateau {stale}/{MatmulLadder.PlateauRounds}.");
+                    var champs = await core.GetAllMatmulChampionsAsync();
+                    if (champs.Count == 0)
+                        Console.WriteLine("       no records yet — `autonomous on` to start the race.");
                     else
                     {
-                        Console.WriteLine($"[race] {MatmulRace.DefaultSize}x{MatmulRace.DefaultSize} champion: {champ.Node} — {champ.MedianMs:F2}ms ({champ.Speedup:F2}x)");
-                        Console.WriteLine($"       strategy: {champ.Strategy[..Math.Min(80, champ.Strategy.Length)]}");
+                        Console.WriteLine("       size    metric  best         vs-naive  holder");
+                        foreach (var c in champs)
+                        {
+                            string score = c.Metric == "muls" ? $"{c.Score:F0} muls" : $"{c.Score:F2} ms";
+                            Console.WriteLine($"       {c.Size,-7} {c.Metric,-6}  {score,-12} {c.Speedup,6:F2}x   {c.Node}");
+                        }
                     }
                 }
                 catch (Exception ex) { Console.WriteLine($"[race] error: {ex.Message}"); }

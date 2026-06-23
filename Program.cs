@@ -119,6 +119,12 @@ switch (args[0].ToLowerInvariant())
         break;
     }
 
+    // racetest → verify the matmul multiplication-counting harness (bite 15) end-to-end through the
+    // real compile pipeline. No API key or hive needed — confirms naive 2x2 = 8 muls, Strassen = 7.
+    case "racetest":
+        MatmulRace.SelfTest();
+        break;
+
     // demo → Step 1 Roslyn compile-and-load demo
     case "demo":
         RoslynDemo.Run();
