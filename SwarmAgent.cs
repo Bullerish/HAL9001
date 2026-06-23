@@ -766,9 +766,34 @@ public static class SwarmAgent
                 if (!core.HasLlm || !core.HasHive) continue;
                 bool amLeader; lock (stateLock) amLeader = coordinator == node.Id;
                 if (!amLeader) continue;                                   // only the hive's leader introspects
+
+                // DONATIONS (bite 20): answer a paid visitor ask FIRST, via the SAFE voice path (no
+                // router, no generator, no code generation). One per cycle; runs regardless of mood/idle.
+                try
+                {
+                    var ask = await core.NextPendingAskAsync();
+                    if (ask is not null)
+                    {
+                        string reply = await core.RespondToVisitorAsync(ask.Value.Sender, ask.Value.Text);
+                        if (reply.Length > 0)
+                        {
+                            await core.AnswerAskAsync(ask.Value.Id, reply);
+                            await core.Events.AppendAsync("hal-reply", $"answered {ask.Value.Sender}");
+                            Console.WriteLine($"\n[transmission ← {ask.Value.Sender}] {ask.Value.Text}\n[HAL 9001] {reply}");
+                            Console.Write("> ");
+                        }
+                        continue; // one paid ask handled this cycle
+                    }
+                }
+                catch { }
+
+                // Boost (bite 20): a paid boost makes the idle loop act ~5× sooner while it's hot.
+                double boostMul = 1.0;
+                try { if (await core.IsBoostedAsync()) boostMul = 0.2; } catch { }
+
                 if (pendingCuriosity.Count > 0 || pendingRework.Count > 0) continue; // already proposed, awaiting a yes
                 if (!pending.IsEmpty) continue;                            // work in flight — not idle
-                if ((DateTime.UtcNow - lastActivity).TotalSeconds < CuriosityIdleSeconds) continue;
+                if ((DateTime.UtcNow - lastActivity).TotalSeconds < CuriosityIdleSeconds * boostMul) continue;
 
                 Mood mood;
                 try { mood = await core.AssessMoodAsync(pending.Count); } catch { continue; }
@@ -838,7 +863,7 @@ public static class SwarmAgent
                     }
                 }
                 // content (Tend) and it's been a while → write a journal entry: a reflective check-in.
-                if (mood.Inclination == MoodInclination.Tend && (DateTime.UtcNow - lastJournal).TotalSeconds > JournalIdleSeconds)
+                if (mood.Inclination == MoodInclination.Tend && (DateTime.UtcNow - lastJournal).TotalSeconds > JournalIdleSeconds * boostMul)
                 {
                     JournalEntry? j;
                     try { j = await core.WriteJournalAsync(); } catch { j = null; }
@@ -918,7 +943,9 @@ public static class SwarmAgent
             while (!loopCts.IsCancellationRequested)
             {
                 bool challenged;
-                try { challenged = await matmulTrigger.WaitAsync(TimeSpan.FromSeconds(MatmulRaceIntervalSecs), loopCts.Token); }
+                bool boosted = false; try { boosted = await core.IsBoostedAsync(); } catch { }
+                double boostMul = boosted ? 0.2 : 1.0; // a paid boost races ~5× more often
+                try { challenged = await matmulTrigger.WaitAsync(TimeSpan.FromSeconds(MatmulRaceIntervalSecs * boostMul), loopCts.Token); }
                 catch { break; }
 
                 if (!core.HasLlm || !core.HasHive) continue;
@@ -927,7 +954,7 @@ public static class SwarmAgent
                 if (!isAuto) continue;
 
                 // Rate-limit: don't race more than once per MinRaceIntervalSecs even under a challenge cascade.
-                if ((DateTime.UtcNow - lastRaceAt).TotalSeconds < MinRaceIntervalSecs) continue;
+                if ((DateTime.UtcNow - lastRaceAt).TotalSeconds < MinRaceIntervalSecs * boostMul) continue;
                 lastRaceAt = DateTime.UtcNow;
 
                 try

@@ -61,26 +61,34 @@ public static class Dashboard
 
     private static async Task HandleAsync(HttpListenerContext ctx, AgentCore core)
     {
+        string ip = ctx.Request.RemoteEndPoint?.Address?.ToString() ?? "anon";
         try
         {
             string path = ctx.Request.Url?.AbsolutePath ?? "/";
+            ctx.Response.Headers["X-Content-Type-Options"] = "nosniff";
             if (path == "/api/state")
                 Write(ctx, "application/json", await GatherStateAsync(core));
             else if (path == "/api/target")
                 Write(ctx, "application/json", await TargetJsonAsync(core));
             else if (path == "/api/contribute" && ctx.Request.HttpMethod == "POST")
             {
-                string body;
-                using (var sr = new StreamReader(ctx.Request.InputStream, Encoding.UTF8)) body = await sr.ReadToEndAsync();
-                string who = ctx.Request.RemoteEndPoint?.Address?.ToString() ?? "anon";
-                Write(ctx, "application/json", await VerifyAndRecordAsync(core, body, who));
+                if (!RateOk(ip, 30)) { ctx.Response.StatusCode = 429; Write(ctx, "application/json", Err("rate limited")); }
+                else
+                {
+                    string? body = await ReadBodyAsync(ctx, 300_000);
+                    if (body is null) { ctx.Response.StatusCode = 413; Write(ctx, "application/json", Err("payload too large")); }
+                    else Write(ctx, "application/json", await VerifyAndRecordAsync(core, body, ip));
+                }
             }
+            else if (path == "/api/donate" && ctx.Request.HttpMethod == "POST")
+                Write(ctx, "application/json", await HandleDonateAsync(core, ctx, ip));
             else
                 Write(ctx, "text/html; charset=utf-8", Html);
         }
         catch (Exception ex)
         {
-            try { ctx.Response.StatusCode = 500; Write(ctx, "text/plain", ex.Message); } catch { }
+            Console.WriteLine($"[dashboard] request error: {ex.Message}"); // logged server-side only
+            try { ctx.Response.StatusCode = 500; Write(ctx, "application/json", Err("server error")); } catch { }
         }
         finally { try { ctx.Response.OutputStream.Close(); } catch { } }
     }
@@ -170,15 +178,23 @@ public static class Dashboard
         }
         catch { }
 
+        bool boosted = false; string? boostUntil = null;
+        var asks = new List<object>();
+        try { var bu = await core.GetBoostUntilAsync(); if (bu is not null) { boostUntil = bu.Value.ToString("o"); boosted = bu > DateTime.UtcNow; } } catch { }
+        try { foreach (var a in await core.RecentAsksAsync(6)) asks.Add(new { sender = a.Sender, text = a.Text, reply = a.Reply, status = a.Status }); } catch { }
+
         var state = new
         {
             identity,
             directive,
             autonomous,
+            boosted,
+            boostUntil,
             ladder,
             champions,
             goals,
             journal,
+            asks,
             events,
             nodes,
             stats = new { total, discoveries, records, capabilities = core.Registry.Count },
@@ -253,6 +269,81 @@ public static class Dashboard
         var a = new int[rows, cols];
         for (int r = 0; r < rows; r++) for (int c = 0; c < cols; c++) a[r, c] = j[r][c];
         return a;
+    }
+
+    // ── donations endpoint (bite 20) — locked down ─────────────────────────────────────────
+    // This is the ONLY write path reachable by money, so it is the most-guarded surface in the app:
+    //   • OFF unless HAL_DONATE_SECRET is set (returns 404 otherwise);
+    //   • secret required via X-HAL-Secret header, compared in constant time;
+    //   • meant for a server-side caller (your Stripe webhook), not the public browser;
+    //   • rate-limited per IP, body size-capped, JSON strictly parsed;
+    //   • boost is bounded/clamped in AgentCore; an "ask" is sanitized + queued, never executed —
+    //     HAL only ever REPLIES to it via the tool-less voice path. No code generation, ever.
+    private sealed record DonatePayload(string? Action, int? Minutes, string? Text, string? From);
+
+    private static async Task<string> HandleDonateAsync(AgentCore core, HttpListenerContext ctx, string ip)
+    {
+        string secret = Environment.GetEnvironmentVariable("HAL_DONATE_SECRET") ?? "";
+        if (secret.Length == 0) { ctx.Response.StatusCode = 404; return Err("donations disabled"); }
+        if (!RateOk(ip, 30)) { ctx.Response.StatusCode = 429; return Err("rate limited"); }
+        string provided = ctx.Request.Headers["X-HAL-Secret"] ?? "";
+        if (!CtEquals(provided, secret)) { ctx.Response.StatusCode = 401; return Err("unauthorized"); }
+
+        string? body = await ReadBodyAsync(ctx, 8192);
+        if (body is null) { ctx.Response.StatusCode = 413; return Err("payload too large"); }
+        DonatePayload? p; try { p = JsonSerializer.Deserialize<DonatePayload>(body, JsonOpts); } catch { ctx.Response.StatusCode = 400; return Err("bad json"); }
+        if (p is null) { ctx.Response.StatusCode = 400; return Err("empty"); }
+
+        string action = (p.Action ?? "").Trim().ToLowerInvariant();
+        if (action == "boost")
+        {
+            int m = await core.AddBoostAsync(p.Minutes ?? 10);
+            return m > 0 ? JsonSerializer.Serialize(new { ok = true, boostedMinutes = m }, JsonOpts) : Err("boost failed");
+        }
+        if (action == "ask")
+        {
+            bool ok = await core.QueueAskAsync(p.From ?? "a visitor", p.Text ?? "");
+            return ok ? JsonSerializer.Serialize(new { ok = true, queued = true }, JsonOpts) : Err("ask rejected (empty, too long, or queue full)");
+        }
+        ctx.Response.StatusCode = 400; return Err("unknown action");
+    }
+
+    private static string Err(string m) => JsonSerializer.Serialize(new { ok = false, error = m }, JsonOpts);
+
+    // Constant-time string compare (avoid leaking the secret via response timing).
+    private static bool CtEquals(string a, string b)
+    {
+        if (a.Length != b.Length) return false;
+        int diff = 0;
+        for (int i = 0; i < a.Length; i++) diff |= a[i] ^ b[i];
+        return diff == 0;
+    }
+
+    // Coarse per-IP rate limiter: N requests/minute, with a memory guard.
+    private static readonly Dictionary<string, (int count, DateTime window)> _rl = new();
+    private static readonly object _rlLock = new();
+    private static bool RateOk(string ip, int perMin)
+    {
+        lock (_rlLock)
+        {
+            if (_rl.Count > 5000) _rl.Clear();
+            DateTime now = DateTime.UtcNow;
+            if (!_rl.TryGetValue(ip, out var e) || (now - e.window).TotalSeconds >= 60) { _rl[ip] = (1, now); return true; }
+            if (e.count >= perMin) return false;
+            _rl[ip] = (e.count + 1, e.window);
+            return true;
+        }
+    }
+
+    // Read a request body bounded to maxChars — returns null if the client sent more (never buffers
+    // an unbounded body into memory).
+    private static async Task<string?> ReadBodyAsync(HttpListenerContext ctx, int maxChars)
+    {
+        using var sr = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
+        char[] buf = new char[maxChars + 1];
+        int total = 0, read;
+        while (total < buf.Length && (read = await sr.ReadAsync(buf, total, buf.Length - total)) > 0) total += read;
+        return total > maxChars ? null : new string(buf, 0, total);
     }
 
     // The whole page — self-contained (no external dependencies, works offline). Polls /api/state.
@@ -340,6 +431,7 @@ public static class Dashboard
   <div class="badges">
     <span class="pill live"><span class="dot"></span>online · <span id="clock">—</span></span>
     <span class="pill" id="auto">autonomous —</span>
+    <span class="pill" id="boost" style="display:none;color:var(--gold);border-color:rgba(255,209,102,.45)">⚡ boosted</span>
     <button class="pill snd" id="snd">♪ sound off</button>
   </div>
 </div>
@@ -369,6 +461,10 @@ public static class Dashboard
   <div class="panel wide">
     <h2>activity log</h2>
     <div class="feed" id="feed"></div>
+  </div>
+  <div class="panel wide">
+    <h2>transmissions</h2>
+    <div id="asks"></div>
   </div>
   <div class="panel wide">
     <h2>latest journal</h2>
@@ -497,6 +593,9 @@ async function tick(){
   }).join(""):'<div class="empty">no events yet.</div>';
 
   $("journal").textContent=s.journal?s.journal.entry:"—";
+
+  $("boost").style.display=s.boosted?"":"none";
+  $("asks").innerHTML=(s.asks&&s.asks.length)?s.asks.map(a=>'<div style="padding:7px 0;border-bottom:1px solid var(--line)"><div style="font-size:12px;color:#ff7a5c">▸ '+esc(a.sender)+': '+esc(a.text)+'</div>'+(a.reply?'<div style="font-size:13px;color:var(--txt);margin-top:3px">HAL: '+esc(a.reply)+'</div>':'<div style="font-size:11px;color:var(--dim);margin-top:3px">awaiting response…</div>')+'</div>').join(""):'<div class="empty">no transmissions yet.</div>';
   react(s);
 }
 tick(); setInterval(tick,2500);
