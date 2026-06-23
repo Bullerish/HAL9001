@@ -748,6 +748,22 @@ public static class SwarmAgent
                 lastActivity = DateTime.UtcNow;                            // acted (or chose to rest) — don't re-scan immediately
                 if (mood.Inclination == MoodInclination.Rest) continue;    // too weary — defer non-urgent work
 
+                // AUTONOMY (bite 8): pursue an APPROVED goal one step — proactive, across cycles.
+                try
+                {
+                    Goal? active = await core.ActiveGoalAsync();
+                    if (active is not null)
+                    {
+                        Console.WriteLine($"\n[goal] (idle) advancing my goal: {active.Description}");
+                        string r = await core.AdvanceGoalAsync(active);
+                        Console.WriteLine($"[goal] {r}"); Console.Write("> ");
+                        continue;
+                    }
+                    if (await core.HasProposedGoalAsync()) continue;       // a goal awaits approval — don't pile on
+                    if (await core.ProposeGoalAsync(pending.Count) is not null) continue; // set one (narrated), await approval
+                }
+                catch { /* fall through to lighter introspection */ }
+
                 Console.WriteLine($"\n[mood] feeling {mood.Label} ({mood.Note}) — I'll {mood.InclinationPhrase}.");
                 Console.Write("> ");
 
@@ -799,7 +815,8 @@ public static class SwarmAgent
         Console.WriteLine("           compose <question>  chain existing typed capabilities   |   remember <fact>  store knowledge in the hive");
         Console.WriteLine("           identity  who the hive is   |   timeline [n]  replay its episodic memory   |   @<port> <msg>  direct");
         Console.WriteLine("           curious [yes]  propose what to learn   |   reflect [fix]  self-critique + re-work weak tools");
-        Console.WriteLine("           mood  how the hive feels   |   aboutme  what it knows about you   |   peers   |   coordinator   |   pause <secs>   |   exit");
+        Console.WriteLine("           mood  how it feels   |   aboutme  what it knows about you   |   goals [think|approve|advance]  self-set goals");
+        Console.WriteLine("           peers   |   coordinator   |   pause <secs>   |   exit");
         Console.WriteLine();
 
         while (true)
@@ -848,6 +865,33 @@ public static class SwarmAgent
                 if (!core.HasLlm) { Console.WriteLine("[user] this node has no API key — can't model you."); continue; }
                 try { Console.WriteLine($"[user] {await core.DescribeUserAsync()}"); }
                 catch (Exception ex) { Console.WriteLine($"[user] couldn't read my model of you: {ex.Message}"); }
+                continue;
+            }
+            if (line.Equals("goals", StringComparison.OrdinalIgnoreCase) || line.StartsWith("goals ", StringComparison.OrdinalIgnoreCase))
+            {
+                // AUTONOMY: the hive's self-set goals — list / think (propose) / approve / advance.
+                if (!core.HasLlm || !core.HasHive) { Console.WriteLine("[goal] needs an API key + hive."); continue; }
+                string arg = line.Length > "goals".Length ? line["goals".Length..].Trim() : "";
+                if (arg.Length == 0)
+                {
+                    IReadOnlyList<Goal> gs = await core.AllGoalsAsync();
+                    if (gs.Count == 0) Console.WriteLine("[goal] no goals yet — `goals think` to set one (or I'll set one when idle).");
+                    else foreach (Goal g in gs) Console.WriteLine($"  #{g.Id} [{g.Status}] {g.Description}  ({g.Progress}/{g.Budget})");
+                }
+                else if (arg.Equals("think", StringComparison.OrdinalIgnoreCase))
+                { if (await core.ProposeGoalAsync(pending.Count) is null) Console.WriteLine("[goal] nothing to set a goal about right now (or one's already in flight)."); }
+                else if (arg.StartsWith("approve", StringComparison.OrdinalIgnoreCase))
+                {
+                    string rest = arg["approve".Length..].Trim();
+                    long? id = long.TryParse(rest, out long pid) ? pid : (long?)null;
+                    Console.WriteLine($"[goal] approved {await core.ApproveGoalsAsync(id)} goal(s) — I'll pursue them when idle (or `goals advance`).");
+                }
+                else if (arg.Equals("advance", StringComparison.OrdinalIgnoreCase))
+                {
+                    Goal? g = await core.ActiveGoalAsync();
+                    Console.WriteLine(g is null ? "[goal] no active goal — `goals think` then `goals approve` first." : $"[goal] {await core.AdvanceGoalAsync(g)}");
+                }
+                else Console.WriteLine("usage: goals | goals think | goals approve [id] | goals advance");
                 continue;
             }
             if (line.Equals("reflect", StringComparison.OrdinalIgnoreCase))

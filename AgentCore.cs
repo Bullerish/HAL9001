@@ -117,6 +117,11 @@ public sealed class AgentCore
         await _turso.ExecuteAsync(
             "CREATE TABLE IF NOT EXISTS assessments (capability TEXT PRIMARY KEY, confidence REAL NOT NULL, " +
             "passed INT NOT NULL, total INT NOT NULL, notes TEXT, assessed_at TEXT NOT NULL, assessed_by TEXT NOT NULL)");
+        // Autonomy (bite 8): persisted goals the hive sets itself and pursues across idle cycles.
+        await _turso.ExecuteAsync(
+            "CREATE TABLE IF NOT EXISTS goals (id INTEGER PRIMARY KEY AUTOINCREMENT, description TEXT NOT NULL, " +
+            "kind TEXT NOT NULL, target TEXT NOT NULL, status TEXT NOT NULL, progress INT NOT NULL DEFAULT 0, " +
+            "budget INT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)");
     }
 
     /// <summary>
@@ -759,6 +764,220 @@ public sealed class AgentCore
         return sb.ToString().TrimEnd();
     }
 
+    // ── AUTONOMY / GOALS (sentience ladder, bite 8): proactive, persisted, human-gated ──
+    //
+    // The leap from reactive to proactive: the hive SETS ITSELF explicit GOALS — synthesized from its
+    // gaps, its weak tools, its mood, and its model of the user — and pursues them ACROSS idle cycles,
+    // one step at a time, narrating as it goes. Goals persist (they survive restarts and are shared),
+    // so an intention outlives the moment. Two guardrails keep autonomy safe: a goal is only PROPOSED
+    // until a human APPROVES it (nothing is built/pushed on an unapproved goal), and every goal has a
+    // step BUDGET so pursuit is bounded, never runaway.
+
+    private async Task<List<Goal>> LoadGoalsAsync(params GoalStatus[] statuses)
+    {
+        var list = new List<Goal>();
+        if (_turso is null) return list;
+        try
+        {
+            List<List<string?>> rows = await _turso.ExecuteAsync(
+                "SELECT id, description, kind, target, status, progress, budget, created_by FROM goals ORDER BY id");
+            foreach (var r in rows)
+            {
+                if (r.Count < 8 || r[0] is null) continue;
+                var g = new Goal(long.TryParse(r[0], out long id) ? id : 0, r[1] ?? "", r[2] ?? "", r[3] ?? "",
+                    GoalStatuses.Parse(r[4]), int.TryParse(r[5], out int p) ? p : 0, int.TryParse(r[6], out int b) ? b : 1, r[7] ?? "");
+                if (statuses.Length == 0 || statuses.Contains(g.Status)) list.Add(g);
+            }
+        }
+        catch { /* unreachable → no goals */ }
+        return list;
+    }
+
+    /// <summary>
+    /// Form ONE goal for the hive to pursue, synthesizing its situation: a weak tool to fix (when it's
+    /// feeling self-critical), or a topic to build out — drawn from the USER's interests, or from a
+    /// recurring gap. Persists it as PROPOSED (not yet acted on) and logs/returns it. Returns null if
+    /// there's nothing worth a goal, or one is already in flight (the hive focuses on one at a time).
+    /// </summary>
+    public async Task<Goal?> ProposeGoalAsync(int liveLoad = 0)
+    {
+        if (_client is null || _turso is null) return null;
+        // One goal at a time — don't pile up intentions.
+        if ((await LoadGoalsAsync(GoalStatus.Proposed, GoalStatus.Active)).Count > 0) return null;
+
+        Mood mood = await AssessMoodAsync(liveLoad);
+
+        // Self-critical + a weak tool on record → goal: improve it.
+        if (mood.Inclination == MoodInclination.Consolidate)
+        {
+            string? weak = await WeakestAssessedAsync();
+            if (weak is not null)
+                return await InsertGoalAsync($"shore up my weak capability '{weak}'", "improve-tool", weak, budget: 1);
+        }
+
+        // Otherwise build out a topic — prefer what the USER cares about (theory of mind), else a gap theme.
+        UserModel user = await ProfileUserAsync();
+        string topic = user.Interests.FirstOrDefault() ?? "";
+        if (topic.Length == 0)
+        {
+            // fall back to the theme of a recent unresolved gap
+            var gaps = (await Events.RecentAsync(40)).Where(e => e.Kind == "gap-noticed").Select(e => e.Ref).LastOrDefault();
+            topic = gaps ?? "";
+        }
+        if (topic.Length == 0) return null;
+        return await InsertGoalAsync($"get better at {topic}", "learn-topic", topic, budget: 3);
+    }
+
+    private async Task<string?> WeakestAssessedAsync()
+    {
+        if (_turso is null) return null;
+        try
+        {
+            var rows = await _turso.ExecuteAsync("SELECT capability FROM assessments WHERE passed * 2 <= total ORDER BY confidence ASC LIMIT 1");
+            return rows.Count > 0 && rows[0].Count > 0 ? rows[0][0] : null;
+        }
+        catch { return null; }
+    }
+
+    private async Task<Goal?> InsertGoalAsync(string description, string kind, string target, int budget)
+    {
+        string now = DateTime.UtcNow.ToString("o");
+        try
+        {
+            await _turso!.ExecuteAsync(
+                "INSERT INTO goals (description, kind, target, status, progress, budget, created_by, created_at, updated_at) " +
+                "VALUES (?, ?, ?, 'Proposed', 0, ?, ?, ?, ?)",
+                description, kind, target, budget.ToString(), Events.Actor, now, now);
+            await Events.AppendAsync("goal-set", $"I've set myself a goal: {description} (up to {budget} step(s))", target);
+            Console.WriteLine($"  [goal] I've set myself a goal: {description} — approve it with `goals approve`.");
+        }
+        catch (Exception ex) { Console.WriteLine($"  [goal] couldn't record a goal: {ex.Message}"); return null; }
+        return (await LoadGoalsAsync(GoalStatus.Proposed)).LastOrDefault();
+    }
+
+    /// <summary>Approve a proposed goal (or all), opening the gate so the idle loop may pursue it.
+    /// Returns how many were approved.</summary>
+    public async Task<int> ApproveGoalsAsync(long? id = null)
+    {
+        if (_turso is null) return 0;
+        var proposed = await LoadGoalsAsync(GoalStatus.Proposed);
+        var toApprove = id is null ? proposed : proposed.Where(g => g.Id == id).ToList();
+        foreach (Goal g in toApprove)
+        {
+            await SetGoalStatusAsync(g.Id, GoalStatus.Active);
+            await Events.AppendAsync("goal-approved", $"goal approved: {g.Description}", g.Target);
+        }
+        return toApprove.Count;
+    }
+
+    private async Task SetGoalStatusAsync(long id, GoalStatus status)
+    {
+        if (_turso is null) return;
+        try { await _turso.ExecuteAsync("UPDATE goals SET status = ?, updated_at = ? WHERE id = ?", GoalStatuses.Name(status), DateTime.UtcNow.ToString("o"), id.ToString()); }
+        catch { }
+    }
+
+    private async Task SetGoalProgressAsync(long id, int progress)
+    {
+        if (_turso is null) return;
+        try { await _turso.ExecuteAsync("UPDATE goals SET progress = ?, updated_at = ? WHERE id = ?", progress.ToString(), DateTime.UtcNow.ToString("o"), id.ToString()); }
+        catch { }
+    }
+
+    /// <summary>The active goal the hive is currently pursuing (oldest first), or null.</summary>
+    public async Task<Goal?> ActiveGoalAsync() => (await LoadGoalsAsync(GoalStatus.Active)).FirstOrDefault();
+
+    /// <summary>Is a goal sitting PROPOSED, awaiting human approval? (So the idle loop waits rather
+    /// than piling on more initiative.)</summary>
+    public async Task<bool> HasProposedGoalAsync() => (await LoadGoalsAsync(GoalStatus.Proposed)).Count > 0;
+
+    /// <summary>
+    /// Take ONE step toward an active goal, narrating it: a "learn-topic" goal commissions one NEW
+    /// capability in the topic; an "improve-tool" goal re-works the weak capability. Progress is
+    /// recorded; when it reaches the budget the goal is marked done. Returns a short progress line.
+    /// Only ever called on an APPROVED (active) goal — that's the autonomy gate.
+    /// </summary>
+    public async Task<string> AdvanceGoalAsync(Goal goal, CancellationToken ct = default)
+    {
+        if (goal.Kind == "improve-tool")
+        {
+            var (improved, before, after) = await ReworkAsync(goal.Target, ct);
+            await SetGoalStatusAsync(goal.Id, GoalStatus.Done);
+            string r = improved ? $"improved '{goal.Target}' ({before:0.00}→{after:0.00})" : $"reviewed '{goal.Target}' (no better build found)";
+            await Events.AppendAsync("goal-done", $"goal done: {goal.Description} — {r}", goal.Target);
+            return $"goal '{goal.Description}': {r} — done.";
+        }
+
+        // learn-topic: commission one NEW capability in the topic.
+        CuriosityProposal? prop = await ProposeTopicCapabilityAsync(goal.Target, ct);
+        if (prop is null)
+        {
+            await SetGoalStatusAsync(goal.Id, GoalStatus.Done);
+            await Events.AppendAsync("goal-done", $"goal done: {goal.Description} — nothing more to add", goal.Target);
+            return $"goal '{goal.Description}': nothing more to add — done.";
+        }
+
+        bool built;
+        await _gate.WaitAsync(ct);
+        try
+        {
+            GeneratedHandler? gen;
+            try { gen = await _generator!.GenerateAsync(prop.Name, prop.Description, prop.Request, ct, persist: true, prop.InputType, prop.OutputType, prop.Stability); }
+            catch { gen = null; }
+            built = gen is not null;
+        }
+        finally { _gate.Release(); }
+
+        int progress = goal.Progress + (built ? 1 : 0);
+        await SetGoalProgressAsync(goal.Id, progress);
+        string step;
+        if (built)
+        {
+            step = $"learned '{prop.Name}' [{CapTypes.Name(prop.InputType)}→{CapTypes.Name(prop.OutputType)}] (step {progress}/{goal.Budget})";
+            await Events.AppendAsync("goal-advanced", $"goal '{goal.Description}': {step}", goal.Target);
+        }
+        else step = $"tried to learn '{prop.Name}' but couldn't this step";
+
+        if (progress >= goal.Budget)
+        {
+            await SetGoalStatusAsync(goal.Id, GoalStatus.Done);
+            await Events.AppendAsync("goal-done", $"goal done: {goal.Description} ({progress}/{goal.Budget} steps)", goal.Target);
+            return $"goal '{goal.Description}': {step} — goal complete.";
+        }
+        return $"goal '{goal.Description}': {step}.";
+    }
+
+    // Ask the LLM for ONE capability in a topic that the hive does NOT already have.
+    private async Task<CuriosityProposal?> ProposeTopicCapabilityAsync(string topic, CancellationToken ct = default)
+    {
+        if (_client is null) return null;
+        string have = string.Join(", ", Registry.Names);
+        string sys = """
+            Propose ONE useful, self-contained tool (a C# function) in the given TOPIC that the agent does
+            NOT already have. It must be a real computation/conversion/lookup a function could do. Output
+            ONLY JSON: {"name":"<short-kebab-id>","description":"<one line>","example":"<a concrete example request>","inputType":"<String|Int|Number|Bool|Date>","outputType":"<String|Int|Number|Bool|Date>","stability":"<stable|live>"}
+            """;
+        try
+        {
+            string raw = await _client.CompleteAsync(sys, $"Topic: {topic}\nTools it already has: {have}\nJSON:", ct);
+            using JsonDocument doc = JsonDocument.Parse(StripFences(raw));
+            JsonElement root = doc.RootElement;
+            string name = (root.TryGetProperty("name", out var n) ? n.GetString() : null)?.Trim() ?? "";
+            string desc = (root.TryGetProperty("description", out var d) ? d.GetString() : null)?.Trim() ?? "";
+            string example = (root.TryGetProperty("example", out var e) ? e.GetString() : null)?.Trim() ?? "";
+            if (name.Length == 0 || desc.Length == 0) return null;
+            if (Registry.Names.Contains(name, StringComparer.OrdinalIgnoreCase)) return null; // already have it
+            string inT = root.TryGetProperty("inputType", out var it) ? it.GetString() ?? "" : "";
+            string outT = root.TryGetProperty("outputType", out var ot) ? ot.GetString() ?? "" : "";
+            string stab = root.TryGetProperty("stability", out var st) ? st.GetString() ?? "" : "";
+            return new CuriosityProposal(example.Length > 0 ? example : desc, name, desc, CapTypes.Parse(inT), CapTypes.Parse(outT), StabilityKinds.Parse(stab));
+        }
+        catch { return null; }
+    }
+
+    /// <summary>A human-readable list of the hive's goals (for the `goals` command).</summary>
+    public async Task<IReadOnlyList<Goal>> AllGoalsAsync() => await LoadGoalsAsync();
+
     // ── rung 5a: deliberation support ────────────────────────────────────────────────────
 
     /// <summary>
@@ -1219,6 +1438,22 @@ public sealed record SelfAssessment(string Name, double Confidence, int Passed, 
 /// their most-recent questions, and a tailored <see cref="Suggestion"/>. All grounded in real history.</summary>
 public sealed record UserModel(int QuestionCount, string FirstSeen, IReadOnlyList<string> Interests,
     string Expertise, string Summary, IReadOnlyList<string> RecentQuestions, string Suggestion);
+
+/// <summary>The lifecycle of an autonomous goal (bite 8): Proposed (set, awaiting approval) →
+/// Active (approved, being pursued) → Done; or Abandoned.</summary>
+public enum GoalStatus { Proposed, Active, Done, Abandoned }
+
+public static class GoalStatuses
+{
+    public static string Name(GoalStatus s) => s.ToString();
+    public static GoalStatus Parse(string? s) => Enum.TryParse(s, out GoalStatus g) ? g : GoalStatus.Proposed;
+}
+
+/// <summary>A goal the hive set itself (bite 8): a durable, multi-step intention. <see cref="Kind"/>
+/// is "learn-topic" or "improve-tool", <see cref="Target"/> the topic/capability, <see cref="Progress"/>
+/// of <see cref="Budget"/> steps. Persisted, so an intention outlives the moment and survives restarts.</summary>
+public sealed record Goal(long Id, string Description, string Kind, string Target, GoalStatus Status,
+    int Progress, int Budget, string CreatedBy);
 
 /// <summary>The coordinator's one-call deliberation setup: the declared input/output types every
 /// candidate must target, plus the test cases (consistent with those types) to score them on.</summary>

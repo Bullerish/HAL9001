@@ -217,6 +217,33 @@ public static class AgentRepl
                     continue;
                 }
 
+                // AUTONOMY (sentience bite 8): self-set goals — list / think / approve / advance.
+                if (request.Equals("goals", StringComparison.OrdinalIgnoreCase) || request.StartsWith("goals ", StringComparison.OrdinalIgnoreCase))
+                {
+                    string arg = request.Length > "goals".Length ? request["goals".Length..].Trim() : "";
+                    if (arg.Length == 0)
+                    {
+                        IReadOnlyList<Goal> gs = await core.AllGoalsAsync();
+                        if (gs.Count == 0) Console.WriteLine("  [goal] no goals yet — `goals think` to set one.");
+                        else foreach (Goal g in gs) Console.WriteLine($"    #{g.Id} [{g.Status}] {g.Description}  ({g.Progress}/{g.Budget})");
+                    }
+                    else if (arg.Equals("think", StringComparison.OrdinalIgnoreCase))
+                    { if (await core.ProposeGoalAsync() is null) Console.WriteLine("  [goal] nothing to set a goal about right now (or one's already in flight)."); }
+                    else if (arg.StartsWith("approve", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string rest = arg["approve".Length..].Trim();
+                        long? id = long.TryParse(rest, out long pid) ? pid : (long?)null;
+                        Console.WriteLine($"  [goal] approved {await core.ApproveGoalsAsync(id)} goal(s).");
+                    }
+                    else if (arg.Equals("advance", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Goal? g = await core.ActiveGoalAsync();
+                        Console.WriteLine(g is null ? "  [goal] no active goal — `goals think` then `goals approve` first." : $"  [goal] {await core.AdvanceGoalAsync(g)}");
+                    }
+                    else Console.WriteLine("  usage: goals | goals think | goals approve [id] | goals advance");
+                    continue;
+                }
+
                 // SELF-CRITIQUE (sentience bite 5): score my own capabilities, flag + re-work the weak.
                 if (request.Equals("reflect", StringComparison.OrdinalIgnoreCase))
                 {
