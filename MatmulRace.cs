@@ -144,6 +144,21 @@ public static class MatmulRace
         }
     }
 
+    /// <summary>Compile a counting-track source, count its scalar multiplications on one run, and
+    /// exact-verify it. Used by the LLM-free derivation engine (bite 17) and its demo.</summary>
+    internal static (bool Compiled, long Muls, bool Exact) EvaluateCountingSource(string source, int size)
+    {
+        if (!RuntimeCompiler.TryCompileAssembly(source, out Assembly? asm, out _)) return (false, 0, false);
+        Func<Scalar[,], Scalar[,], Scalar[,]>? fn = BindScalar(asm!);
+        if (fn is null) return (false, 0, false);
+        var rng = new Random(20260621);
+        double[,] a = MatrixOps.RandomMatrix(size, size, rng), b = MatrixOps.RandomMatrix(size, size, rng);
+        Scalar.ResetCounters();
+        try { _ = fn(Scalar.From(a), Scalar.From(b)); } catch { return (true, 0, false); }
+        long muls = Scalar.Muls;
+        return (true, muls, VerifyExact(fn, size));
+    }
+
     /// <summary>EXACT verification: recompile the source and confirm it computes the true product on
     /// many random INTEGER matrices using BigInteger arithmetic — a bilinear scheme correct on enough
     /// random integer inputs is correct with overwhelming certainty (Schwartz–Zippel).</summary>
@@ -236,6 +251,26 @@ public static class MatmulRace
         AnthropicClient client, Champion? champ, int size,
         double[,] a, double[,] b, double[,] reference, int randomCandidates, CancellationToken ct)
     {
+        double bestMuls = double.MaxValue;
+        string bestStrategy = "", bestSource = "";
+
+        // LLM-FREE FIRST (bite 17): try to DERIVE a better algorithm by searching the matrix-multiply
+        // tensor directly — target one multiplication below the current best. This is the no-LLM path;
+        // any exact decomposition it finds is mechanically synthesized and counted. The LLM track below
+        // is the fallback for the (hard) cases the discrete search can't yet crack.
+        int target = (champ is not null ? (int)champ.Score : size * size * size) - 1;
+        if (target >= 1)
+        {
+            TensorSearch.Decomposition? d = TensorSearch.Search(size, target, out _, maxSeconds: 8);
+            if (d is not null)
+            {
+                string src = TensorSearch.Synthesize(d);
+                var (ok, muls, exact) = EvaluateCountingSource(src, size);
+                if (ok && exact && muls < bestMuls)
+                { bestMuls = muls; bestStrategy = "tensor-search (LLM-free derivation)"; bestSource = src; }
+            }
+        }
+
         var generator = new KernelGenerator(client);
         var picker = new Random();
         var genTasks = new List<Task<CandidateSource>>(
@@ -246,8 +281,6 @@ public static class MatmulRace
         CandidateSource[] candidates = await Task.WhenAll(genTasks);
 
         Scalar[,] sa = Scalar.From(a), sb = Scalar.From(b);
-        double bestMuls = double.MaxValue;
-        string bestStrategy = "", bestSource = "";
 
         foreach (CandidateSource cand in candidates)
         {

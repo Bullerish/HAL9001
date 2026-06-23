@@ -125,6 +125,19 @@ switch (args[0].ToLowerInvariant())
         MatmulRace.SelfTest();
         break;
 
+    // derive [n] [rank] → LLM-FREE derivation (bite 17): search the matmul tensor for a rank-R
+    // decomposition over {-1,0,1}, synthesize the algorithm, and exact-verify it. No API key/hive
+    // needed. `derive 2 7` should rederive a Strassen-equivalent from random — proof it's not recall.
+    case "derive":
+    {
+        if (args.Length >= 2 && args[1].Equals("strassen", StringComparison.OrdinalIgnoreCase))
+        { TensorSearch.StrassenCheck(); break; }
+        int dn = args.Length >= 2 && int.TryParse(args[1], out int pn) ? pn : 2;
+        int drank = args.Length >= 3 && int.TryParse(args[2], out int pr) ? pr : dn * dn * dn - 1;
+        TensorSearch.Demo(dn, drank);
+        break;
+    }
+
     // demo → Step 1 Roslyn compile-and-load demo
     case "demo":
         RoslynDemo.Run();

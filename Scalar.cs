@@ -38,6 +38,9 @@ public readonly struct Scalar
     public static Scalar operator *(Scalar a, Scalar b) { Muls++; return new Scalar(a._v * b._v); }
     public static Scalar operator +(Scalar a, Scalar b) { Adds++; return new Scalar(a._v + b._v); }
     public static Scalar operator -(Scalar a, Scalar b) { Adds++; return new Scalar(a._v - b._v); }
+    // Unary negation is FREE — scaling by -1 costs no multiplication. Synthesized decompositions
+    // (bite 17) use this to render {-1} coefficients without spending a counted multiply.
+    public static Scalar operator -(Scalar a) => new Scalar(-a._v);
 
     // Verification-only readout, internal so a candidate can't extract values to multiply raw doubles.
     internal double ToDouble() => _v;
