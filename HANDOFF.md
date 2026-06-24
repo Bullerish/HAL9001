@@ -19,6 +19,14 @@ of the local secrets or tooling yet in place.
 
 **The repo is now PUBLIC** (decided this session). It's the core "HAL is real" trust signal — no secrets are committed (CI is secret-free; real secrets live only in `/etc/hal9001/hal.env` on the box). The box IP + root-deploy recipe were scrubbed from the public docs, though the IP remains in earlier git history (see Open threads).
 
+**✅ Picked up + verified on a fresh machine (2026-06-24):** pulled to `99a4a9f`; `dotnet build`
+clean (0/0); `racetest` green (naive 8 / Strassen 7, exact verifier accepts correct & rejects
+buggy); `timeline` reads the live shared hive and the box is actively thinking (newest event
+~19:25Z). The hive now holds a real **4×4 = 56-mul champion (1.14× vs naive)** via recursive
+Strassen — so RECORDS ≠ 0 anymore. **Env on this machine:** `ANTHROPIC_API_KEY` is in User scope;
+the `TURSO_*` vars were present in-session but **not persisted to User/Machine scope** — set them
+in User scope (§5.2) so a fresh terminal can reach the hive. **Deploy was NOT run** (still pending — DO FIRST #1).
+
 **Shipped & LIVE at hal9001.io this session:**
 - Live CRT activity feed (`/api/live`) + new tinny grind audio bed
 - "Matrices being worked" panel — streams the tensor-search U/V/W grids live (`/api/matrix`)
