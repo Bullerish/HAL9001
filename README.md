@@ -681,7 +681,7 @@ The heart: compile a C# source string into a real, loadable assembly in memory a
 
 This README is part of the deliverable, not an afterthought. **On every future change, scan this file and update every section it affects** — at minimum add a new entry to [Release notes](#release-notes) (newest first), and revise [How it works](#how-it-works), [Usage](#usage), [Project layout](#project-layout), and [Roadmap](#roadmap) wherever the change touches them.
 
-PS C:\Users\bjame\Source\Repos\HAL9001> dotnet run -- kernel
+PS C:\dev\HAL9001> dotnet run -- kernel
 ==============================================================================
  HAL9001 — Kernel Optimization Search (bite 1: single node)
 ==============================================================================
@@ -839,10 +839,10 @@ public static class Kernel
 ──────────────────────────────────────────
 
 (anti-dead-code-elimination sink = 2.000E+006)
-PS C:\Users\bjame\Source\Repos\HAL9001> dotnet run -- kernel 128 2
-C:\Users\bjame\Source\Repos\HAL9001\KernelBenchmark.cs(168,17): warning CA1416: This call site is reachable on all platforms. 'Process.ProcessorAffinity' is only supported on: 'linux', 'windows'. (https://learn.microsoft.com/dotnet/fundamentals/code-analysis/quality-rules/ca1416)
-C:\Users\bjame\Source\Repos\HAL9001\KernelBenchmark.cs(178,39): warning CA1416: This call site is reachable on all platforms. 'Process.ProcessorAffinity' is only supported on: 'linux', 'windows'. (https://learn.microsoft.com/dotnet/fundamentals/code-analysis/quality-rules/ca1416)
-C:\Users\bjame\Source\Repos\HAL9001\KernelBenchmark.cs(167,33): warning CA1416: This call site is reachable on all platforms. 'Process.ProcessorAffinity' is only supported on: 'linux', 'windows'. (https://learn.microsoft.com/dotnet/fundamentals/code-analysis/quality-rules/ca1416)
+PS C:\dev\HAL9001> dotnet run -- kernel 128 2
+C:\dev\HAL9001\KernelBenchmark.cs(168,17): warning CA1416: This call site is reachable on all platforms. 'Process.ProcessorAffinity' is only supported on: 'linux', 'windows'. (https://learn.microsoft.com/dotnet/fundamentals/code-analysis/quality-rules/ca1416)
+C:\dev\HAL9001\KernelBenchmark.cs(178,39): warning CA1416: This call site is reachable on all platforms. 'Process.ProcessorAffinity' is only supported on: 'linux', 'windows'. (https://learn.microsoft.com/dotnet/fundamentals/code-analysis/quality-rules/ca1416)
+C:\dev\HAL9001\KernelBenchmark.cs(167,33): warning CA1416: This call site is reachable on all platforms. 'Process.ProcessorAffinity' is only supported on: 'linux', 'windows'. (https://learn.microsoft.com/dotnet/fundamentals/code-analysis/quality-rules/ca1416)
 ==============================================================================
  HAL9001 — Kernel Optimization Search (bite 1: single node)
 ==============================================================================

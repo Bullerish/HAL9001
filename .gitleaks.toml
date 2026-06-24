@@ -1,0 +1,24 @@
+title = "HAL9001 gitleaks config"
+
+# Use all of gitleaks' built-in rules...
+[extend]
+useDefault = true
+
+# ...but don't flag the intentional placeholders in the committed templates / docs.
+# Real secrets never live in the repo (see SECURITY.md), so these are the only "key-shaped"
+# strings present and they are deliberately non-functional.
+[allowlist]
+description = "Placeholder templates and documented non-secrets"
+paths = [
+  '''deploy/hal\.env\.example''',
+]
+regexTarget = "match"
+regexes = [
+  '''REPLACE_ME''',
+  '''sk-ant-\.\.\.''',
+  '''sk-ant-REPLACE_ME''',
+  '''your-db-name''',
+  '''rk_live_\.\.\.''',
+  '''rk_test_\.\.\.''',
+  '''whsec_\.\.\.''',
+]

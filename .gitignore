@@ -10,6 +10,25 @@ publish/
 *.user
 *.suo
 
-# Local environment / secrets (the Anthropic API key will live here in a later step)
+# Local environment / secrets — NEVER commit real values.
+# Only placeholder templates (*.example) are tracked; everything else is ignored.
 .env
+*.env
+hal.env
+!*.env.example
 appsettings.*.local.json
+
+# Private keys / credentials of any kind (deploy keys, certs, tokens)
+*.pem
+*.key
+*.pfx
+*.p12
+id_rsa
+id_ed25519
+*_deploy
+deploy_key*
+.pgpass
+
+# Tooling scratch (e.g. commit-message temp files)
+.commitmsg.tmp
+*.secret
