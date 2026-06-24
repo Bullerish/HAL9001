@@ -906,9 +906,11 @@ public static class Dashboard
   td.r{text-align:right}
   .up{color:#ff7a5c}
   .feed{max-height:320px;overflow:auto}
-  .ev{display:flex;gap:8px;padding:5px 0;border-bottom:1px solid var(--line);font-size:12px}
+  .ev{display:flex;gap:8px;padding:5px 0;border-bottom:1px solid var(--line);font-size:12px;cursor:pointer}
   .ev .t{color:var(--dim);white-space:nowrap}
   .ev .k{color:#a3453a;white-space:nowrap}
+  .ev .s{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ev.open .s{white-space:normal;overflow:visible}
   .ev.discovery .k,.ev.discovery .s{color:var(--gold)}
   .ev.contribution-accepted .k,.ev.contribution-accepted .s{color:#ff7a5c}
   .quote{font-style:italic;color:#8a6f64;border-left:2px solid var(--line2);padding-left:12px;line-height:1.7}
@@ -1227,7 +1229,8 @@ refreshActivity(); setInterval(refreshActivity,5000);
 // ── token wallet ─────────────────────────────────────────────────────────────────────────────
 // Server keeps the authoritative balance (cookie-keyed). The client mirrors it only to show the pill,
 // lock unaffordable choices, and surface the refuel CTA. Every paid action is re-checked server-side.
-let wallet={tokens:null,free:3,vid:null,checkout:false,packs:[]};
+let wallet={tokens:null,free:0,vid:null,checkout:false,packs:[]};
+const openEv=new Set(); // activity-log rows the visitor clicked open (persist across the 2.5s re-render)
 const isPaid=c=>/token/i.test(c.cost||"");
 function setTokens(n){ if(typeof n==="number"&&n>=0) wallet.tokens=n; renderWallet(); }
 function renderWallet(){
@@ -1368,7 +1371,8 @@ async function tick(){
   $("goals").innerHTML=(s.goals&&s.goals.length)?s.goals.map(g=>'<div style="padding:5px 0;border-bottom:1px solid var(--line);font-size:13px">'+esc(g.description)+' <span style="color:var(--dim)">('+g.progress+'/'+g.budget+' · '+g.status+')</span></div>').join(""):'<div class="empty">no active goals.</div>';
   $("feed").innerHTML=(s.events&&s.events.length)?s.events.map(e=>{
     const t=(e.ts||"").replace("T"," ").slice(11,19);
-    return '<div class="ev '+esc(e.kind)+'"><span class="t">'+t+'</span><span class="k">'+esc(e.kind)+'</span><span class="s">'+esc(e.summary)+'</span></div>';
+    const op=openEv.has(e.ts)?" open":""; // rows are clamped to one line; hover (title) or click to read the rest
+    return '<div class="ev '+esc(e.kind)+op+'" data-k="'+esc(e.ts)+'" title="'+esc(e.summary).replace(/"/g,"&quot;")+'"><span class="t">'+t+'</span><span class="k">'+esc(e.kind)+'</span><span class="s">'+esc(e.summary)+'</span></div>';
   }).join(""):'<div class="empty">no events yet.</div>';
   $("journal").textContent=s.journal?s.journal.entry:"—";
   $("boost").style.display=s.boosted?"":"none";
@@ -1377,6 +1381,8 @@ async function tick(){
   react(s);
 }
 tick(); setInterval(tick,2500);
+// activity-log: click a row to expand its clamped summary (and hover shows the full text via title)
+$("feed").addEventListener("click",ev=>{const r=ev.target.closest(".ev[data-k]");if(!r)return;const k=r.getAttribute("data-k");openEv.has(k)?openEv.delete(k):openEv.add(k);r.classList.toggle("open");});
 </script>
 </body></html>
 """;

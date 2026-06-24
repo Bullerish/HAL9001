@@ -1842,7 +1842,7 @@ public sealed class AgentCore
     }
 
     // ── token wallet (bite 23): free starter grant, enforced spend, donation-creditable ───────────
-    public static int FreeTokens => (int)EnvD("HAL_FREE_TOKENS", 3);
+    public static int FreeTokens => (int)EnvD("HAL_FREE_TOKENS", 0); // new visitors get NOTHING by default; opt in via the env var
     private static bool ValidVid(string? vid) =>
         !string.IsNullOrEmpty(vid) && vid.Length is >= 8 and <= 64 && vid.All(c => char.IsLetterOrDigit(c));
 
