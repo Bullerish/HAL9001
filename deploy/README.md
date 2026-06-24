@@ -76,6 +76,31 @@ curl -s https://hal9001.io/api/state | head -c 300     # JSON from the hive
 ```
 Open `https://hal9001.io` in a browser — the red eye, the race, the live feed. Click ♪ to hear it.
 
+## 7. Harden the box (recommended once live — the IP is public via DNS)
+
+`hal9001.io` resolves to the origin IP, so it's discoverable — protect at the host layer, not by
+hiding it. Run the included script (idempotent; won't lock you out):
+
+```bash
+cd /opt/hal9001/deploy
+sudo bash harden.sh                  # firewall (ufw 22/80/443) + fail2ban + auto security updates
+# then, AFTER confirming your own SSH key works from a 2nd terminal:
+sudo HARDEN_SSH=1 bash harden.sh     # disable password login (key-only; keeps CI's key-based root)
+```
+
+`HARDEN_SSH=1` sets `PermitRootLogin prohibit-password` so the GitHub Actions deploy (key-based root)
+keeps working while password logins are turned off. It refuses to run unless `/root/.ssh/authorized_keys`
+already has a key, so add yours first (`ssh-copy-id root@<box>`) and keep a session open while you test.
+
+**IONOS specifics:** a VPS / Cloud Server gives you full root (confirm with `ssh root@<box>` → `whoami`).
+IONOS Cloud Servers also have a **panel-level firewall** in the Cloud Panel that sits *in front of* the
+box independently of `ufw` — if it's enabled there, you must also allow **22, 80, 443** in the panel or
+the site/SSH won't be reachable even after `ufw` is correct. (Plain VPS plans usually rely on `ufw` only.)
+
+**Optional, stronger:** put the origin behind a CDN/proxy (e.g. Cloudflare, free tier) so the public
+IP becomes the proxy's and you can firewall the origin to the proxy's ranges — the only thing that
+actually *hides* the origin IP.
+
 ---
 
 ## Notes

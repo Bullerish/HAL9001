@@ -44,7 +44,13 @@ in User scope (§5.2) so a fresh terminal can reach the hive. **Deploy was NOT r
 
 **Manual box steps (gated — run on the box yourself):**
 - **Caddy www→apex redirect:** copy the updated `deploy/Caddyfile` to `/etc/caddy/Caddyfile`, then `systemctl reload caddy` (SEO duplicate-content fix; non-load-bearing).
-- **Box hardening** (recommended now the IP is effectively public): SSH key-only (disable password auth), `fail2ban`, consider a non-root deploy user with scoped sudo.
+- **Box hardening** (recommended now the IP is effectively public): run `deploy/harden.sh` on the box —
+  `sudo bash harden.sh` (ufw 22/80/443 + fail2ban + auto-updates), then `sudo HARDEN_SSH=1 bash harden.sh`
+  for key-only SSH (keeps CI's key-based root working). IONOS: also allow 22/80/443 in the Cloud Panel
+  firewall if it's enabled. See `deploy/README.md` §7. Optional further step: non-root deploy user w/ scoped sudo.
+- **GitHub repo security (web UI, ~2 min)** — Settings → *Code security*: enable **Secret scanning** +
+  **Push protection** (blocks a secret at push time), enable **Private vulnerability reporting** (what
+  SECURITY.md points to), and turn on **Dependabot alerts**. The in-repo gitleaks workflow complements these.
 
 **Open threads / next ideas:**
 - **Live "run a function on a sample input"** in the dashboard (deferred) — would let visitors watch HAL's real code execute. Safe path: compile tool source straight from the Turso `showcase` table (needs no git on the box). Strongest realness signal — build next if wanted.
