@@ -1358,36 +1358,56 @@ public sealed class AgentCore
         }
         if (newPort < 0) { Console.WriteLine("  [hire] no free port in range 9100–9199."); return null; }
 
-        // Publish a Release copy inside the repo tree so GitSync.Discover() can walk up to .git,
-        // and so workers never lock bin/Debug/net8.0/HAL9001.dll (the file the build overwrites).
-        string srcDir  = Path.GetDirectoryName(dll)!;
-        string repoRoot = Path.GetFullPath(Path.Combine(srcDir, "..", "..", ".."));
-        string pubDir  = Path.Combine(repoRoot, "bin", "workers-pub");
-        string pubDll  = Path.Combine(pubDir, "HAL9001.dll");
-        string csproj  = Path.Combine(repoRoot, "HAL9001.csproj");
+        // Decide HOW to spawn a worker, based on the environment we're running in:
+        //   • DEV (a repo checkout — csproj present): publish a Release copy into bin/workers-pub and run it
+        //     via `dotnet <dll>`. Publishing avoids locking the bin/Debug DLL the build overwrites, and the
+        //     copy lives in the repo tree so GitSync.Discover() can still walk up to .git for handler sharing.
+        //   • PROD (self-contained deploy — no SDK, no csproj, e.g. the hal9001.io box): we CANNOT publish.
+        //     Spawn the binary we're ALREADY running: the native apphost next to the DLL if present (a
+        //     self-contained publish ships it), else fall back to `dotnet <dll>`. This is what lets the mesh
+        //     actually form in production instead of failing the publish and staying solo forever.
+        string exeDir   = Path.GetDirectoryName(dll)!;
+        string repoRoot = Path.GetFullPath(Path.Combine(exeDir, "..", "..", ".."));
+        string csproj   = Path.Combine(repoRoot, "HAL9001.csproj");
 
-        bool stale = !File.Exists(pubDll) ||
-                     File.GetLastWriteTimeUtc(pubDll) < File.GetLastWriteTimeUtc(dll);
-        if (stale)
+        string fileName;     // the executable to launch
+        string argPrefix;    // tokens before "swarm <port> <peers>"
+        if (File.Exists(csproj))
         {
-            Console.WriteLine("  [hire] publishing worker binary (first hire or after a rebuild)...");
-            var pub = new System.Diagnostics.Process
+            string pubDir = Path.Combine(repoRoot, "bin", "workers-pub");
+            string pubDll = Path.Combine(pubDir, "HAL9001.dll");
+            bool stale = !File.Exists(pubDll) ||
+                         File.GetLastWriteTimeUtc(pubDll) < File.GetLastWriteTimeUtc(dll);
+            if (stale)
             {
-                StartInfo = new System.Diagnostics.ProcessStartInfo(
-                    "dotnet", $"publish \"{csproj}\" -c Release -o \"{pubDir}\" --nologo -v q")
-                { UseShellExecute = false, CreateNoWindow = true },
-                EnableRaisingEvents = true,
-            };
-            pub.Start();
-            await pub.WaitForExitAsync();
-            if (!File.Exists(pubDll))
-            { Console.WriteLine("  [hire] publish failed — is the dotnet SDK on PATH?"); return null; }
-            Console.WriteLine("  [hire] worker binary ready.");
+                Console.WriteLine("  [hire] publishing worker binary (first hire or after a rebuild)...");
+                var pub = new System.Diagnostics.Process
+                {
+                    StartInfo = new System.Diagnostics.ProcessStartInfo(
+                        "dotnet", $"publish \"{csproj}\" -c Release -o \"{pubDir}\" --nologo -v q")
+                    { UseShellExecute = false, CreateNoWindow = true },
+                    EnableRaisingEvents = true,
+                };
+                pub.Start();
+                await pub.WaitForExitAsync();
+                if (!File.Exists(pubDll))
+                { Console.WriteLine("  [hire] publish failed — is the dotnet SDK on PATH?"); return null; }
+                Console.WriteLine("  [hire] worker binary ready.");
+            }
+            fileName = "dotnet";
+            argPrefix = $"\"{pubDll}\" ";
+        }
+        else
+        {
+            string apphost = Path.Combine(exeDir, OperatingSystem.IsWindows() ? "HAL9001.exe" : "HAL9001");
+            if (File.Exists(apphost)) { fileName = apphost; argPrefix = ""; }
+            else { fileName = "dotnet"; argPrefix = $"\"{dll}\" "; }
+            Console.WriteLine($"  [hire] self-contained mode — spawning {Path.GetFileName(fileName)} directly (no publish).");
         }
 
         var allPeers = new[] { parentPort }.Concat(peerPorts).Distinct().Where(p => p != newPort);
-        string args = $"\"{pubDll}\" swarm {newPort} {string.Join(" ", allPeers)}";
-        var psi = new System.Diagnostics.ProcessStartInfo("dotnet", args)
+        string args = $"{argPrefix}swarm {newPort} {string.Join(" ", allPeers)}";
+        var psi = new System.Diagnostics.ProcessStartInfo(fileName, args)
         {
             UseShellExecute = false,
             CreateNoWindow = true,
