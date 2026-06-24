@@ -345,6 +345,12 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 
 > Newest first. Each rung was verified before the next was built. Commit hashes are on `main`.
 
+### Honest dashboard, bite 1 — a LIVE node count
+The dashboard's "active nodes" number was a lie: it counted the distinct authors of recent events, so nodes that died days ago still showed as active (the live site read **4** while exactly **1** node was running). Replaced with a real heartbeat.
+- **Presence table:** every swarm node upserts a row into a shared `presence(node, role, last_seen)` table every 10s (`HeartbeatPresenceAsync`, driven by a per-node `PresenceLoop` — runs on *every* node, not just the coordinator). A node that dies stops upserting.
+- **Live read:** the dashboard counts only rows seen within a 45s window (`CountLivePresenceAsync`), so a dead node ages out within ~45s. The count is split **core** (the hal9001.io box) vs **volunteer** (remote donated compute), set by `HAL_NODE_ROLE` (default `core`).
+- **Verified:** with one node up the live count read `{total:1, core:1}` while the old logic still reported the 4 ghosts; a second node tagged `volunteer` produced `{total:2, core:1, volunteer:1}`.
+
 ### Stripe checkout — buy tokens to fuel HAL (bite 24)
 Real money meets the token wallet, wired as the narrowest surface possible: the browser never touches a card, and only a signature-verified Stripe callback can ever credit a wallet.
 - **Buy flow:** the refuel CTA shows three packs (**$3 → 30**, **$10 → 120**, **$25 → 350** tokens). The browser names a *pack id*; the server (holding `STRIPE_SECRET_KEY`) creates a **Stripe Checkout Session** with the price set server-side, the buyer's wallet `vid` + token count in metadata, and redirects to Stripe's hosted page. Prices/quantities can't be tampered with from the client.

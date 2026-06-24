@@ -197,6 +197,13 @@ public sealed class AgentCore
         // double-credit a wallet on a retried delivery.
         await _turso.ExecuteAsync(
             "CREATE TABLE IF NOT EXISTS stripe_seen (id TEXT PRIMARY KEY, ts TEXT NOT NULL DEFAULT '')");
+        // Live node presence (honest dashboard): every swarm node upserts its own row on a timer, so the
+        // dashboard can count who is ACTUALLY alive right now. A node that dies simply stops upserting and
+        // ages out of the freshness window — unlike the old "distinct authors of recent events" guess, which
+        // kept counting long-dead nodes. role = 'core' (on the hal9001.io box) | 'volunteer' (remote compute).
+        await _turso.ExecuteAsync(
+            "CREATE TABLE IF NOT EXISTS presence (node TEXT PRIMARY KEY, role TEXT NOT NULL DEFAULT 'core', " +
+            "last_seen TEXT NOT NULL DEFAULT '')");
         var drows = await _turso.ExecuteAsync("SELECT text FROM directive WHERE id=1");
         if (drows.Count == 0 || drows[0].Count == 0 || string.IsNullOrWhiteSpace(drows[0][0]))
         {
@@ -1863,6 +1870,43 @@ public sealed class AgentCore
             return (r.Count > 0 && r[0].Count > 0 && int.TryParse(r[0][0], out int t)) ? t : 0;
         }
         catch { return 0; }
+    }
+
+    // ── live node presence (honest dashboard) ─────────────────────────────────────────────────────
+    /// <summary>Upsert this node's heartbeat so the dashboard can count who is alive RIGHT NOW. Best-effort
+    /// (a hive hiccup must never crash a node), keyed by node id so a node only ever has one row.</summary>
+    public async Task HeartbeatPresenceAsync(string node, string role)
+    {
+        if (_turso is null || string.IsNullOrEmpty(node)) return;
+        try
+        {
+            await _turso.ExecuteAsync(
+                "INSERT OR REPLACE INTO presence (node, role, last_seen) VALUES (?,?,?)",
+                node, string.IsNullOrEmpty(role) ? "core" : role, DateTime.UtcNow.ToString("o"));
+        }
+        catch { }
+    }
+
+    /// <summary>Count nodes that heartbeat within the last <paramref name="windowSeconds"/> seconds, split by
+    /// role. Returns (total, core, volunteer). Because a dead node stops upserting, stale rows fall outside the
+    /// window and drop out — so this is a LIVE count, not a historical one. (last_seen is ISO-8601 "o" format,
+    /// which sorts lexically, so a string compare is a correct time compare.)</summary>
+    public async Task<(int Total, int Core, int Volunteer)> CountLivePresenceAsync(int windowSeconds = 45)
+    {
+        if (_turso is null) return (0, 0, 0);
+        try
+        {
+            string cutoff = DateTime.UtcNow.AddSeconds(-windowSeconds).ToString("o");
+            var rows = await _turso.ExecuteAsync("SELECT role FROM presence WHERE last_seen >= ?", cutoff);
+            int core = 0, vol = 0;
+            foreach (var r in rows)
+            {
+                string role = (r.Count > 0 ? r[0] : "core") ?? "core";
+                if (role == "volunteer") vol++; else core++;
+            }
+            return (core + vol, core, vol);
+        }
+        catch { return (0, 0, 0); }
     }
 
     /// <summary>Atomically claim a Stripe event/session id for processing. Returns true only the FIRST time

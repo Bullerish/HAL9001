@@ -192,6 +192,10 @@ public static class Dashboard
         }
         catch { }
 
+        // LIVE node count (not the stale event-author guess): nodes that heartbeat within the freshness window.
+        (int Total, int Core, int Volunteer) live = (0, 0, 0);
+        try { live = await core.CountLivePresenceAsync(); } catch { }
+
         bool boosted = false; string? boostUntil = null;
         var asks = new List<object>();
         try { var bu = await core.GetBoostUntilAsync(); if (bu is not null) { boostUntil = bu.Value.ToString("o"); boosted = bu > DateTime.UtcNow; } } catch { }
@@ -215,6 +219,7 @@ public static class Dashboard
             asks,
             events,
             nodes,
+            nodesLive = new { total = live.Total, core = live.Core, volunteer = live.Volunteer },
             stats = new { total, discoveries, records, capabilities = core.Registry.Count },
             now = DateTime.UtcNow.ToString("HH:mm:ss"),
         };
@@ -840,7 +845,7 @@ public static class Dashboard
 
 <div class="wrap" style="max-width:1200px;margin:0 auto">
 <div class="metrics">
-  <div class="metric"><div class="v" id="m-nodes">—</div><div class="l">active nodes</div></div>
+  <div class="metric"><div class="v" id="m-nodes">—</div><div class="l" id="m-nodes-l">live nodes</div></div>
   <div class="metric"><div class="v" id="m-records">—</div><div class="l">records set</div></div>
   <div class="metric"><div class="v" id="m-events">—</div><div class="l">life events</div></div>
   <div class="metric"><div class="v" id="m-disc">—</div><div class="l">discoveries</div></div>
@@ -953,7 +958,7 @@ function flareEye(gold){const e=$("eye");if(!e)return;e.classList.add("flare");i
 let prev=null;
 function react(s){
   const cur={records:s.stats?s.stats.records:0,disc:s.stats?s.stats.discoveries:0,
-             nodes:(s.nodes&&s.nodes.length)||0,size:s.ladder?s.ladder.currentSize:0,
+             nodes:(s.nodesLive?s.nodesLive.total:0)||0,size:s.ladder?s.ladder.currentSize:0,
              top:(s.events&&s.events[0])?s.events[0].ts+s.events[0].summary:""};
   if(prev){
     if(cur.disc>prev.disc){flareEye(true);if(sound)sfx.discovery();startProcessing(8000);}
@@ -1145,7 +1150,10 @@ async function tick(){
   $("directive").textContent=s.directive?("▸ "+s.directive):"";
   $("auto").textContent="autonomous "+(s.autonomous?"on":"off");
   $("auto").className="pill "+(s.autonomous?"on":"off");
-  $("m-nodes").textContent=(s.nodes&&s.nodes.length)||0;
+  // LIVE node count from real heartbeats (a dead node ages out within ~45s), split core vs volunteer.
+  const nl=s.nodesLive||{total:0,core:0,volunteer:0};
+  $("m-nodes").textContent=nl.total||0;
+  $("m-nodes-l").textContent=nl.volunteer>0?("live nodes · "+nl.core+" core · "+nl.volunteer+" volunteer"):"live nodes";
   $("m-records").textContent=s.stats?s.stats.records:0;
   $("m-events").textContent=s.stats?s.stats.total:0;
   $("m-disc").textContent=s.stats?s.stats.discoveries:0;

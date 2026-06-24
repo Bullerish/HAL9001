@@ -175,6 +175,7 @@ public static class SwarmAgent
         // ── Heartbeat + election timing (rung 4a/4b) ──────────────────────────────────────
         const int HeartbeatIntervalMs = 1000;
         const double DeathTimeoutSeconds = 4.0; // 4× interval; see rung 4a for the ratio rationale
+        const int PresenceIntervalMs = 10000;   // how often each node writes its liveness row to the hive
 
         // All coordinator/election state lives behind one lock (touched by the receive thread,
         // the monitor loop, and the heartbeat loop).
@@ -668,6 +669,19 @@ public static class SwarmAgent
             }
         }
 
+        // Live presence: EVERY node (not just the leader) upserts its heartbeat to the hive on a timer, so the
+        // separate dashboard process can count who is genuinely alive. Writes once immediately on start so a
+        // fresh node appears within seconds; a dead node stops writing and ages out of the dashboard's window.
+        async Task PresenceLoop()
+        {
+            string role = Environment.GetEnvironmentVariable("HAL_NODE_ROLE") ?? "core";
+            while (!loopCts.IsCancellationRequested)
+            {
+                await core.HeartbeatPresenceAsync(node.Id, role); // best-effort; never throws
+                try { await Task.Delay(PresenceIntervalMs, loopCts.Token); } catch { break; }
+            }
+        }
+
         // Detect coordinator death and, where 4a only announced, now TRIGGER AN ELECTION.
         async Task MonitorLoop()
         {
@@ -1077,6 +1091,7 @@ public static class SwarmAgent
 
         await node.StartAsync(peerPorts);
         _ = HeartbeatSenderLoop();
+        _ = PresenceLoop();
         _ = MonitorLoop();
         _ = AskerRecoveryLoop();
         _ = CuriosityLoop();

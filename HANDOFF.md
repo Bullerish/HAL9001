@@ -6,8 +6,12 @@ of the local secrets or tooling yet in place.
 
 > **Repo:** `git@hal9001.github.com:Bullerish/HAL9001.git`
 > (GitHub: https://github.com/Bullerish/HAL9001 — private)
-> **Latest commit at handoff:** `3f4397f` — *Kernel optimization search — bite 1 (single node)*
-> **Branch:** `main` (in sync with origin)
+> **Branch:** `main` (in sync with origin). For the exact commit list and per-feature
+> evidence, see `git log` and `README.md` → *Release notes* (newest-first).
+> **Where the work is right now:** the project is **LIVE at https://hal9001.io** (bite 22)
+> with a token economy + Stripe checkout (bites 23–24) and is mid-way through the
+> **"honest & alive dashboard"** track (live node count = done; richer CRT + activity feed = next).
+> See §2 for the real current state and §18 for the open user actions.
 
 ---
 
@@ -19,7 +23,7 @@ of the local secrets or tooling yet in place.
 git clone git@hal9001.github.com:Bullerish/HAL9001.git
 cd HAL9001
 
-# 3. Set the three secrets in User scope (see §5 — use your real values):
+# 3. Set the three dev secrets in User scope (see §5 — use your real values):
 [Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY','<key>','User')
 [Environment]::SetEnvironmentVariable('TURSO_DATABASE_URL','<url>','User')
 [Environment]::SetEnvironmentVariable('TURSO_AUTH_TOKEN','<token>','User')
@@ -27,11 +31,12 @@ cd HAL9001
 
 # 4. Build + smoke-test:
 dotnet build
-dotnet run -- kernel 128 2     # generate/compile/verify/benchmark/rank on one node
+dotnet run -- dashboard       # open http://localhost:8765 — the live mission-control UI
+dotnet run -- timeline 20     # replay the hive's episodic memory (proves the Turso wiring)
 ```
 
-If `dotnet run` (default agent mode) or the swarm answers a question and you can push a
-generated handler, the machine is fully wired. See §15 for the full smoke-test checklist.
+If the dashboard renders the hive's real state and `timeline` prints events written by the
+live box, this machine is reading the same hive as production. See §19 for the full checklist.
 
 ---
 
@@ -48,25 +53,53 @@ peer-to-peer mesh that elects a coordinator (quorum), survives node death (in-fl
 recovery), shares handlers over GitHub, and competitively deliberates (every node writes its
 own implementation; the best is scored and adopted).
 
-There is also a newer, separate direction — **kernel optimization search** — that reuses the
-generate-and-compile core but ranks candidate implementations of a fixed compute operation by
-**speed** (correctness first, then fastest wins).
+**What it grew into.** On top of that core, HAL9001 became a persistent, public "hive":
+
+- A **persistent self** living in the shared Turso store — a name, a birth, a self-concept, an
+  episodic event log (its autobiography), mood/drives that steer its idle time, and a collective
+  "hive mind" voice synthesized from all nodes' thoughts. (The *sentience ladder*, bites 1–13.)
+- A **Prime Directive**: race to discover *faster matrix-multiplication algorithms*. The hive
+  climbs a size ladder (2×2 → 256×256), scoring candidates by **multiplication count** (an exact,
+  hardware-independent fitness instrument — wall-clock is noise at small sizes), converges per size
+  on a plateau, and gates real "discoveries" behind a known-best bar + exact verification.
+- A **live, watchable web dashboard** (HAL-9000 red-eye aesthetic) that anyone can visit at
+  https://hal9001.io, plus a **token economy** (free starter grant + Stripe top-ups) and a
+  **trustless volunteer-compute** path so strangers can safely donate CPU.
 
 Full narrative + per-feature release notes are in [`README.md`](README.md). This file is the
-*operational* handoff (how to stand it up elsewhere).
+*operational* handoff (how to stand it up and run it elsewhere).
 
 ---
 
 ## 2. Current state
 
-- **All committed code is pushed**; `main` == `origin/main` at commit `3f4397f`.
-- The capability ladder (rungs 1–5b), shared `AgentCore`, typed capabilities, composition
-  (single + bounded multi-link), stored knowledge (Turso), auto-derived facts with the
-  Stable/Live distinction, and kernel-optimization bite 1 are all **done and verified**. See
-  §11 for the status table and `README.md` → *Release notes* for the verified evidence.
-- **Model default:** `AnthropicClient.cs` is committed with `claude-haiku-4-5-20251001` (fast +
-  cheap, used for the kernel/swarm test loops). Switch to `claude-opus-4-8` for highest quality.
-  See §9.
+- **`main` == `origin/main`.** All committed code is pushed. (Latest commits are handler adds +
+  the honest-dashboard "live node count" work — see `git log`.)
+- **The capability/swarm ladder** (rungs 1–5b: Roslyn core, router, typed capabilities,
+  composition, shared knowledge with Stable/Live facts) is **done + verified**.
+- **The kernel/matmul track** is **done through bite 16** (single-node kernel search;
+  Prime Directive race; dual-metric size ladder with plateau convergence; novelty gate with
+  exact verification + human-gated discovery artifacts). **Bite 17** (LLM-free tensor-decomposition
+  *derivation*) has a **correct, verified framework** but its **discrete search is WIP** — it needs
+  a stronger search backend before it derives non-trivial algorithms reliably.
+- **Going public is done:** mission-control dashboard (bite 18), trustless volunteer compute
+  (bite 19), hardened donations + safe tool-less visitor Q&A (bite 20), daily LLM budget meter +
+  token accounting (bite 21), **deployed live at hal9001.io** (bite 22), watchable UI + token
+  wallet with free grant + 402 enforcement (bite 23), and **Stripe Checkout** top-ups (bite 24).
+- **CI/CD** push-to-deploy via GitHub Actions + an SSH deploy key exists (`.github/workflows/deploy.yml`).
+- **In progress — the "honest & alive dashboard" track.** The user's complaint was that the live
+  dashboard *looked* dead/fake. Root causes diagnosed: (1) the live box was running a **stale
+  binary**; (2) the "active nodes" number was a **fake** count derived from recent event authors,
+  counting long-dead ghosts; (3) RECORDS/DISCOVERIES = 0 is **honest** (the search just hasn't
+  promoted a champion; the LLM-free backend is the known WIP). **Bite 1 of this track is done +
+  verified:** a real `presence` heartbeat table + live node count (see §10). Bites 2–3 (richer CRT,
+  activity feed) and the persistence/pricing/join-page work are **not started** (§10, §15, §18).
+- **Model default:** `AnthropicClient.cs` is committed with a model constant — see §12.
+
+> ⚠️ **The live site may be running an OLD build.** The honest-dashboard code and possibly other
+> recent commits were not necessarily redeployed. **A redeploy is the single highest-leverage
+> action** (§8.4, §18). To check for staleness: grep the live HTML for a string you know is only
+> in current source; if it's missing, the box is stale.
 
 ---
 
@@ -82,7 +115,7 @@ Full narrative + per-feature release notes are in [`README.md`](README.md). This
   automatically on `dotnet build` — nothing to install by hand.
 - OS: developed on Windows 11 with **PowerShell**; a Bash shell is also handy for the test
   harness scripts. Nothing is Windows-only except the optional benchmark core-pinning
-  (`ProcessorAffinity`), which is platform-guarded.
+  (`ProcessorAffinity`), which is platform-guarded. **The live box is Linux** (self-contained publish).
 
 ---
 
@@ -105,39 +138,39 @@ push, since pushes go over the SSH alias remote).
 ## 5. Secrets & environment — **NOT in git, must be re-created**
 
 Nothing secret is ever stored in the repo. All of the following live in the machine's
-environment / `~/.ssh` and must be set up fresh on the new machine. **Never commit these or
-paste their values into any file (including this one).**
+environment / `~/.ssh` (dev) or in `/etc/hal9001/hal.env` (the box). **Never commit these, never
+paste their values into any file (including this one), and never print their values** — when
+checking presence, print only a boolean/length:
+`[bool][Environment]::GetEnvironmentVariable('ANTHROPIC_API_KEY','User')`.
 
-### 5.1 Anthropic API key (required for any generation)
+### 5.1 Anthropic API key (required for any generation / thinking)
 
 ```powershell
 [Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY','<your-anthropic-key>','User')
 ```
-Used by `AnthropicClient`. Without it, generation modes can't run (swarm transport/coordination
-can still be exercised — keyless nodes return stubs).
+Used by `AnthropicClient`. Without it, generation/race/synthesis can't run (read-only modes like
+`dashboard`/`timeline`/`identity` still work; swarm transport works with keyless stub nodes).
 
-### 5.2 Turso (libSQL) — the shared knowledge/facts hive (optional but needed for facts)
+### 5.2 Turso (libSQL) — the shared hive store (identity, events, races, wallets, donations)
 
 ```powershell
 [Environment]::SetEnvironmentVariable('TURSO_DATABASE_URL','libsql://<db>-<org>.turso.io','User')
 [Environment]::SetEnvironmentVariable('TURSO_AUTH_TOKEN','<your-turso-token>','User')
 ```
-Point the new machine at the **same** Turso database to keep the existing facts
-(`capital-of-ohio` = explicit, `is-28-a-perfect-number` = derived, etc.). Without these the
-swarm runs fine, just with the facts feature off (`[hive knowledge: off]` in the banner).
-`TursoClient` talks the HTTP `/v2/pipeline` API directly (libsql:// → https://, Bearer token).
+Point the new machine at the **same** Turso database the live box uses to see the real hive
+(identity, episodic memory, race records, token wallets). `TursoClient` talks the HTTP
+`/v2/pipeline` API directly (libsql:// → https://, Bearer token). Without these the agent runs
+with the hive off (`[hive knowledge: off]` in the banner).
 
 > After setting User-scope env vars, **open a new shell** — existing shells won't see them.
-> To verify presence without printing the value:
-> `[bool][Environment]::GetEnvironmentVariable('ANTHROPIC_API_KEY','User')`
 
 ### 5.3 GitHub SSH deploy key + ssh config alias (needed to pull/push handlers)
 
 The repo `origin` is `git@hal9001.github.com:Bullerish/HAL9001.git`. The host
 `hal9001.github.com` is an **ssh config alias**, not a real DNS name — it maps to GitHub with a
-specific deploy key. Set up on the new machine, **either**:
+specific deploy key. On the new machine, **either**:
 
-**Option A — reuse the existing deploy key** (copy the private key from the old machine):
+**Option A — reuse the existing deploy key** (copy from the old machine):
 1. Copy `~/.ssh/hal9001_deploy` (private) and `~/.ssh/hal9001_deploy.pub` to the new machine's
    `~/.ssh/` (keep permissions tight).
 
@@ -157,6 +190,22 @@ Host hal9001.github.com
 Test it: `ssh -T git@hal9001.github.com` (expect GitHub's "successfully authenticated, but …
 does not provide shell access" message). Then `git pull` / `git push` work non-interactively.
 
+### 5.4 Production-only secrets (live on the BOX, in `/etc/hal9001/hal.env`)
+
+These never touch a dev machine and never go in git — `deploy/hal.env.example` is the only env
+file in the repo (placeholders only). The full annotated list is in
+[`deploy/hal.env.example`](deploy/hal.env.example); the security-relevant ones:
+
+| Var | Purpose |
+|---|---|
+| `ANTHROPIC_API_KEY`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` | Same as §5.1/§5.2, but for the box. |
+| `HAL_PACE=slow` | ~6× slower ambient pace so a 24/7 box stays cheap. |
+| `HAL_NODE_ROLE=core` | How a node reports itself in the live count: `core` (the box) vs `volunteer` (donated remote compute). |
+| `HAL_DAILY_USD=1.0`, `HAL_PRICE_IN`, `HAL_PRICE_OUT` | Daily LLM budget meter (bite 21); thinking pauses when spent ≥ budget + donations. |
+| `HAL_FREE_TOKENS=3` | Free tokens a new visitor gets on first load. |
+| `HAL_DONATE_SECRET` | Gates `/api/donate` (404 until set); the boost/fund endpoint's shared secret. |
+| `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `HAL_PUBLIC_URL` | Stripe token purchases (bite 24); `/api/checkout` + `/api/stripe-webhook` are **404 until set**. |
+
 ---
 
 ## 6. Build
@@ -165,33 +214,148 @@ does not provide shell access" message). Then `git pull` / `git push` work non-i
 dotnet build
 ```
 - Generated handlers in `handlers/*.cs` are **excluded from the static build** (compiled at
-  runtime). Three seed handlers are tracked (prime check, temperature converter, US state
-  capital) so a fresh checkout already has a small catalog.
-- Tip: when several swarm instances run they lock `HAL9001.exe`. To recompile while they run,
-  build to a throwaway dir: `dotnet build -o bin/verify`, and run the DLL directly.
+  runtime). Seed handlers are tracked so a fresh checkout already has a small catalog.
+- Tip: when several swarm instances run they lock the DLL. To recompile while they run, build to a
+  throwaway dir (`dotnet build -o bin/verify`) and run the DLL directly. (This DLL-lock problem is
+  why hired/background workers now publish to their own dir — see `git log` around the "DLL lock" fixes.)
+- For the box: `dotnet publish -c Release -r linux-x64 --self-contained -o publish-linux` (§8).
 
 ---
 
 ## 7. Run modes
 
-The first CLI argument selects a mode (see `Program.cs`).
+The first CLI argument selects a mode (see [`Program.cs`](Program.cs)).
 
 | Command | What it does |
 |---|---|
-| `dotnet run` (or `dotnet run -- agent`) | Single self-extending agent REPL. |
+| `dotnet run` (or `dotnet run -- agent`) | Single self-extending agent REPL. Needs `ANTHROPIC_API_KEY`. |
 | `dotnet run -- agent host 5000` / `agent join 127.0.0.1 5000` | Two-node agent (phase-1 transport). |
-| `dotnet bin/Debug/net8.0/HAL9001.dll swarm 5001 5002 5003` (one per node, each lists its own port first) | The swarm: mesh + elected coordinator + assign-to-one (`<question>`), `deliberate <question>`, `compose <question>`, `remember <fact>`. |
-| `dotnet run -- kernel [size] [candidates]` | **Kernel optimization search** (bite 1): generate N matrix-multiply candidates, compile, verify-correct vs the naive reference, benchmark, rank by speedup. Defaults: 256×256, 5 candidates. E.g. `dotnet run -- kernel 128 4`. |
+| `dotnet run -- swarm 5001 5002 5003` (each node lists its own port first) | The swarm: mesh + elected coordinator + assign/`deliberate`/`compose`/`remember`. Also runs the Prime Directive race + presence heartbeats. |
+| `dotnet run -- kernel [size] [candidates]` | Kernel optimization search (bite 1): generate matmul candidates → compile → verify-correct → benchmark → rank by speedup. Defaults 256, 5. |
+| `dotnet run -- dashboard [port]` | **LIVE mission-control web UI** (bite 18). Read-only; polls the hive. Needs `TURSO_*`, no API key. Default port **8765**. Serves the page + `/api/state`, `/api/wallet`, `/api/checkout`, `/api/stripe-webhook`, `/api/donate`, `/api/target`, `/api/contribute`. |
+| `dotnet run -- timeline [n]` | Replay the hive's episodic memory from Turso (proves events survive restarts). Needs `TURSO_*`. |
+| `dotnet run -- identity` | Print the hive's persisted self (name/born/concept/persona). Needs `TURSO_*`. |
+| `dotnet run -- hive` | Speak as the collective consciousness — synthesize all nodes' thoughts into one voice. Needs `TURSO_*` + API key. |
+| `dotnet run -- racetest` | Self-test the multiplication-counting harness (no key/hive). Confirms naive 2×2 = 8 muls, Strassen = 7. |
+| `dotnet run -- derive [n] [rank]` (or `derive strassen`) | LLM-FREE tensor-decomposition derivation (bite 17). `derive 2 7` should rederive a Strassen-equivalent. No key/hive. (Search is WIP.) |
+| `dotnet run -- contribute <url> [secs]` | **Volunteer compute** (bite 19): donate CPU to a coordinator. Sends only numbers; the coordinator re-verifies. |
 | `dotnet run -- demo` | Roslyn compile-and-load demonstration. |
 | `dotnet run -- host 5000` / `join 127.0.0.1 5000` | Step-2 raw TCP chat. |
 
 ---
 
-## 8. The swarm test harness (`_hal_sandbox`) — how to recreate
+## 8. The live production deployment (hal9001.io)
+
+**Architecture.** Two **separate** systemd processes on one Linux VPS share the hive **only**
+through Turso (they do not talk to each other directly):
+
+- `hal-swarm` — *thinks*: runs the race, journals, answers asks, heartbeats presence. Port **9000**.
+- `hal-dashboard` — *serves* the read-only web UI + API on **localhost:8765**.
+- **Caddy** fronts the dashboard with automatic Let's Encrypt TLS at `https://hal9001.io`.
+- Secrets live only in `/etc/hal9001/hal.env` (chmod 600), read at service start. Never in git, never in CI.
+
+**The box:** VPS `67.217.245.253`, domain `hal9001.io`. The repeatable kit is in
+[`deploy/`](deploy/) — read [`deploy/README.md`](deploy/README.md) for the full walk-through.
+Summary:
+
+### 8.1 First-time provisioning
+1. Linux VPS (Ubuntu 24.04), A records `hal9001.io` + `www` → box IP, `ufw allow 22,80,443`.
+2. On your machine: `dotnet publish -c Release -r linux-x64 --self-contained -o publish-linux`,
+   then `scp` `publish-linux/*` and `deploy/` to `/opt/hal9001/` on the box.
+3. On the box: `cd /opt/hal9001/deploy && bash setup.sh` (creates the `hal` user, installs
+   `/etc/hal9001/hal.env` from the template, installs + enables both systemd units).
+4. `nano /etc/hal9001/hal.env` → fill real secrets → `systemctl restart hal-swarm hal-dashboard`.
+5. Install Caddy, `cp deploy/Caddyfile /etc/caddy/Caddyfile`, `systemctl reload caddy`.
+
+### 8.2 The Caddy gotcha (cost me real time — do not lose this)
+HttpListener on the dashboard validates the `Host` header. Caddy **must** rewrite it upstream or
+the dashboard returns 404 for everything:
+```
+reverse_proxy localhost:8765 {
+    header_up Host {upstream_hostport}
+}
+```
+If `https://hal9001.io` 404s but `curl localhost:8765` on the box works, this is why.
+
+### 8.3 CI/CD push-to-deploy
+[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) is a **manual** (`workflow_dispatch`)
+job: build a linux-x64 self-contained publish, `scp` **only `HAL9001.dll`** to the box, `chown
+hal:hal`, restart both services, curl-verify the dashboard. **CI never sees any secret** — it only
+needs SSH. Required GitHub repo secrets (Settings → Secrets and variables → Actions):
+`DEPLOY_HOST` (=`67.217.245.253`), `DEPLOY_USER` (=`root`), `DEPLOY_SSH_KEY` (the **private** half
+of a keypair whose public half is in the box's `~/.ssh/authorized_keys`). To auto-deploy on push,
+uncomment the `push:` trigger once trusted.
+
+### 8.4 Manual update (when CI isn't wired yet)
+Rebuild the publish, `scp` it over `/opt/hal9001`, `systemctl restart hal-swarm hal-dashboard`.
+Logs: `journalctl -u hal-dashboard -f` and `journalctl -u hal-swarm -f`.
+
+> **Redeploy is likely the first thing to do on the new machine** (the live box may be stale — §2).
+
+---
+
+## 9. The token economy & Stripe (security model)
+
+The whole point is to **offset LLM cost, not gouge** — a slight margin only. The mechanics:
+
+- **Wallet = server-side, keyed by an opaque `halvid` cookie** (HttpOnly, Secure, SameSite=Lax,
+  1-year). Balance lives in the `wallet` table in Turso. New visitors get `HAL_FREE_TOKENS` free.
+- **Spending is re-validated server-side** every time (`UPDATE wallet SET tokens = tokens - ?
+  WHERE vid = ? AND tokens >= ?`). A visitor cannot console-log their way to more tokens — the
+  browser holds only an opaque id, never the balance.
+- **The ONLY way to credit a purchased wallet is the Stripe-signed webhook.** `/api/stripe-webhook`
+  verifies the signature (constant-time), is **idempotent** (the `stripe_seen` table dedupes replays
+  within a window), and **fails closed**. `/api/checkout` (3 packs $3/$10/$25, server-side pricing)
+  and the webhook are **404 until `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET` are set**.
+- **Donations** (`/api/donate`) are gated by `HAL_DONATE_SECRET` (404 until set) and top up the
+  day's LLM allowance ("fund the engine"), separate from per-visitor token packs.
+
+**CARDINAL SECURITY RULE (keep it in force):** *visitor input NEVER reaches the
+router/generator/Roslyn.* The visitor Q&A path is a **safe, tool-less** `RespondToVisitorAsync` —
+even a successful prompt injection can only make HAL *say* something, never execute code. The
+choice menu sends only a choice **ID** mapped server-side to a fixed `(kind, arg)`; checkout sends
+only a **pack ID** with server-side pricing. Any future per-user personalization/history must feed
+**only** that safe tool-less path — never code-gen.
+
+---
+
+## 10. The "honest & alive dashboard" track (in progress)
+
+The user picked three things via an explicit choice: **(1)** first focus = an *honest & alive*
+dashboard; **(2)** identity model = **recovery code (no PII)**; **(3)** swarm participation =
+**volunteer compute only**.
+
+**Bite 1 — LIVE node count — DONE + VERIFIED.** Replaces the old fake "active nodes" (which counted
+dead event-authors) with real heartbeats:
+- `presence(node PK, role, last_seen)` Turso table (in `AgentCore.EnsureHiveAsync`).
+- Every swarm node upserts its row every 10s (`SwarmAgent.PresenceLoop` →
+  `AgentCore.HeartbeatPresenceAsync`); `HAL_NODE_ROLE` tags it `core` vs `volunteer`.
+- The dashboard counts rows fresh within a **45s** window (`CountLivePresenceAsync`) and shows
+  `total · N core · N volunteer`. (ISO-8601 "o" timestamps sort lexically, so a string `>=` compare
+  *is* a time compare.)
+- Verified end-to-end against real Turso: 1 node → `{total:1, core:1}` while the legacy logic still
+  showed 4 ghosts; volunteer split → `{total:2, core:1, volunteer:1}`; a dead node ages out in ~45s.
+- The legacy event-author `nodes` field is still computed and in the JSON but **no longer used by
+  the front-end** (harmless dead field, candidate for cleanup).
+
+**Not started (the rest of this track):**
+- **Bite 2 — richer CRT:** stream the actual matrix decompositions/code being produced to the
+  green-CRT feed (today it's the FORGE event feed; the user wants to *see the matrices being worked*).
+- **Bite 3 — anonymized "other visitors" activity feed:** show that other people are asking
+  questions / buying tokens / ramping HAL up (anonymized).
+- **Recovery-code persistence + per-user history/personalization** (no PII; feeds ONLY the safe
+  tool-less path — see §9).
+- **Volunteer-compute join page** surfaced on the site (+ rate-limit `/api/contribute`).
+- **Offset-only pricing** (note: Stripe's ~$0.30 + 2.9% per-charge fee is the real floor —
+  the $3 pack barely clears it; price the packs so a small margin survives the fee).
+
+---
+
+## 11. The swarm test harness (`_hal_sandbox`) — how to recreate
 
 Swarm/failover testing uses a throwaway **sibling** git repo so generation+push works without
-touching the real GitHub repo. It is **not** part of this repo; recreate it on the new machine
-if you need to run multi-node tests. Key rules (each was a multi-hour trap — honor them):
+touching the real GitHub repo. It is **not** part of this repo; recreate it if you need multi-node
+tests. Key rules (each was a multi-hour trap — honor them):
 
 - Create it at a **sibling** path (e.g. `../_hal_sandbox`), NOT inside this repo, so
   `GitSync.Discover()` (walks up from the DLL's dir) finds the sandbox `.git`, not the real one.
@@ -202,142 +366,175 @@ if you need to run multi-node tests. Key rules (each was a multi-hour trap — h
 - No `origin` remote: `git pull`/`push` fail fast (non-fatal); local commits still succeed, so
   you can count sandbox commits to verify "exactly one handler generated."
 - Reset between runs: `git reset --hard <seed> && git clean -fdq`, then `cp` a fresh build into `app/`.
-- **Kill all `dotnet`/`git` before every run** (a lingering node holds a port or
-  `.git/index.lock`). Launch each node via `cmd /c dotnet "<dll>" swarm <ports> > log.txt 2>&1`
-  with redirected stdin (ASCII StreamWriter) for ordered logs; kill a node tree with
-  `taskkill /T /F /PID <cmdPid>`.
-- Timing for a failover test: nodes need ~12–14s to mesh+load; death detection is ~4s after a
-  kill; generation is fast on haiku (~5s) and slower on opus. Kill *early* (≈2–3s after asking)
-  to catch generation in-flight.
+- **Kill all `dotnet`/`git` before every run** (a lingering node holds a port or `.git/index.lock`).
+  Launch nodes with redirected stdin for ordered logs; a node with non-interactive stdin auto-runs
+  in "[hired] background worker — no REPL" mode and stays alive.
+- Timing for a failover test: nodes need ~12–14s to mesh+load; death detection ~4s after a kill;
+  generation is fast on haiku (~5s), slower on opus. Kill *early* (≈2–3s after asking) to catch
+  generation in-flight.
 
 ---
 
-## 9. Model configuration
+## 12. Model configuration
 
-The Anthropic model is a single constant in [`AnthropicClient.cs`](AnthropicClient.cs):
-`AnthropicClient.Model`. Two values are used in practice:
-- `claude-opus-4-8` — default / highest quality.
-- `claude-haiku-4-5-20251001` — much faster + cheaper; handy for tight test loops (e.g. the
-  kernel runs and swarm failover timing). The kernel-search runs in the release notes were on
-  haiku.
+The Anthropic model is a single constant in [`AnthropicClient.cs`](AnthropicClient.cs)
+(`AnthropicClient.Model`). Two values are used in practice:
+- `claude-opus-4-8` — highest quality.
+- `claude-haiku-4-5-20251001` — much faster + cheaper; handy for tight test loops (kernel/race runs,
+  swarm failover timing) and for keeping the 24/7 box's token burn low.
 
-The repo is **committed with `claude-haiku-4-5-20251001`** as the default; change this one line
-to `claude-opus-4-8` if you want top quality over speed.
+Switch this one line for quality vs. cost. (On the box, `HAL_PACE=slow` + the `HAL_DAILY_USD` budget
+meter are the other two cost levers.)
 
 ---
 
-## 10. Project layout
+## 13. Project layout
 
 | File | Responsibility |
 |---|---|
 | `IHandler.cs` | Capability contract: `string Handle(string input)`. |
-| `CapType.cs` | Fixed type set (`String/Int/Number/Bool/Date`) + parse/hint/boundary-check/value-inference; `StabilityKind` (`Stable`/`Live`). |
-| `Clock.cs` | Injectable date/time seam for **Live** capabilities (real clock in prod, injected date under validation). |
-| `RuntimeCompiler.cs` | Roslyn: compile source → in-memory assembly. `TryCompileAndLoad` (registers an `IHandler`) + `TryCompileAssembly` (general, unsafe-enabled — used by the kernel search to load a typed delegate). |
-| `HandlerRegistry.cs` | In-memory capability catalog (name, description, example, handler, types, stability). |
-| `AnthropicClient.cs` | Minimal HTTP client for the Anthropic Messages API (model constant lives here). |
-| `TursoClient.cs` | Minimal HTTP client for the Turso/libSQL knowledge store. |
-| `CapabilityRouter.cs` | Three-way classifier: use existing / commission new / decline (also infers types + stability). |
-| `HandlerGenerator.cs` | Asks the LLM for a general capability, compiles, validates (Stable → trial-run; Live → date-injected validation), persists+pushes. |
-| `HandlerLoader.cs` | On startup, compile+register every handler in `handlers/`. |
-| `GitSync.cs` | Bounded wrapper over the `git` CLI (pull/commit/push), never blocks the agent. |
-| `AgentCore.cs` | The one shared answer path + deliberation + composition + knowledge (store/lookup facts, auto-derive on Stable). |
-| `AgentRepl.cs` | Single-instance and two-node (host/join) agent REPL. |
-| `PeerNode.cs` / `PeerMessage.cs` / `PeerDemo.cs` | Two-node TCP transport + Step-2 chat demo. |
+| `CapType.cs` | Fixed type set + parse/hint/boundary-check; `StabilityKind` (`Stable`/`Live`). |
+| `Clock.cs` | Injectable date/time seam for **Live** capabilities. |
+| `RuntimeCompiler.cs` | Roslyn: compile source → in-memory assembly (`TryCompileAndLoad` + `TryCompileAssembly`). |
+| `HandlerRegistry.cs` / `HandlerLoader.cs` | In-memory catalog; startup compile+register of `handlers/`. |
+| `HandlerGenerator.cs` | Ask the LLM for a capability, compile, validate, persist+push. |
+| `CapabilityRouter.cs` | Classifier: use existing / commission new / decline. |
+| `AnthropicClient.cs` / `TursoClient.cs` | HTTP clients for the LLM and the libSQL hive. |
+| `GitSync.cs` | Bounded wrapper over the `git` CLI (never blocks the agent). |
+| `AgentCore.cs` | The shared answer path + deliberation + composition + knowledge + **hive wiring** (identity, events, budget, **wallet/Stripe/donations**, **presence heartbeats**). |
+| `AgentRepl.cs` | Single-instance + two-node agent REPL. |
+| `PeerNode.cs` / `PeerMessage.cs` / `PeerDemo.cs` | Two-node TCP transport + chat demo. |
 | `SwarmNode.cs` | N-peer mesh transport (dialing, gossip, churn recovery). |
-| `SwarmAgent.cs` | Swarm layer: election/quorum, heartbeats, assignment, in-flight recovery, deliberation, compose. |
-| `MatrixOps.cs` | Kernel search: naive reference matmul (oracle + baseline), seeded matrices, tolerance compare, anti-DCE checksum. |
-| `KernelGenerator.cs` | Kernel search: LLM writes several varied single-threaded matmul implementations. |
-| `KernelBenchmark.cs` | Kernel search: the timing harness (warmup, median-of-N, GC control, sink, quiet scope). |
-| `KernelOptimizer.cs` | Kernel search: orchestrate generate→compile→correctness-gate→benchmark→rank→report. |
-| `RoslynDemo.cs` | Step-1 compile-and-load demonstration. |
-| `Program.cs` | CLI mode dispatch. |
+| `SwarmAgent.cs` | Swarm layer: election/quorum, heartbeats, assignment, in-flight recovery, deliberation, compose, **presence loop**. |
+| `HiveIdentity.cs` | The persistent SELF (name/born/concept/persona) + `IdentityStore` + hive-mind synthesis types. |
+| `EventLog.cs` | Episodic memory — the hive's autobiographical event log in Turso (`timeline` command). |
+| `Mood.cs` / `SelfModel.cs` | Affective drives that steer idle time + self-referential question routing (sentience ladder). |
+| `MatrixOps.cs` | Naive reference matmul (oracle + baseline), seeded matrices, tolerance compare, anti-DCE checksum. |
+| `Scalar.cs` | Multiplication-**counting** scalar — the hardware-independent fitness instrument for the race. |
+| `MatmulRace.cs` | The Prime Directive race (a round: generate → count muls → verify → rank). |
+| `MatmulLadder.cs` | The size ladder 2×2 → 256×256 with per-size plateau convergence (bite 15). |
+| `MatmulKnownBest.cs` | The known-best bar separating "new to the hive" from "new to the world" (bite 16). |
+| `TensorSearch.cs` | LLM-FREE tensor-decomposition derivation framework (bite 17; search WIP). `derive` command. |
+| `KernelGenerator.cs` / `KernelBenchmark.cs` / `KernelOptimizer.cs` | Kernel search: generate / time / orchestrate+rank. |
+| `ContributeWorker.cs` | Volunteer-compute client (`contribute` command) — numbers in, coordinator re-verifies. |
+| `Dashboard.cs` | The live web UI + all `/api/*` endpoints (state, wallet, checkout, stripe-webhook, donate, target, contribute) + the honest live node count. |
+| `RoslynDemo.cs` / `Program.cs` | Compile-and-load demo; CLI mode dispatch. |
+| `deploy/` | The go-live kit: `setup.sh`, systemd units, `Caddyfile`, `hal.env.example`, `README.md`. |
+| `.github/workflows/deploy.yml` | Manual push-to-deploy (DLL-only, secret-free). |
 | `handlers/` | Generated, runtime-compiled capabilities (shared via GitHub; excluded from the static build). |
 
 ---
 
-## 11. What's done — status
+## 14. What's done — status
 
-**Capability / swarm ladder (all done + verified):**
+**Capability / swarm ladder (all done + verified):** Roslyn core + LLM generation + GitHub sync;
+router (use/commission/decline); swarm mesh, reconnect, coordinator routing, heartbeat detection,
+quorum election, in-flight recovery; shared `AgentCore`; competitive deliberation (fan-out, score,
+winner-only push, quality floor); typed capabilities; composition (linear + bounded multi-link, cap
+2); stored explicit + auto-derived facts with the Stable/Live distinction.
 
-| Area | Status |
-|---|---|
-| Roslyn compile-and-load core; LLM generation; GitHub sync; closed loop | done |
-| Capability router (use/commission/decline); general capabilities; runtime safety | done |
-| Swarm rungs 1–4b-ii: mesh, reconnect, coordinator routing, heartbeat detection, quorum election, in-flight recovery | done |
-| Shared `AgentCore` consolidation | done |
-| Competitive deliberation 5a/5b (fan-out, score, winner-only push, quality floor) | done |
-| Typed capabilities (`String/Int/Number/Bool/Date`) | done |
-| Composition: linear chains; auto-gen 1 missing link; bounded multi-link (cap 2, all-or-nothing) | done |
-| Stored knowledge: explicit typed facts in the Turso hive | done |
-| Auto-derived facts + Stable/Live distinction (Live never caches; date-injected validation) | done |
-
-**Kernel optimization search:**
+**Kernel / Prime Directive track:**
 
 | Bite | Status |
 |---|---|
-| Bite 1 — single node: generate → compile → verify-correct → benchmark → rank (dense matmul) | **done + verified** (`3f4397f`) |
-| Bite 2+ — distribute the search across the swarm (volunteer best-of-N) | not started (see §12) |
+| Kernel search bite 1 — single node: generate → compile → verify → benchmark → rank | done + verified |
+| 14 — Prime Directive: the hive's north star (matmul race) | done |
+| 15 — dual-metric size ladder 2→256 with plateau convergence | done |
+| 16 — novelty gate: known-best bar + exact verification + human-gated discovery artifacts | done |
+| 17 — LLM-free tensor-decomposition derivation | framework done + verified; **discrete search WIP** (needs a stronger backend) |
+
+**Going public:**
+
+| Bite | Status |
+|---|---|
+| 18 — live mission-control dashboard (`dashboard`, HttpListener + Turso reader) | done |
+| 19 — trustless volunteer compute (`contribute`; numbers-only, coordinator re-verifies) + HAL-9000 look | done |
+| 20 — hardened donations (secret-gated) + safe tool-less visitor Q&A | done |
+| 21 — daily LLM budget meter + token accounting (~$1/day, donations top up) | done |
+| 22 — **LIVE at hal9001.io** (VPS, systemd hal-swarm:9000 + hal-dashboard:8765, Caddy TLS) | done |
+| 23 — watchable UI + `halvid`-cookie token wallet + free starter grant + 402 enforcement | done |
+| 24 — Stripe Checkout token purchases (3 tiers, signed idempotent webhook) | done (404 until env secrets set) |
+| CI/CD — GitHub Actions push-to-deploy via SSH deploy key (DLL-only) | done (needs 3 GH secrets — §18) |
+| Honest-dashboard bite 1 — LIVE node count via `presence` heartbeats | **done + verified** (see §10) |
 
 ---
 
-## 12. Next steps / roadmap
+## 15. Next steps / roadmap
 
-- **Knowledge track:** fact-in-composition (a fact's typed value feeding a handler's typed
-  input) → fact updating/invalidation + provenance-aware overrides (the stale-fact problem for
-  explicit/derived facts; time-staleness is already solved by Live-never-caches).
-- **Kernel track (the headline next bite):** distribute the optimization search across the
-  swarm — a *volunteer-compute best-of-N*: nodes generate and benchmark candidates, the
-  coordinator adopts the fastest **correct** one. The open hard problem is **fair benchmarking
-  across heterogeneous machines** (fastest on one node's hardware ≠ fastest on another).
-- **Also open:** ambient state beyond date/time for Live caps (net/file, same
-  inject-under-validation seam); general-N missing links (lift cap-2); nested composition;
-  cloud (swarm beyond loopback); collapse the two-node `PeerNode` transport onto `SwarmNode`.
-- An observed cleanup: the naive *reference* matmul has obvious headroom (its column-strided
-  `b[p,j]` access is cache-unfriendly), which is why even a "classic i-j-k" candidate measured
-  ~3× faster than it. Not a bug — the baseline is deliberately naive — but worth noting.
+- **Finish the honest-dashboard track (§10):** richer CRT (real matrices/code streaming), anonymized
+  activity feed, recovery-code persistence + per-user history, a volunteer-compute join page
+  (rate-limited), offset-only pricing.
+- **Strengthen the bite-17 derivation backend** so it derives non-trivial fast algorithms (the
+  framework + exact verification are correct; the discrete search is the weak link).
+- **Distribute the matmul/kernel search across the swarm** (volunteer best-of-N); the open hard
+  problem for the *wall-clock* metric is fair benchmarking across heterogeneous machines — note the
+  **mult-count** metric sidesteps this, which is why the race uses it.
+- **Knowledge track:** fact-in-composition; fact updating/invalidation + provenance-aware overrides.
+- **Also open:** ambient state beyond date/time for Live caps; general-N missing links; nested
+  composition; collapse the two-node `PeerNode` transport onto `SwarmNode`.
 
 ---
 
-## 13. Working-context continuity (optional)
+## 16. Working-context continuity (Claude Code memory)
 
-Development has been done with **Claude Code**, which keeps machine-local memory files at
+Development used **Claude Code**, which keeps machine-local memory at
 `~/.claude/projects/<encoded-repo-path>/memory/` (an index `MEMORY.md` + one fact per file:
-project plan, build-style, toolchain, repo, test-harness recipe, README policy). These are
-**not** in the repo and won't transfer with `git`. They're optional, but copying the `memory/`
-directory's contents to the new machine's corresponding `~/.claude/projects/.../memory/` folder
-preserves the running project context for future Claude Code sessions. (The encoded folder name
-will differ on the new machine because it derives from the repo's absolute path.)
+project plan, build-style, toolchain, repo, test-harness recipe, README policy). These are **not**
+in the repo and won't transfer with `git`. Copying the `memory/` directory's contents to the new
+machine's corresponding `~/.claude/projects/.../memory/` folder preserves the running project
+context. (The encoded folder name differs per machine — it derives from the repo's absolute path.)
 
 ---
 
-## 14. Gotchas / lessons learned (the expensive ones)
+## 17. Gotchas / lessons learned (the expensive ones)
 
-- **Sandbox `app/` must be gitignored** or `git reset --hard` reverts your deployed build → you
-  silently test stale binaries. (§8)
-- **Process.Start handle-inheritance + git:** `git add` could wedge while the agent held open
-  sockets. `GitSync` gives git its own stdin and closes it, and bounds every git call to ~20s.
-- **PowerShell `Invoke-WebRequest` needs `-UseBasicParsing`** in Windows PowerShell 5.1 (the IE
-  engine errors in non-interactive mode) — relevant when probing Turso by hand.
-- **Kill all `dotnet`/`git` between swarm runs**, and remove a stray `.git/index.lock`.
-- **Don't run `-ExecutionPolicy Bypass`** — blocked here; run script bodies inline.
-- **Benchmark timing is the crux of the kernel track:** warm up before measuring (JIT/OSR),
-  take the **median** of many individually-timed runs (not a single timing — GC/scheduler
-  outliers showed as ~3× max spikes the median correctly ignored), and keep a printed sink so
-  the JIT can't dead-code-eliminate the work.
+- **Caddy must `header_up Host {upstream_hostport}`** or the dashboard's HttpListener 404s
+  everything behind TLS. (§8.2)
+- **The live site can silently run a stale binary.** Grep the live HTML for a current-source-only
+  string; if absent, redeploy. (§2, §8.4)
+- **PowerShell 5.1 mangles `git commit -m`** with embedded quotes → write the message to a temp file
+  and `git commit -F <file>` (then delete it).
+- **PowerShell `Invoke-WebRequest` needs `-UseBasicParsing`** in 5.1 (IE engine errors headless).
+- **Sandbox `app/` must be gitignored** or `git reset --hard` reverts your deployed build → you test
+  stale binaries. (§11)
+- **DLL lock under multi-node:** hired/background workers publish to their own dir so a rebuild
+  doesn't block on a locked original (see the "DLL lock" commits).
+- **Kill all `dotnet`/`git` between swarm runs**, and remove stray `.git/index.lock`.
+- **`TursoClient` once choked on REAL/float reads** — fixed in the budget-meter bite; keep numeric
+  reads robust.
+- **Benchmark timing (wall-clock kernel track):** warm up before measuring (JIT/OSR), take the
+  **median** of many individually-timed runs, keep a printed sink so the JIT can't DCE the work.
+  (The matmul *race* avoids all this by counting multiplications instead.)
+- **NEVER paste/handle/print secrets in chat or commit them.** Secrets go into the box's `hal.env`
+  or GitHub's encrypted secret store via the web UI — never through the assistant. Scan the staged
+  diff for secrets before every commit.
 
 ---
 
-## 15. Smoke-test the new machine
+## 18. Open user actions (carried over — do these)
 
-1. `dotnet build` → **Build succeeded, 0 warnings, 0 errors**.
-2. `dotnet run -- kernel 128 2` → reference baseline prints; candidates compile + pass
-   correctness; a ranked table with a winner + speedup prints. (No key? It will fail at the
-   generate step — that confirms §5.1 is missing.)
-3. `dotnet run` (agent) → ask "capital of Ohio"; it should reuse the seeded `get-us-state-capital`
-   handler (no generation) and answer "Columbus".
-4. Push test: make a trivial commit and `git push` → confirms §5.3 (deploy key) works.
-5. (If Turso is configured) launch a 3-node swarm and `remember the capital of Ohio is Columbus`
-   on one node, ask it on another → `handled by knowledge` from the shared hive.
+1. **Redeploy the live box** so hal9001.io runs the current build (likely stale — §2). Highest leverage.
+2. **Add the 3 GitHub repo secrets** for CI/CD (§8.3): `DEPLOY_HOST=67.217.245.253`,
+   `DEPLOY_USER=root`, `DEPLOY_SSH_KEY=<private deploy key>`. Then delete any local hal-deploy key files.
+3. **Stripe go-live:** put `STRIPE_SECRET_KEY` (`rk_live_…`) + `STRIPE_WEBHOOK_SECRET` (`whsec_…`)
+   into the box's `hal.env`; create the webhook endpoint at `https://hal9001.io/api/stripe-webhook`
+   subscribed to `checkout.session.completed`. Until set, checkout + webhook are 404.
+4. (Optional) Set `HAL_DONATE_SECRET` to enable the donate/fund endpoint.
+
+---
+
+## 19. Smoke-test the new machine
+
+1. `dotnet build` → **Build succeeded**.
+2. `dotnet run -- racetest` → confirms naive 2×2 = 8 muls, Strassen = 7 (no key/hive needed).
+3. `dotnet run -- timeline 20` (Turso set) → prints real events written by the live box → the
+   shared hive is wired.
+4. `dotnet run -- dashboard` → open `http://localhost:8765` → the red eye, the race, the live feed,
+   and a **live node count** that reflects real heartbeats.
+5. `dotnet run` (agent, key set) → ask "capital of Ohio" → reuses the seeded handler, answers
+   "Columbus" (no generation).
+6. Push test: trivial commit + `git push` → confirms the §5.3 deploy key.
+7. (Optional) launch a 3-node swarm and `remember`/ask across nodes → `handled by knowledge` from
+   the shared hive.
 
 You're set. Welcome to the new machine.
