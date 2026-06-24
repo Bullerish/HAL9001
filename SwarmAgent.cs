@@ -128,9 +128,11 @@ public static class SwarmAgent
         const double HireGraceSecs = 60.0;   // min seconds between auto-hires — longer than a node's mesh-join time, so no spawn storms
         // PERSISTENT MESH (idle self-driving): keep the swarm populated to this many HELPER nodes so the
         // hive stays a mesh that can cross-query continuously — not just a one-shot "hire when solo".
-        // HAL_TARGET_NODES sets it (default 2 — modest for the small VPS; raise it on a big local box).
-        // Spawning costs no tokens; each spawned node budget-gates its OWN LLM use, so this stays under the cap.
-        int targetNodes = 2;
+        // HAL_TARGET_NODES sets it. DEFAULT 0 (OFF): auto-spawn is opt-in until worker-mesh formation is
+        // verified on the target host — on the self-contained box, hired workers were observed to spawn but
+        // not peer up (root re-hires every ~60s), so leaving it off avoids churning a production VPS. Set
+        // HAL_TARGET_NODES=2 (say) once you've confirmed hired nodes actually join the mesh on that host.
+        int targetNodes = 0;
         {
             string? tnEnv = Environment.GetEnvironmentVariable("HAL_TARGET_NODES");
             if (int.TryParse(tnEnv, out int tn)) targetNodes = Math.Clamp(tn, 0, MaxAutoHiredNodes);
