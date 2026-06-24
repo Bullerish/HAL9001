@@ -105,6 +105,29 @@ public sealed class EventLog
     }
 
     /// <summary>
+    /// All events of one <paramref name="kind"/>, NEWEST FIRST — for catalog-style reads (e.g. every
+    /// capability ever commissioned) where recency-windowed <see cref="RecentAsync"/> could miss an
+    /// early entry. Returns an empty list with no hive / on any read error.
+    /// </summary>
+    public async Task<List<HiveEvent>> ByKindAsync(string kind, int limit = 500)
+    {
+        if (_turso is null) return new();
+        int n = Math.Clamp(limit, 1, 1000);
+        List<List<string?>> rows;
+        try { rows = await _turso.ExecuteAsync($"SELECT id, ts, actor, kind, summary, ref_id FROM events WHERE kind = ? ORDER BY id DESC LIMIT {n}", kind); }
+        catch { return new(); }
+
+        var events = new List<HiveEvent>();
+        foreach (var r in rows)
+        {
+            if (r.Count < 6 || r[0] is null) continue;
+            long id = long.TryParse(r[0], out long parsed) ? parsed : 0;
+            events.Add(new HiveEvent(id, r[1] ?? "", r[2] ?? "", r[3] ?? "", r[4] ?? "", r[5]));
+        }
+        return events; // already newest-first
+    }
+
+    /// <summary>
     /// Aggregate stats over the whole log, for the self-model: total event count, the earliest
     /// timestamp (the hive's "birth"), and a per-kind tally (most frequent first). One GROUP BY
     /// query. Returns zeros with no hive / on any read error.

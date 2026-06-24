@@ -4,7 +4,13 @@
 # The dashboard is read-only except the verified /api/contribute and the secret-gated
 # /api/donate, so it's safe to expose. Caddy proxies to the local dashboard process.
 
-hal9001.io, www.hal9001.io {
+# Canonical host is the bare apex (matches <link rel="canonical"> + og:url). www permanently
+# redirects to it so search engines don't see duplicate content across both hosts.
+www.hal9001.io {
+	redir https://hal9001.io{uri} permanent
+}
+
+hal9001.io {
 	encode zstd gzip
 	reverse_proxy localhost:8765
 }

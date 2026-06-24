@@ -104,6 +104,14 @@ public static class Dashboard
                 Write(ctx, "application/json", await GrowthJsonAsync(core));
             else if (path == "/api/matrix")
                 Write(ctx, "application/json", MatrixJson());
+            else if (path == "/api/functions")
+                Write(ctx, "application/json", await FunctionsJsonAsync(core));
+            else if (path == "/robots.txt")
+                Write(ctx, "text/plain; charset=utf-8", RobotsTxt);
+            else if (path == "/sitemap.xml")
+                Write(ctx, "application/xml; charset=utf-8", SitemapXml);
+            else if (path == "/og.svg")
+                WriteBytes(ctx, "image/svg+xml", Encoding.UTF8.GetBytes(OgSvg), "public, max-age=86400");
             else if (path.StartsWith("/audio/") && path.EndsWith(".mp3"))
             {
                 byte[]? clip = TryGetAudio(path);
@@ -302,86 +310,31 @@ public static class Dashboard
         return JsonSerializer.Serialize(new { size, targetRank = Math.Max(1, target), metric = "muls" }, JsonOpts);
     }
 
-    // The CRT console: a LIVE green-terminal transcript of what the hive is doing (matrix rounds AND tools
-    // it's inventing on visitor request), followed by the most recent code it actually wrote. Everything is
-    // read from the shared hive (this is a separate process from the swarm), so it only ever reflects real
-    // work the running nodes have done — never anything fabricated.
+    // The CRT console: JUST the most recent code the hive actually wrote (a tool or a matmul kernel).
+    // The live activity transcript now has its own surface (/api/live) and the matrices their own panel
+    // (/api/matrix), so this returns ONLY the source — which the dashboard types on, char by char, when
+    // a newer artifact appears. Read from the shared hive, so it only ever reflects real work.
     private static async Task<string> ConsoleJsonAsync(AgentCore core)
     {
-        var sb = new System.Text.StringBuilder();
         string rev = "init";
         string title = "HAL 9001 · forge";
+        string code = "// no code yet — HAL is searching for optimal matrix decompositions...\n";
 
-        // ── live activity: recent work events (matrix rounds + tool builds), oldest→newest ──
-        try
-        {
-            var recent = await core.Events.RecentAsync(80); // oldest→newest
-            var feed = recent.Where(e => e.Kind.StartsWith("matmul") || e.Kind.StartsWith("novelty")
-                                      || e.Kind == "contribution-accepted" || e.Kind.StartsWith("steer")
-                                      || e.Kind == "curiosity-resolved")
-                             .TakeLast(16).ToList();
-            sb.Append("HAL 9001 · FORGE — live code synthesis\n");
-            sb.Append("--------------------------------------\n");
-            if (feed.Count == 0)
-                sb.Append("[ booting ] no work recorded yet. the hive is warming up...\n");
-            foreach (var e in feed)
-            {
-                string t = (e.Timestamp ?? "").Replace("T", " ");
-                t = t.Length >= 19 ? t.Substring(11, 8) : t; // HH:MM:SS
-                sb.Append('[').Append(t).Append("] ").Append(Glyph(e.Kind, e.Summary)).Append(' ')
-                  .Append(OneLine(e.Summary, 110)).Append('\n');
-            }
-            if (feed.Count > 0) rev = feed[^1].Timestamp + "|" + feed.Count;
-        }
-        catch { sb.Append("[ offline ] hive feed unavailable.\n"); }
-
-        // ── the matrices HAL is actually working: the latest persisted bilinear scheme (U/V/W triple) ──
-        try
-        {
-            var sc = await core.GetLatestSchemeAsync();
-            if (sc is not null)
-            {
-                string grids = RenderScheme(sc.Value.Scheme);
-                if (grids.Length > 0) { sb.Append('\n').Append(grids); rev += "|s" + sc.Value.Ts; }
-            }
-        }
-        catch { }
-
-        // ── latest code HAL wrote: the actual generated source (a tool or a matmul kernel) ──
         try
         {
             var art = await core.GetLatestArtifactAsync();
             if (art is not null)
             {
                 title = art.Value.Title;
-                sb.Append('\n').Append("// == latest code HAL wrote · ").Append(art.Value.Title).Append(" ==\n");
-                sb.Append(art.Value.Source);
-                rev += "|" + art.Value.Ts; // re-types whenever a newer artifact appears
-            }
-            else
-            {
-                sb.Append("\n// no code yet — searching for optimal matrix decompositions...\n");
+                code = "// " + art.Value.Title + "\n// — written by HAL, compiled with Roslyn, committed to github.com/Bullerish/HAL9001\n\n"
+                     + art.Value.Source;
+                rev = art.Value.Ts; // re-types whenever a newer artifact appears
             }
         }
         catch { }
 
-        return JsonSerializer.Serialize(new { title, code = sb.ToString(), rev }, JsonOpts);
+        return JsonSerializer.Serialize(new { title, code, rev }, JsonOpts);
     }
-
-    // A small glyph per event kind so the terminal log reads like a build/run feed.
-    private static string Glyph(string kind, string summary) => kind switch
-    {
-        "matmul-size-converged" => "^^",
-        "matmul-ladder-done" => "**",
-        "matmul-challenged" => ">>",
-        "contribution-accepted" => "++",
-        "steer-building" => "::",
-        "steer-done" => "OK",
-        "curiosity-resolved" => "++",
-        _ when kind.StartsWith("novelty") => "!!",
-        _ when (summary ?? "").Contains("NEW RECORD") => "OK",
-        _ => " >",
-    };
 
     private static string LiveJson()
     {
@@ -461,11 +414,51 @@ public static class Dashboard
         return JsonSerializer.Serialize(growth, JsonOpts);
     }
 
-    private static string OneLine(string? s, int max)
+    // The catalog of functions HAL has written — sourced from the cumulative, append-only
+    // capability-commissioned event tally (the honest all-time list; survives restarts). Each entry
+    // links to its real, public source on GitHub so a visitor can independently verify HAL wrote it.
+    private static async Task<string> FunctionsJsonAsync(AgentCore core)
     {
-        if (string.IsNullOrEmpty(s)) return "";
-        s = s.Replace('\n', ' ').Replace('\r', ' ').Replace('\t', ' ').Trim();
-        return s.Length > max ? s[..max] + "..." : s;
+        var items = new List<object>();
+        try
+        {
+            // every capability ever commissioned, newest first (kind-filtered so an early one is never
+            // missed by a recency window).
+            var commissioned = await core.Events.ByKindAsync("capability-commissioned", 500);
+            foreach (var e in commissioned)
+            {
+                string s = e.Summary ?? "";
+                string name = Between(s, "'", "'");
+                string bracket = Between(s, "[", "]");              // "Int→String, Stable"
+                string sig = bracket, stability = "";
+                int comma = bracket.LastIndexOf(", ", StringComparison.Ordinal);
+                if (comma >= 0) { sig = bracket[..comma]; stability = bracket[(comma + 2)..]; }
+                int ci = s.IndexOf("]: ", StringComparison.Ordinal);
+                string desc = ci >= 0 ? s[(ci + 3)..] : "";
+                if (string.IsNullOrEmpty(name)) name = e.Ref ?? "tool";
+                // a GitHub code-search that resolves to the exact source file via its metadata header
+                string sourceUrl = "https://github.com/search?q=" +
+                    Uri.EscapeDataString($"repo:Bullerish/HAL9001 \"hal9001:name={name}\"") + "&type=code";
+                items.Add(new { name, sig, stability, desc, when = CoarseAgo(e.Timestamp), ts = e.Timestamp, sourceUrl });
+            }
+        }
+        catch { }
+        return JsonSerializer.Serialize(new
+        {
+            repo = "https://github.com/Bullerish/HAL9001",
+            handlersUrl = "https://github.com/Bullerish/HAL9001/tree/HEAD/handlers",
+            count = items.Count,
+            items,
+        }, JsonOpts);
+    }
+
+    // First text strictly between the first `a` and the next `b` after it ("" if either is absent).
+    private static string Between(string s, string a, string b)
+    {
+        int i = s.IndexOf(a, StringComparison.Ordinal); if (i < 0) return "";
+        i += a.Length;
+        int j = s.IndexOf(b, i, StringComparison.Ordinal); if (j < 0) return "";
+        return s[i..j];
     }
 
     // Render a persisted bilinear scheme (the {n,rank,u,v,w} JSON) as ASCII U/V/W grids for the CRT —
@@ -820,11 +813,16 @@ public static class Dashboard
         new("status",  "What are you working on?",  "HAL reports its current focus",     "free",    "ask",   "What are you working on right now?"),
         new("feel",    "How do you feel?",           "HAL reflects on its state of mind", "free",    "ask",   "How do you feel about your progress?"),
         new("discover","What did you discover?",     "HAL shares a recent finding",       "free",    "ask",   "What have you discovered or learned today?"),
-        // Direct HAL to invent — these burn LLM budget (one tool built per steer)
+        // Suggest what HAL builds next — a curated set of domains. Each burns LLM budget (one tool built
+        // per steer). The arg is whitelisted here; no visitor-typed text ever reaches the generator.
         new("numth",   "Invent a number-theory tool","HAL writes the code itself",        "1 token", "topic", "number theory"),
         new("geo",     "Invent a geometry tool",     "HAL writes the code itself",        "1 token", "topic", "geometry"),
         new("stats",   "Invent a statistics tool",   "HAL writes the code itself",        "1 token", "topic", "statistics"),
         new("crypto",  "Invent a cryptography tool", "HAL writes the code itself",        "1 token", "topic", "cryptography"),
+        new("combin",  "Invent a combinatorics tool","HAL writes the code itself",        "1 token", "topic", "combinatorics"),
+        new("graph",   "Invent a graph-theory tool", "HAL writes the code itself",        "1 token", "topic", "graph theory"),
+        new("calc",    "Invent a calculus tool",     "HAL writes the code itself",        "1 token", "topic", "calculus"),
+        new("prob",    "Invent a probability tool",  "HAL writes the code itself",        "1 token", "topic", "probability"),
         // Ramp the hive
         new("boost",   "Boost the hive",             "Runs 5× hotter for 2 minutes",      "1 token", "boost", ""),
     };
@@ -924,12 +922,66 @@ public static class Dashboard
         return total > maxChars ? null : new string(buf, 0, total);
     }
 
+    // ── SEO surfaces (bite: discoverability) ────────────────────────────────────────────────────
+    private const string RobotsTxt =
+        "User-agent: *\nAllow: /\nDisallow: /api/\nSitemap: https://hal9001.io/sitemap.xml\n";
+
+    // Single-page site → one canonical URL. lastmod tracks the day the process is serving (good enough
+    // for a live site that changes continuously).
+    private static string SitemapXml =>
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
+        "<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n" +
+        "  <url><loc>https://hal9001.io/</loc><lastmod>" + DateTime.UtcNow.ToString("yyyy-MM-dd") +
+        "</lastmod><changefreq>hourly</changefreq><priority>1.0</priority></url>\n</urlset>\n";
+
+    // Social-share card (1200×630). SVG so it ships in the DLL with no binary asset; for max scraper
+    // compatibility a PNG at /og.png could be added later, but Google + modern scrapers render SVG.
+    private const string OgSvg = """
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="38%" r="75%"><stop offset="0%" stop-color="#1a0707"/><stop offset="60%" stop-color="#000"/></radialGradient>
+    <radialGradient id="eye" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#fff"/><stop offset="22%" stop-color="#ffb199"/><stop offset="55%" stop-color="#ff2d18"/><stop offset="100%" stop-color="#3a0500"/></radialGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <circle cx="225" cy="315" r="150" fill="#0a0506" stroke="#2a0f0c" stroke-width="3"/>
+  <circle cx="225" cy="315" r="96" fill="url(#eye)"/>
+  <circle cx="225" cy="315" r="30" fill="#fff" opacity="0.85"/>
+  <text x="430" y="250" font-family="monospace" font-size="78" fill="#ff5a3c" letter-spacing="6">HAL 9001</text>
+  <text x="432" y="320" font-family="monospace" font-size="33" fill="#b9b2ad">A self-improving AI that writes its</text>
+  <text x="432" y="364" font-family="monospace" font-size="33" fill="#b9b2ad">own code — live, verified, in public.</text>
+  <text x="432" y="452" font-family="monospace" font-size="24" fill="#6e5a55">watch it think · hal9001.io</text>
+</svg>
+""";
+
     // The whole page — self-contained (no external dependencies, works offline). Polls /api/state.
     private const string Html = """
 <!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>HAL 9001</title>
+<title>HAL 9001 — a self-improving AI that writes and verifies its own code, live</title>
+<meta name="description" content="HAL 9001 is an autonomous, self-improving AI that writes its own code in real time — compiling, exact-verifying, and committing every line to a public repo while racing to discover faster matrix-multiplication algorithms. Watch it think.">
+<meta name="keywords" content="autonomous AI agent, self-improving AI, AI that writes its own code, live AI experiment, AI agent dashboard, recursive self-improvement, fast matrix multiplication">
+<link rel="canonical" href="https://hal9001.io/">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta name="theme-color" content="#ff2d18">
+<meta name="author" content="HAL 9001">
+<!-- Open Graph -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="HAL 9001">
+<meta property="og:title" content="HAL 9001 — a self-improving AI writing its own code, live">
+<meta property="og:description" content="An autonomous AI that writes, compiles, and exact-verifies its own code in real time — racing to discover faster matrix-multiplication algorithms. Every line is committed to a public repo as it happens.">
+<meta property="og:url" content="https://hal9001.io/">
+<meta property="og:image" content="https://hal9001.io/og.svg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<!-- Twitter -->
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="HAL 9001 — a self-improving AI writing its own code, live">
+<meta name="twitter:description" content="An autonomous AI that writes and exact-verifies its own code in real time. Watch it work — every line is committed to a public repo.">
+<meta name="twitter:image" content="https://hal9001.io/og.svg">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"WebApplication","name":"HAL 9001","alternateName":"HAL 9001 self-improving AI","url":"https://hal9001.io/","applicationCategory":"Artificial Intelligence","operatingSystem":"Web","description":"HAL 9001 is an autonomous, self-improving AI that writes its own code in real time — compiling, exact-verifying, and committing every line to a public repository while racing to discover faster matrix-multiplication algorithms.","sameAs":["https://github.com/Bullerish/HAL9001"],"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}
+</script>
 <!-- Google tag (gtag.js) -->
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-DWRCFTP4G7"></script>
 <script>
@@ -1006,6 +1058,28 @@ public static class Dashboard
   .quote{font-style:italic;color:#8a6f64;border-left:2px solid var(--line2);padding-left:12px;line-height:1.7}
   .empty{color:var(--dim);font-size:12px}
   .wide{grid-column:1/-1}
+  /* github proof pill */
+  .pill.gh{text-decoration:none;color:#ffd166;border-color:rgba(255,209,102,.45)}
+  .pill.gh:hover{background:rgba(255,209,102,.12)}
+  /* proof-of-realness panel */
+  .panel.proof{border-color:rgba(255,209,102,.28)}
+  .proofgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+  .pf{font-size:12px;line-height:1.6;color:var(--txt);border-left:2px solid rgba(255,209,102,.35);padding-left:11px}
+  .pf b{color:#ffd166;font-weight:600}
+  .pf a{color:#ff7a5c}
+  /* function catalog */
+  .fnlist{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;max-height:430px;overflow:auto}
+  .fn{border:1px solid var(--line);border-radius:4px;padding:10px 12px;background:rgba(0,0,0,.18)}
+  .fn .nm{color:#ff7a5c;font-size:13px;word-break:break-all}
+  .fn .nm .new{color:#160000;background:var(--gold);font-size:9px;padding:1px 5px;border-radius:3px;margin-left:6px;letter-spacing:1px;text-transform:uppercase;vertical-align:middle}
+  .fn .meta{display:flex;gap:8px;flex-wrap:wrap;margin:5px 0;font-size:10px}
+  .fn .sig{color:#8a6f64;font-family:ui-monospace,monospace}
+  .fn .stab{color:var(--dim);text-transform:uppercase;letter-spacing:1px}
+  .fn .stab.Live{color:#ffd166}
+  .fn .d{font-size:11px;color:#8a6f64;line-height:1.5;margin:4px 0 7px}
+  .fn .when{font-size:10px;color:var(--dim)}
+  .fn a.src{font-size:10px;color:#ff7a5c;text-decoration:none;float:right}
+  .fn a.src:hover{text-decoration:underline}
   footer{max-width:1200px;margin:16px auto 0;color:var(--dim);font-size:10px;text-align:center;letter-spacing:2px;text-transform:uppercase}
   /* eye transitions */
   .eye{transition:box-shadow .25s}
@@ -1072,6 +1146,14 @@ public static class Dashboard
   .fbk{font-size:12px;color:#33cc44;margin-top:10px;min-height:1.4em;text-shadow:0 0 5px rgba(51,204,68,.5)}
 </style></head><body>
 <div class="vig"></div><div class="crt"></div><div class="scan"></div>
+<noscript>
+<section style="max-width:760px;margin:40px auto;color:#b9b2ad;font:15px/1.7 ui-monospace,monospace">
+  <h1 style="color:#ff5a3c;letter-spacing:3px">HAL 9001 — a self-improving AI that writes its own code</h1>
+  <p>HAL 9001 is an autonomous, self-improving AI. It writes its own code in real time, compiles it with a real C# compiler (Roslyn), exact-verifies the result with 64-trial BigInteger checks, and commits every line to a public repository as it happens — all while racing to discover faster matrix-multiplication algorithms.</p>
+  <p>The live dashboard needs JavaScript to render. Every function HAL has written is permanently public and independently verifiable here:
+  <a href="https://github.com/Bullerish/HAL9001" style="color:#ff5a3c">github.com/Bullerish/HAL9001</a>.</p>
+</section>
+</noscript>
 
 <!-- HERO ROW: eye + CRT console -->
 <div class="hero">
@@ -1088,6 +1170,7 @@ public static class Dashboard
       <span class="pill" id="budget">budget —</span>
       <span class="pill" id="tokens" title="spend tokens to direct HAL — donate to refuel">⬡ — tokens</span>
       <button class="pill snd" id="snd">♪ sound off</button>
+      <a class="pill gh" href="https://github.com/Bullerish/HAL9001" target="_blank" rel="noopener" title="Every line HAL writes is committed to this public repo — verify it yourself">⎇ source on github ↗</a>
     </div>
   </div>
   <!-- right: green CRT terminal showing the real generated code -->
@@ -1134,6 +1217,21 @@ public static class Dashboard
   <div class="stats" id="growth"></div>
 </div>
 <div class="grid">
+  <!-- PROOF: why a visitor should believe HAL is really doing this -->
+  <div class="panel wide proof">
+    <h2>how you know this is real</h2>
+    <div class="proofgrid">
+      <div class="pf"><b>Real compiler, not theater.</b> Every function HAL writes is compiled by Roslyn — the actual C# compiler — and trial-run before it counts. Broken code never makes the board.</div>
+      <div class="pf"><b>Math is exact-verified.</b> Every matrix-multiplication record must pass a 64-trial BigInteger exact check before HAL is allowed to claim it. A wrong answer is rejected, no matter how fast.</div>
+      <div class="pf"><b>Everything is public.</b> <span id="pf-tools">—</span> functions written and <span id="pf-records">—</span> records set — every line committed to a public repo as it happens. <a href="https://github.com/Bullerish/HAL9001" target="_blank" rel="noopener">read the source ↗</a></div>
+      <div class="pf"><b>Live, timestamped, unseeded.</b> Every number on this page is read live from HAL's shared memory with real timestamps. Nothing here is mocked or pre-filled.</div>
+    </div>
+  </div>
+  <!-- FUNCTIONS: the catalog of tools HAL has written for itself -->
+  <div class="panel wide">
+    <h2>functions HAL has written · <span class="since" id="fn-count">—</span></h2>
+    <div class="fnlist" id="functions"><div class="empty">loading HAL's function catalog…</div></div>
+  </div>
   <div class="panel wide">
     <h2>size ladder · <span id="ladder-status" style="letter-spacing:0;color:var(--txt);text-transform:none"></span></h2>
     <div class="ladder" id="ladder"></div>
@@ -1235,6 +1333,7 @@ const sfx={
   rise:()=>arp(392,[0,2,4,7]),
   discovery:()=>arp(523.25,[0,4,7,12,16,19,24],0.2),
   click:()=>tone(880,0.06,"square",0.05),
+  key:()=>tone(1200+Math.random()*200,0.025,"square",0.018), // faint typewriter tick during code type-on
 };
 // ── the "computer processing" grind ─────────────────────────────────────────────────────────────
 // The continuous low grindloop bed (started in loadClips) SWELLS while the hive is grinding a matrix
@@ -1296,23 +1395,46 @@ $("snd").onclick=()=>{
   if(sound){loadClips();startVisual();if(!procTimer)procLoop();} else {stopVisual();clearTimeout(procTimer);procTimer=null;}
 };
 
-// ── CRT live feed: polls /api/live every 1.5 s and streams lines as they arrive ─────────────────
-let liveLast="",liveCode="",liveCodeKey="";
+// ── CRT console: fast activity feed (1.5s) + a typewriter that types the newest code on arrival ──
+// The activity feed (what HAL is doing) stays snappy; the CODE section types on char-by-char as a
+// "happy medium" — readable, length-scaled so even a big kernel finishes in ~12s, and skippable by
+// clicking the console. One renderCRT() composes feed + code so the two never fight over the pane.
+let liveLast="",feedText="",liveCode="",liveCodeKey="",typePos=0,typing=false,typeRAF=0,lastTypeT=0;
+const reduceMotion=window.matchMedia&&window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+function renderCRT(){
+  const el=$("crt-lines");if(!el)return;
+  const code=typing?liveCode.slice(0,typePos):liveCode;
+  let txt=feedText;
+  if(code)txt+="\n\n"+code+(typing?" ▍":"");
+  el.textContent=txt;
+  el.scrollTop=el.scrollHeight;
+}
+function stepType(now){
+  if(!typing)return;
+  if(!lastTypeT)lastTypeT=now;
+  const dt=now-lastTypeT;lastTypeT=now;
+  // length-scaled speed: whole artifact in ~12s (720 frames), min ~120 ch/s, so short tools read nicely
+  const perFrame=Math.max(2,Math.ceil(liveCode.length/720));
+  typePos+=Math.max(perFrame,Math.round(perFrame*dt/16.7));
+  if(typePos>=liveCode.length){typePos=liveCode.length;typing=false;renderCRT();return;}
+  if(sound&&(typePos&15)===0)sfx.key();
+  renderCRT();
+  typeRAF=requestAnimationFrame(stepType);
+}
+function startTypewriter(){
+  cancelAnimationFrame(typeRAF);lastTypeT=0;
+  if(reduceMotion||!liveCode){typing=false;typePos=liveCode.length;renderCRT();return;}
+  typing=true;typePos=0;renderCRT();
+  typeRAF=requestAnimationFrame(stepType);
+}
 async function refreshLive(){
   try{
     const d=await (await fetch("/api/live")).json();
     const lines=d.lines||[];
     const last=lines.length?lines[lines.length-1]:"";
-    const el=$("crt-lines");if(!el)return;
-    // append-render: show last 40 lines + separator + latest code
-    let txt=lines.slice(-40).join("\n");
-    if(liveCode)txt+="\n\n"+liveCode;
-    el.textContent=txt;
-    el.scrollTop=el.scrollHeight;
-    if(last!==liveLast&&liveLast){
-      if(sound){sfx.blip();startProcessing(2000);}
-      flareEye(false);
-    }
+    feedText=lines.slice(-40).join("\n");
+    renderCRT();
+    if(last!==liveLast&&liveLast){ if(sound){sfx.blip();startProcessing(2000);} flareEye(false); }
     liveLast=last;
   }catch(e){}
 }
@@ -1325,8 +1447,11 @@ async function refreshConsole(){
     liveCodeKey=key;
     liveCode=d.code||"";
     $("crt-title").textContent=d.title||"HAL 9001 · kernel";
+    startTypewriter(); // type the new artifact on; a newer one mid-type cancels + restarts cleanly
   }catch(e){}
 }
+// click the console to skip the typewriter to the end
+(function(){const el=$("crt-lines");if(el)el.addEventListener("click",()=>{if(typing){typing=false;typePos=liveCode.length;renderCRT();}});})();
 refreshLive();setInterval(refreshLive,1500);
 refreshConsole();setInterval(refreshConsole,15000);
 
@@ -1380,9 +1505,33 @@ async function refreshGrowth(){
     }).join("");
     const since=$("since");
     if(since)since.textContent=g.born?("· alive "+ago(g.born)+" · "+g.born.slice(0,10)):"";
+    if($("pf-tools"))$("pf-tools").textContent=(g.toolsInvented||0).toLocaleString();
+    if($("pf-records"))$("pf-records").textContent=(g.recordsSet||0).toLocaleString();
   }catch(e){}
 }
 refreshGrowth(); setInterval(refreshGrowth,8000);
+
+// ── function catalog: the tools HAL has written, newest first, each linking to its public source ──
+let fnSeen=null; // remember the newest ts we've shown so freshly-written functions can pulse "NEW"
+async function refreshFunctions(){
+  try{
+    const d=await (await fetch("/api/functions")).json();
+    const el=$("functions"); if(!el)return;
+    const items=d.items||[];
+    const cnt=$("fn-count"); if(cnt)cnt.textContent=(d.count||0)+" written · all open-source";
+    if(!items.length){ el.innerHTML='<div class="empty">no functions yet — direct HAL to invent one below.</div>'; return; }
+    const newestTs=items[0].ts; const firstLoad=fnSeen===null;
+    el.innerHTML=items.map(f=>{
+      const fresh=!firstLoad&&fnSeen!==null&&f.ts>fnSeen;
+      return '<div class="fn"><div class="nm">'+esc(f.name)+(fresh?'<span class="new">new</span>':'')+
+        '<a class="src" href="'+esc(f.sourceUrl)+'" target="_blank" rel="noopener">source ↗</a></div>'+
+        '<div class="meta"><span class="sig">'+esc(f.sig||"")+'</span><span class="stab '+esc(f.stability||"")+'">'+esc(f.stability||"")+'</span></div>'+
+        '<div class="d">'+esc(f.desc||"")+'</div><div class="when">written '+esc(f.when||"")+'</div></div>';
+    }).join("");
+    fnSeen=newestTs;
+  }catch(e){}
+}
+refreshFunctions(); setInterval(refreshFunctions,12000);
 
 // ── token wallet ─────────────────────────────────────────────────────────────────────────────
 // Server keeps the authoritative balance (cookie-keyed). The client mirrors it only to show the pill,
