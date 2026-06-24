@@ -271,8 +271,14 @@ public static class MatmulRace
         if (target >= 1)
         {
             log?.Invoke($"tensor-search: targeting rank-{target} for {size}x{size}...");
+            // Stream the matrices being worked to the live "matrices" panel — but only for sizes small
+            // enough that the U/V/W grids actually render (n ≤ 4); larger schemes are unreadable and the
+            // JSON would be huge. The dashboard shows these grids mutating as the search hunts.
+            Action<TensorSearch.Decomposition, int>? onSnap = size <= 4
+                ? (dec, err) => LiveMatrix.Publish(SchemeJson(dec), err)
+                : null;
             TensorSearch.Decomposition? d = TensorSearch.Search(size, target, out int bestErr, maxSeconds: 8,
-                onProgress: p => log?.Invoke($"  {p}"));
+                onProgress: p => log?.Invoke($"  {p}"), onSnapshot: onSnap);
             if (d is not null)
             {
                 log?.Invoke($"tensor-search: FOUND rank-{target}! verifying...");

@@ -38,10 +38,10 @@ public sealed class TensorSearch
     public static Decomposition? Search(
         int n, int rank, out int bestError,
         int maxRestarts = 100000, double maxSeconds = 25, int? seed = null,
-        Action<string>? onProgress = null)
+        Action<string>? onProgress = null, Action<Decomposition, int>? onSnapshot = null)
     {
         var runner = new Runner(n, rank, seed ?? Environment.TickCount);
-        return runner.Run(maxRestarts, maxSeconds, out bestError, onProgress);
+        return runner.Run(maxRestarts, maxSeconds, out bestError, onProgress, onSnapshot);
     }
 
     // ── the search runner: ALTERNATING optimization (ALS) ─────────────────────────────────
@@ -91,12 +91,25 @@ public sealed class TensorSearch
         // one coordinate, which is what reliably derives reachable decompositions (e.g. the naive
         // rank-8 from scratch in seconds). A k-flip polish closes small final gaps. Diversity comes
         // from random restarts. The hard sub-cubic cases (Strassen rank-7) remain hard for this search.
-        public Decomposition? Run(int maxRestarts, double maxSeconds, out int bestError, Action<string>? onProgress = null)
+        public Decomposition? Run(int maxRestarts, double maxSeconds, out int bestError,
+            Action<string>? onProgress = null, Action<Decomposition, int>? onSnapshot = null)
         {
             var sw = Stopwatch.StartNew();
             bestError = int.MaxValue;
             int uvCount = 2 * _rank * _n2;
             int iters = Math.Max(3000, 50 * uvCount);
+
+            // Throttle snapshots by wall-clock so we never build a Decomposition more than ~4×/sec, no
+            // matter how fast the inner loop churns — keeps the "matrices being worked" panel live but cheap.
+            long lastSnapMs = -10000;
+            void MaybeSnap(int err)
+            {
+                if (onSnapshot is null) return;
+                long ms = sw.ElapsedMilliseconds;
+                if (ms - lastSnapMs < 220) return;
+                lastSnapMs = ms;
+                onSnapshot(Snapshot(), err);
+            }
 
             for (int restart = 0; restart < maxRestarts; restart++)
             {
@@ -104,6 +117,7 @@ public sealed class TensorSearch
                 RandomInitAll();
                 int err = SolveFactorW();                 // optimal W for the random U,V
                 if (err == 0) { bestError = 0; return Snapshot(); }
+                MaybeSnap(err);                            // show each fresh restart's starting point
 
                 double temp = 2.0;
                 for (int it = 0; it < iters; it++)
@@ -123,6 +137,7 @@ public sealed class TensorSearch
 
                     if (err == 0) { bestError = 0; return Snapshot(); }
                     if (err < bestError) { bestError = err; onProgress?.Invoke($"SA err→{bestError} (restart {restart}, it {it})"); }
+                    if ((it & 255) == 0) MaybeSnap(err);                       // stream the grids as they churn
                     temp *= 0.999; if (temp < 0.05) temp = 0.05;
                     if ((it & 511) == 0 && sw.Elapsed.TotalSeconds > maxSeconds) break;
                 }

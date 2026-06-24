@@ -102,6 +102,8 @@ public static class Dashboard
                 Write(ctx, "application/json", LiveJson());
             else if (path == "/api/growth")
                 Write(ctx, "application/json", await GrowthJsonAsync(core));
+            else if (path == "/api/matrix")
+                Write(ctx, "application/json", MatrixJson());
             else if (path.StartsWith("/audio/") && path.EndsWith(".mp3"))
             {
                 byte[]? clip = TryGetAudio(path);
@@ -385,6 +387,34 @@ public static class Dashboard
     {
         string[] lines = LiveLog.Tail(80);
         return JsonSerializer.Serialize(new { lines }, JsonOpts);
+    }
+
+    // The U/V/W grids the tensor-search is working RIGHT NOW (published by the swarm via LiveMatrix as
+    // it hunts). Renders the same ASCII grids as a persisted scheme, plus a freshness signal so the
+    // panel can say "working now" during a search burst vs "last worked Ns ago" between rounds.
+    private sealed record MatrixSnap(string? ts, int error, JsonElement scheme);
+    private static string MatrixJson()
+    {
+        string raw = LiveMatrix.Read();
+        if (string.IsNullOrWhiteSpace(raw))
+            return JsonSerializer.Serialize(new { grids = "", error = -1, ageSec = -1, working = false }, JsonOpts);
+        try
+        {
+            var snap = JsonSerializer.Deserialize<MatrixSnap>(raw, JsonOpts);
+            string grids = snap is not null ? RenderScheme(snap.scheme.GetRawText()) : "";
+            double ageSec = -1;
+            if (snap?.ts is { } ts && DateTime.TryParse(ts, null,
+                    System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var t))
+                ageSec = Math.Max(0, (DateTime.UtcNow - t).TotalSeconds);
+            return JsonSerializer.Serialize(new
+            {
+                grids,
+                error = snap?.error ?? -1,
+                ageSec = (int)ageSec,
+                working = ageSec >= 0 && ageSec < 4, // a write within the last few seconds = actively hunting
+            }, JsonOpts);
+        }
+        catch { return JsonSerializer.Serialize(new { grids = "", error = -1, ageSec = -1, working = false }, JsonOpts); }
     }
 
     // Everything HAL has grown into since it was born — derived ENTIRELY from cumulative, never-deleted
@@ -1003,6 +1033,13 @@ public static class Dashboard
   @keyframes cblink{0%,49%{opacity:1}50%,100%{opacity:0}}
   .crtbody{padding:14px 16px;height:380px;overflow:hidden;position:relative;z-index:1}
   .crtlines{font:13px/1.6 "Courier New",Courier,monospace;color:#33cc44;text-shadow:0 0 6px rgba(51,204,68,.6);white-space:pre;word-break:break-all;height:100%;overflow:hidden}
+  /* matrices-being-worked panel: same green-phosphor CRT skin, sits under the hero row */
+  .mxbox{max-width:1200px;margin:0 auto 22px;background:#010e03;border:2px solid #1a4a1c;border-radius:6px;box-shadow:0 0 28px rgba(0,255,40,.12),inset 0 0 60px rgba(0,0,0,.7);position:relative;overflow:hidden}
+  .mxbox::before{content:"";position:absolute;inset:0;background:repeating-linear-gradient(to bottom,transparent 0,transparent 2px,rgba(0,0,0,.25) 3px,transparent 4px);pointer-events:none;z-index:2}
+  .mxtop{background:#020f04;border-bottom:1px solid #1a3a1c;padding:7px 14px;display:flex;justify-content:space-between;align-items:center;position:relative;z-index:4}
+  .mxstat{color:#2a7a35;font-size:10px;letter-spacing:1px;text-transform:uppercase}
+  .mxstat.live{color:#7cff5a;text-shadow:0 0 7px rgba(124,255,90,.7);animation:cblink 1s steps(1) infinite}
+  .mxgrid{font:12px/1.45 "Courier New",Courier,monospace;color:#33cc44;text-shadow:0 0 6px rgba(51,204,68,.5);white-space:pre;margin:0;padding:14px 16px;max-height:420px;overflow:auto;position:relative;z-index:1}
   /* choice menu */
   .menu{max-width:1200px;margin:0 auto 22px;background:#020a04;border:1px solid #1a3a1c;border-radius:6px;padding:18px 20px}
   .menu h2{font-size:11px;text-transform:uppercase;letter-spacing:3px;color:#2a7a35;margin-bottom:14px;font-weight:400}
@@ -1061,6 +1098,15 @@ public static class Dashboard
     </div>
     <div class="crtbody"><div class="crtlines" id="crt-lines"></div></div>
   </div>
+</div>
+
+<!-- MATRICES BEING WORKED: the live U/V/W grids the tensor-search is mutating right now -->
+<div class="mxbox">
+  <div class="mxtop">
+    <span class="ctitle">matrices being worked</span>
+    <span class="mxstat" id="mx-stat">idle</span>
+  </div>
+  <pre class="mxgrid" id="mx-grid">  matrices appear here when HAL runs a free tensor-search round (small sizes).</pre>
 </div>
 
 <!-- CHOICE MENU: what visitors click (no text input, ever) -->
@@ -1283,6 +1329,22 @@ async function refreshConsole(){
 }
 refreshLive();setInterval(refreshLive,1500);
 refreshConsole();setInterval(refreshConsole,15000);
+
+// ── matrices being worked: live U/V/W grids the tensor-search is mutating ────────────────────────
+async function refreshMatrix(){
+  try{
+    const d=await (await fetch("/api/matrix")).json();
+    const grid=$("mx-grid"),stat=$("mx-stat"); if(!grid||!stat)return;
+    if(d.grids){
+      grid.textContent=d.grids;
+      if(d.working){stat.textContent="● working now · err "+d.error;stat.className="mxstat live";if(sound){sfx.blip();startProcessing(1500);}}
+      else{stat.textContent=(d.ageSec>=0?"last worked "+d.ageSec+"s ago":"idle")+(d.error>=0?" · err "+d.error:"");stat.className="mxstat";}
+    }else{
+      stat.textContent="idle";stat.className="mxstat";
+    }
+  }catch(e){}
+}
+refreshMatrix();setInterval(refreshMatrix,1500);
 
 // ── anonymized "other visitors" activity feed (bite 3): friendly, PII-free social proof ─────────
 async function refreshActivity(){
