@@ -72,6 +72,7 @@ in User scope (§5.2) so a fresh terminal can reach the hive. **Deploy was NOT r
 # 2. Clone (needs the SSH deploy key + ssh config alias from §5.3 first):
 git clone git@hal9001.github.com:Bullerish/HAL9001.git
 cd HAL9001
+git config core.hooksPath .githooks   # enable the pre-push secret/PII guard (public repo — see §17)
 
 # 3. Set the three dev secrets in User scope (see §5 — use your real values):
 [Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY','<key>','User')

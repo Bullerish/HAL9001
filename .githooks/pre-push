@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# HAL9001 pre-push secret/PII guard.
+#
+# HAL9001 is a PUBLIC repo, so this hook refuses any push that introduces something shaped like a
+# real credential or personal data. It scans ONLY the commits being pushed (added lines), so it
+# won't choke on history that's already public or on removals.
+#
+# Enable it on each machine (one time, after clone):   git config core.hooksPath .githooks
+# Escape hatch, only when you are SURE it's a false positive:   git push --no-verify
+set -u
+
+remote="${1:-origin}"
+
+# Real-credential SHAPES. Lengths are chosen so placeholders (sk-ant-..., sk-ant-REPLACE_ME) do NOT
+# match. The local Windows username is included as a PII canary (it leaked into README once).
+patterns='sk-ant-api03|sk-ant-[A-Za-z0-9_-]{25,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{8,}|rk_live_[A-Za-z0-9]{20,}|sk_live_[A-Za-z0-9]{20,}|whsec_[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|C:\\Users\\bjame'
+allow='REPLACE_ME|noreply@anthropic\.com|example\.com|your-db-name'
+
+found=0
+while read -r localref localsha remoteref remotesha; do
+  [ -z "${localsha:-}" ] && continue
+  # Branch/ref deletion (local sha is all zeros): nothing to scan.
+  case "$localsha" in *[!0]*) : ;; *) continue ;; esac
+  # New ref on the remote (remote sha all zeros): scan only the commits being introduced.
+  if printf '%s' "${remotesha:-0}" | grep -qE '^0+$'; then
+    range="$localsha --not --remotes=$remote"
+  else
+    range="$remotesha..$localsha"
+  fi
+  # Exclude this hook itself — it necessarily contains pattern fragments (sk-ant-..., the username
+  # canary) that would otherwise self-trip. The hook is reviewed code, not a place secrets hide.
+  hits=$(git log -p --no-color $range -- . ':(exclude).githooks/' 2>/dev/null \
+          | grep -E '^\+' | grep -vE '^\+\+\+' \
+          | grep -EI "$patterns" \
+          | grep -vEi "$allow")
+  if [ -n "$hits" ]; then
+    found=1
+    echo ""
+    echo "  pre-push BLOCKED: possible secret/PII in commits being pushed ($range):"
+    printf '%s\n' "$hits" | sed 's/^/     /' | head -n 20
+  fi
+done
+
+if [ "$found" -ne 0 ]; then
+  echo ""
+  echo "  HAL9001 is a PUBLIC repo. Remove the secret/PII before pushing (and ROTATE the key if it was real)."
+  echo "  Genuine false positive? Bypass with:  git push --no-verify"
+  echo ""
+  exit 1
+fi
+exit 0
