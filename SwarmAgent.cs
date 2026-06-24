@@ -821,6 +821,30 @@ public static class SwarmAgent
                 }
                 catch { }
 
+                // SELF-SCALING runs ABOVE the budget gate: spawning a node costs no tokens, and more nodes =
+                // more FREE matmul racing. So the mesh keeps forming/healing even after the day's LLM budget
+                // is spent (your rule: cap, then go free) — only the LLM work below the gate pauses at the cap.
+                bool isAuto = false;
+                try { isAuto = await core.IsAutonomousAsync(); } catch { /* treat as manual if hive unreachable */ }
+
+                // AUTO-HIRE (persistent mesh): keep ~targetNodes helpers alive so the hive stays a mesh that
+                // can cross-query. Gate on ACTUAL peer count (not our own child count) so a leadership change
+                // can't over-spawn; node death heals by re-hiring up to target. Hard ceiling + grace bound the rate.
+                if (isAuto)
+                {
+                    hiredProcesses.RemoveAll(p => p.HasExited);
+                    if (node.Peers.Count < targetNodes
+                        && hiredProcesses.Count < MaxAutoHiredNodes
+                        && (DateTime.UtcNow - lastHireAt).TotalSeconds > HireGraceSecs)
+                    {
+                        var peerPts = node.Peers
+                            .Select(id => { int c = id.LastIndexOf(':'); return c >= 0 && int.TryParse(id[(c + 1)..], out int pt) ? pt : -1; })
+                            .Where(pt => pt > 0);
+                        System.Diagnostics.Process? hired = await core.HireNodeAsync(myPort, peerPts);
+                        if (hired is not null) { hiredProcesses.Add(hired); lastHireAt = DateTime.UtcNow; Console.Write("> "); }
+                    }
+                }
+
                 // BUDGET (bite 21): when the day's LLM budget is spent, pause autonomous thinking.
                 // Paid asks above still get answered; the matmul loop's FREE tensor search keeps running.
                 if (!await core.HasBudgetAsync()) continue;
@@ -871,9 +895,7 @@ public static class SwarmAgent
                 lastActivity = DateTime.UtcNow;                            // acted (or chose to rest) — don't re-scan immediately
                 if (mood.Inclination == MoodInclination.Rest) continue;    // too weary — defer non-urgent work
 
-                // Read autonomous mode once per cycle so the whole cycle runs with a consistent setting.
-                bool isAuto = false;
-                try { isAuto = await core.IsAutonomousAsync(); } catch { /* treat as manual if hive unreachable */ }
+                // (isAuto was read above the budget gate, so it's available here unchanged.)
 
                 // CROSS-NODE QUERYING (idle self-driving, bite B): on a ~5-min cadence, when the mesh has
                 // real peers, the leader poses a self-generated, directive-serving question and runs a
@@ -1013,25 +1035,8 @@ public static class SwarmAgent
                     }
                     else ReportReflection(assessments, unprompted: true);
                 }
-
-                // AUTO-HIRE (bite 12 → persistent mesh): in autonomous mode, keep the swarm populated to
-                // ~targetNodes helpers so nodes can cross-query continuously. Gate on the ACTUAL peer count
-                // (not just our own children) so a leadership change can't over-spawn, and so node death is
-                // healed by re-hiring back up to target. The hard ceiling + grace timer bound the rate.
-                if (isAuto)
-                {
-                    hiredProcesses.RemoveAll(p => p.HasExited);
-                    if (node.Peers.Count < targetNodes
-                        && hiredProcesses.Count < MaxAutoHiredNodes
-                        && (DateTime.UtcNow - lastHireAt).TotalSeconds > HireGraceSecs)
-                    {
-                        var peerPts = node.Peers
-                            .Select(id => { int c = id.LastIndexOf(':'); return c >= 0 && int.TryParse(id[(c + 1)..], out int pt) ? pt : -1; })
-                            .Where(pt => pt > 0);
-                        System.Diagnostics.Process? hired = await core.HireNodeAsync(myPort, peerPts);
-                        if (hired is not null) { hiredProcesses.Add(hired); lastHireAt = DateTime.UtcNow; Console.Write("> "); }
-                    }
-                }
+                // (Auto-hire was lifted ABOVE the budget gate near the top of this loop, so the mesh keeps
+                // forming/healing for free even when the day's LLM budget is spent.)
             }
         }
 
