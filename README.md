@@ -345,6 +345,13 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 
 > Newest first. Each rung was verified before the next was built. Commit hashes are on `main`.
 
+### Idle self-driving — the hive runs itself when no one's watching (autonomy: persistent mesh + cross-node querying)
+When `autonomous` mode is ON and no one is interacting (no paid asks/steers), the hive drives itself — and now keeps a *mesh* doing it, not a lone node. This is the first half ("spin up nodes, have them query each other") of HAL running itself between visitors.
+- **Persistent mesh (bite A):** auto-hire no longer fires only "when solo" — it maintains a target of `HAL_TARGET_NODES` helper nodes (default **2**; hard ceiling **5**), gated on the *actual peer count* so a leadership change can't over-spawn, and it heals node death by re-hiring back up to target. Spawning a node costs no tokens; each node budget-gates its own LLM use.
+- **Nodes querying each other (bite B):** on a ~5-min cadence (`HAL_CROSSQUERY_SECS`), the idle leader poses a self-generated, directive-serving question (a real gap mined from its episodic log, else its Prime Directive) and runs a **competition** across the whole swarm — every node writes its own answer, the best is adopted (the existing `deliberate` fan-out, now self-triggered). Logged as a `cross-query` event.
+- **Cost-safe by design:** all of it sits behind `HasBudgetAsync()` — it self-drives until the daily LLM cap is spent, then falls back to the **free** matmul race / tensor search until tomorrow or a donation tops it up. The cadence never burns money past the cap.
+- Tuning: `HAL_TARGET_NODES` (mesh size), `HAL_CROSSQUERY_SECS` (cross-query cadence). Verified to compile clean; runtime exercises on a keyed machine/the box (the idle loop requires `HasLlm`). *Next: verified multi-method "full solutions" (bite C).*
+
 ### Honest dashboard, bite 1 — a LIVE node count
 The dashboard's "active nodes" number was a lie: it counted the distinct authors of recent events, so nodes that died days ago still showed as active (the live site read **4** while exactly **1** node was running). Replaced with a real heartbeat.
 - **Presence table:** every swarm node upserts a row into a shared `presence(node, role, last_seen)` table every 10s (`HeartbeatPresenceAsync`, driven by a per-node `PresenceLoop` — runs on *every* node, not just the coordinator). A node that dies stops upserting.

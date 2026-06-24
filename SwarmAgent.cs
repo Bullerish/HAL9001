@@ -124,7 +124,27 @@ public static class SwarmAgent
         DateTime lastBroadcast = DateTime.MinValue;          // when the hive last broadcast a thought (bite 10)
         var hiredProcesses = new List<System.Diagnostics.Process>(); // child nodes spawned by autonomous hire
         DateTime lastHireAt = DateTime.MinValue;
-        const int MaxAutoHiredNodes = 3;
+        const int MaxAutoHiredNodes = 5;     // hard ceiling on how many a single node may spawn (protects a small box)
+        const double HireGraceSecs = 60.0;   // min seconds between auto-hires — longer than a node's mesh-join time, so no spawn storms
+        // PERSISTENT MESH (idle self-driving): keep the swarm populated to this many HELPER nodes so the
+        // hive stays a mesh that can cross-query continuously — not just a one-shot "hire when solo".
+        // HAL_TARGET_NODES sets it (default 2 — modest for the small VPS; raise it on a big local box).
+        // Spawning costs no tokens; each spawned node budget-gates its OWN LLM use, so this stays under the cap.
+        int targetNodes = 2;
+        {
+            string? tnEnv = Environment.GetEnvironmentVariable("HAL_TARGET_NODES");
+            if (int.TryParse(tnEnv, out int tn)) targetNodes = Math.Clamp(tn, 0, MaxAutoHiredNodes);
+        }
+        // CROSS-NODE QUERYING (idle self-driving): how often the idle leader poses a self-generated,
+        // directive-serving question to the WHOLE mesh and runs a competition (every node answers, best is
+        // adopted) — i.e. the nodes querying each other. Default ~5 min (HAL_CROSSQUERY_SECS overrides).
+        // The DAILY BUDGET is the real cost throttle (your choice: cap, then go free), not this cadence.
+        DateTime lastCrossQuery = DateTime.MinValue;
+        double CrossQuerySeconds = 300.0;
+        {
+            string? cqEnv = Environment.GetEnvironmentVariable("HAL_CROSSQUERY_SECS");
+            if (double.TryParse(cqEnv, out double cqv) && cqv > 0) CrossQuerySeconds = cqv;
+        }
         // AMBIENT PACING (bite 18): HAL_PACE scales every idle/LLM cadence up to throttle token burn for
         // a long-running "leave it on and watch" deployment. 1 = default snappy demo pace; "slow" ≈ 6×
         // (a few LLM cycles an hour, ~a dollar a day on the cheap model); any number sets the multiplier.
@@ -855,6 +875,34 @@ public static class SwarmAgent
                 bool isAuto = false;
                 try { isAuto = await core.IsAutonomousAsync(); } catch { /* treat as manual if hive unreachable */ }
 
+                // CROSS-NODE QUERYING (idle self-driving, bite B): on a ~5-min cadence, when the mesh has
+                // real peers, the leader poses a self-generated, directive-serving question and runs a
+                // COMPETITION across the swarm — every node writes its OWN answer, the best is adopted.
+                // This is the nodes "querying each other". Budget-gated above, so the daily cap stops
+                // runaway spend (then the free matmul race keeps the swarm busy). Needs peers to matter.
+                if (isAuto && node.Peers.Count > 0
+                    && (DateTime.UtcNow - lastCrossQuery).TotalSeconds > CrossQuerySeconds)
+                {
+                    lastCrossQuery = DateTime.UtcNow;
+                    string? cq = null;
+                    try
+                    {
+                        var gaps = await core.ReviewGapsAsync(1);   // prefer a real gap mined from the episodic log
+                        if (gaps.Count > 0) cq = gaps[0].Description;
+                        else { string? d = await core.GetDirectiveAsync(); if (!string.IsNullOrWhiteSpace(d)) cq = $"a capability that helps with: {d}"; }
+                    }
+                    catch { }
+                    if (!string.IsNullOrWhiteSpace(cq))
+                    {
+                        string xReq = Guid.NewGuid().ToString("N")[..8];
+                        Console.WriteLine($"\n[cross-query] (idle) posing to the swarm: {cq}"); Console.Write("> ");
+                        try { await core.Events.AppendAsync("cross-query", $"posed to the swarm: {cq}"); } catch { }
+                        try { await RunCompetitionAsync(xReq, cq!, node.Id); } catch { }
+                        lastActivity = DateTime.UtcNow;
+                        continue;
+                    }
+                }
+
                 // AUTONOMY (bites 8 + 11): pursue an active goal one step; in autonomous mode also
                 // propose, approve, and advance a new goal immediately — no human gate between them.
                 try
@@ -966,12 +1014,16 @@ public static class SwarmAgent
                     else ReportReflection(assessments, unprompted: true);
                 }
 
-                // AUTO-HIRE (bite 12): in autonomous mode, if the hive is solo, spawn a helper node.
+                // AUTO-HIRE (bite 12 → persistent mesh): in autonomous mode, keep the swarm populated to
+                // ~targetNodes helpers so nodes can cross-query continuously. Gate on the ACTUAL peer count
+                // (not just our own children) so a leadership change can't over-spawn, and so node death is
+                // healed by re-hiring back up to target. The hard ceiling + grace timer bound the rate.
                 if (isAuto)
                 {
                     hiredProcesses.RemoveAll(p => p.HasExited);
-                    if (hiredProcesses.Count < MaxAutoHiredNodes && node.Peers.Count == 0
-                        && (DateTime.UtcNow - lastHireAt).TotalSeconds > 60)
+                    if (node.Peers.Count < targetNodes
+                        && hiredProcesses.Count < MaxAutoHiredNodes
+                        && (DateTime.UtcNow - lastHireAt).TotalSeconds > HireGraceSecs)
                     {
                         var peerPts = node.Peers
                             .Select(id => { int c = id.LastIndexOf(':'); return c >= 0 && int.TryParse(id[(c + 1)..], out int pt) ? pt : -1; })
@@ -1306,7 +1358,7 @@ public static class SwarmAgent
                 hiredProcesses.RemoveAll(p => p.HasExited);
                 Console.WriteLine($"[nodes] this node: {node.Id}");
                 Console.WriteLine($"[nodes] peers ({node.Peers.Count}): {(node.Peers.Count == 0 ? "none" : string.Join(", ", node.Peers))}");
-                Console.WriteLine($"[nodes] hired ({hiredProcesses.Count}/{MaxAutoHiredNodes}): {(hiredProcesses.Count == 0 ? "none" : string.Join(", ", hiredProcesses.Select(p => p.Id)))}");
+                Console.WriteLine($"[nodes] hired ({hiredProcesses.Count}/{MaxAutoHiredNodes}, auto-target {targetNodes} helpers): {(hiredProcesses.Count == 0 ? "none" : string.Join(", ", hiredProcesses.Select(p => p.Id)))}");
                 continue;
             }
             if (line.Equals("hire", StringComparison.OrdinalIgnoreCase) || line.StartsWith("hire ", StringComparison.OrdinalIgnoreCase))
