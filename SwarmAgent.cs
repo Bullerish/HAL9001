@@ -819,6 +819,7 @@ public static class SwarmAgent
                             case "topic":
                             {
                                 // Announce the build so the live CRT shows the work starting, then stream the result.
+                                LiveLog.Append($"::: steer: writing a '{st.Value.Arg}' tool...");
                                 await core.Events.AppendAsync("steer-building", $"writing a {st.Value.Arg} tool — HAL is generating code...");
                                 Console.WriteLine($"\n[steer] writing a {st.Value.Arg} tool..."); Console.Write("> ");
                                 string built = await core.SteerBuildAsync(st.Value.Arg);
@@ -830,6 +831,7 @@ public static class SwarmAgent
                         }
                         await core.CompleteSteerAsync(st.Value.Id);
                         await core.Events.AppendAsync("steer-done", note);
+                        LiveLog.Append($"OK steer done: {note}");
                         Console.WriteLine($"\n[steer] {note}"); Console.Write("> ");
                         continue; // one steer per cycle
                     }
@@ -1008,7 +1010,7 @@ public static class SwarmAgent
 
                 try
                 {
-                    MatmulLadder.LadderStep? step = await MatmulLadder.StepAsync(client!, core, myPort, loopCts.Token);
+                    MatmulLadder.LadderStep? step = await MatmulLadder.StepAsync(client!, core, myPort, loopCts.Token, LiveLog.Append);
                     if (step is null) continue;
 
                     if (step.Done)
@@ -1025,6 +1027,7 @@ public static class SwarmAgent
 
                     string why = challenged ? "challenge received" : "race timer";
                     string unit = MatmulRace.MetricName(step.Metric);
+                    LiveLog.Append($"> racing {step.Size}x{step.Size} [{unit}] (plateau {step.Stale}/{MatmulLadder.PlateauRounds}) — {why}");
                     Console.WriteLine($"\n[matmul-race] {why} — racing {step.Size}x{step.Size} [{unit}] (plateau {step.Stale}/{MatmulLadder.PlateauRounds})...");
                     Console.Write("> ");
 
@@ -1033,6 +1036,7 @@ public static class SwarmAgent
                         Console.WriteLine("[matmul-race] all candidates failed compile or correctness this round.");
                         Console.Write("> ");
                         // Surface the round to the hive so the (separate-process) dashboard CRT can show it live.
+                        LiveLog.Append($"  all candidates failed this round");
                         await core.Events.AppendAsync("matmul-round",
                             $"racing {step.Size}x{step.Size} [{unit}] (plateau {step.Stale}/{MatmulLadder.PlateauRounds}) — all candidates failed this round");
                     }
@@ -1040,6 +1044,7 @@ public static class SwarmAgent
                     {
                         Console.WriteLine($"[matmul-race] {step.Round.Summary}");
                         Console.Write("> ");
+                        LiveLog.Append($"{(step.Round.NewRecord ? "OK NEW RECORD" : " >")} {step.Round.Summary}");
                         // Surface the round result to the hive for the live dashboard CRT transcript.
                         await core.Events.AppendAsync("matmul-round", step.Round.Summary);
                     }

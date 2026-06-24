@@ -37,10 +37,11 @@ public sealed class TensorSearch
     /// </summary>
     public static Decomposition? Search(
         int n, int rank, out int bestError,
-        int maxRestarts = 100000, double maxSeconds = 25, int? seed = null)
+        int maxRestarts = 100000, double maxSeconds = 25, int? seed = null,
+        Action<string>? onProgress = null)
     {
         var runner = new Runner(n, rank, seed ?? Environment.TickCount);
-        return runner.Run(maxRestarts, maxSeconds, out bestError);
+        return runner.Run(maxRestarts, maxSeconds, out bestError, onProgress);
     }
 
     // ── the search runner: ALTERNATING optimization (ALS) ─────────────────────────────────
@@ -90,7 +91,7 @@ public sealed class TensorSearch
         // one coordinate, which is what reliably derives reachable decompositions (e.g. the naive
         // rank-8 from scratch in seconds). A k-flip polish closes small final gaps. Diversity comes
         // from random restarts. The hard sub-cubic cases (Strassen rank-7) remain hard for this search.
-        public Decomposition? Run(int maxRestarts, double maxSeconds, out int bestError)
+        public Decomposition? Run(int maxRestarts, double maxSeconds, out int bestError, Action<string>? onProgress = null)
         {
             var sw = Stopwatch.StartNew();
             bestError = int.MaxValue;
@@ -121,7 +122,7 @@ public sealed class TensorSearch
                     else { if (onU) _u[r, idx] = old; else _v[r, idx] = old; Array.Copy(_wsave, _w, _w.Length); err = prevErr; } // revert
 
                     if (err == 0) { bestError = 0; return Snapshot(); }
-                    if (err < bestError) bestError = err;
+                    if (err < bestError) { bestError = err; onProgress?.Invoke($"SA err→{bestError} (restart {restart}, it {it})"); }
                     temp *= 0.999; if (temp < 0.05) temp = 0.05;
                     if ((it & 511) == 0 && sw.Elapsed.TotalSeconds > maxSeconds) break;
                 }
@@ -129,10 +130,11 @@ public sealed class TensorSearch
                 // k-flip polish to close a small final gap.
                 if (_canPolish && err > 0 && err <= 6)
                 {
+                    onProgress?.Invoke($"polish: err={err}, trying k-flip...");
                     LoadFull(_u, _v, _w);
                     int pe = Polish();
                     if (pe == 0) { bestError = 0; return Snapshot(); }
-                    if (pe < bestError) bestError = pe;
+                    if (pe < bestError) { bestError = pe; onProgress?.Invoke($"polish: err→{bestError}"); }
                 }
             }
             return null; // only EXACT decompositions are returned

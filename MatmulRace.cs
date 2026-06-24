@@ -51,7 +51,7 @@ public static class MatmulRace
     public static async Task<RoundResult?> RunRoundAsync(
         AnthropicClient client, AgentCore core, int myPort,
         int size, Metric metric, int randomCandidates = 2,
-        CancellationToken ct = default)
+        CancellationToken ct = default, Action<string>? log = null)
     {
         Champion? champ = await core.GetMatmulChampionAsync(size);
 
@@ -73,7 +73,7 @@ public static class MatmulRace
         if (metric == Metric.Muls)
         {
             (bestScore, bestStrategy, bestSource, bestScheme) =
-                await EvaluateMulsAsync(client, champ, size, a, b, reference, randomCandidates, llmAllowed, ct);
+                await EvaluateMulsAsync(client, champ, size, a, b, reference, randomCandidates, llmAllowed, ct, log);
             baseline = (double)size * size * size; // naive scalar-multiplication count
         }
         else
@@ -257,7 +257,8 @@ public static class MatmulRace
     // ── multiplication-count track (small sizes) ──────────────────────────────────────────
     private static async Task<(double bestMuls, string strategy, string source, string? scheme)> EvaluateMulsAsync(
         AnthropicClient client, Champion? champ, int size,
-        double[,] a, double[,] b, double[,] reference, int randomCandidates, bool llmAllowed, CancellationToken ct)
+        double[,] a, double[,] b, double[,] reference, int randomCandidates, bool llmAllowed, CancellationToken ct,
+        Action<string>? log = null)
     {
         double bestMuls = double.MaxValue;
         string bestStrategy = "", bestSource = "";
@@ -269,13 +270,22 @@ public static class MatmulRace
         int target = (champ is not null ? (int)champ.Score : size * size * size) - 1;
         if (target >= 1)
         {
-            TensorSearch.Decomposition? d = TensorSearch.Search(size, target, out _, maxSeconds: 8);
+            log?.Invoke($"tensor-search: targeting rank-{target} for {size}x{size}...");
+            TensorSearch.Decomposition? d = TensorSearch.Search(size, target, out int bestErr, maxSeconds: 8,
+                onProgress: p => log?.Invoke($"  {p}"));
             if (d is not null)
             {
+                log?.Invoke($"tensor-search: FOUND rank-{target}! verifying...");
                 string src = TensorSearch.Synthesize(d);
                 var (ok, muls, exact) = EvaluateCountingSource(src, size);
                 if (ok && exact && muls < bestMuls)
                 { bestMuls = muls; bestStrategy = "tensor-search (LLM-free derivation)"; bestSource = src; bestScheme = SchemeJson(d); }
+                if (ok && exact) log?.Invoke($"tensor-search: exact-verified {muls} muls");
+                else log?.Invoke("tensor-search: verification failed — rejected");
+            }
+            else
+            {
+                log?.Invoke($"tensor-search: no exact rank-{target} in 8s (best err {bestErr})");
             }
         }
 
@@ -285,27 +295,30 @@ public static class MatmulRace
         {
             var generator = new KernelGenerator(client);
             var picker = new Random();
+            var strategies = KernelGenerator.CountingStrategies.OrderBy(_ => picker.Next()).Take(randomCandidates).ToList();
+            bool refining = !string.IsNullOrWhiteSpace(champ?.Source);
+            log?.Invoke($"LLM: generating {strategies.Count + (refining ? 1 : 0)} candidate(s)...");
             var genTasks = new List<Task<CandidateSource>>(
-                KernelGenerator.CountingStrategies.OrderBy(_ => picker.Next()).Take(randomCandidates)
-                    .Select(s => generator.GenerateCountingAsync(s, size, ct)));
-            if (!string.IsNullOrWhiteSpace(champ?.Source))
+                strategies.Select(s => generator.GenerateCountingAsync(s, size, ct)));
+            if (refining)
                 genTasks.Add(generator.RefineCountingAsync(champ!.Source, (long)champ.Score, size, ct));
             CandidateSource[] candidates = await Task.WhenAll(genTasks);
 
             Scalar[,] sa = Scalar.From(a), sb = Scalar.From(b);
             foreach (CandidateSource cand in candidates)
             {
-                if (string.IsNullOrWhiteSpace(cand.Source)) continue;
-                if (!RuntimeCompiler.TryCompileAssembly(cand.Source, out Assembly? asm, out _)) continue;
+                if (string.IsNullOrWhiteSpace(cand.Source)) { log?.Invoke($"  LLM: empty response [{Short(cand.Strategy, 30)}]"); continue; }
+                if (!RuntimeCompiler.TryCompileAssembly(cand.Source, out Assembly? asm, out _)) { log?.Invoke($"  compile FAIL [{Short(cand.Strategy, 30)}]"); continue; }
                 Func<Scalar[,], Scalar[,], Scalar[,]>? fn = BindScalar(asm!);
                 if (fn is null) continue;
 
                 Scalar.ResetCounters();
                 Scalar[,] got;
-                try { got = fn(sa, sb); } catch { continue; }
+                try { got = fn(sa, sb); } catch { log?.Invoke($"  runtime crash [{Short(cand.Strategy, 30)}]"); continue; }
                 long muls = Scalar.Muls;
-                if (!CompareScalar(reference, got)) continue;
-                if (muls < bestMuls) { bestMuls = muls; bestStrategy = cand.Strategy; bestSource = cand.Source; bestScheme = null; } // LLM source has no factor triple
+                if (!CompareScalar(reference, got)) { log?.Invoke($"  correctness FAIL [{Short(cand.Strategy, 30)}] {muls} muls"); continue; }
+                log?.Invoke($"  OK {muls} muls [{Short(cand.Strategy, 30)}]" + (muls < bestMuls ? " ← new best" : ""));
+                if (muls < bestMuls) { bestMuls = muls; bestStrategy = cand.Strategy; bestSource = cand.Source; bestScheme = null; }
             }
         }
         return (bestMuls, bestStrategy, bestSource, bestScheme);

@@ -43,7 +43,8 @@ public static class MatmulLadder
     /// done step immediately — with no LLM/race work — if the ladder is already complete.
     /// </summary>
     public static async Task<LadderStep?> StepAsync(
-        AnthropicClient client, AgentCore core, int myPort, CancellationToken ct = default)
+        AnthropicClient client, AgentCore core, int myPort, CancellationToken ct = default,
+        Action<string>? log = null)
     {
         var (idx, stale, done) = await core.GetLadderAsync();
         if (done)
@@ -53,7 +54,7 @@ public static class MatmulLadder
         int size = Sizes[idx];
         MatmulRace.Metric metric = MetricFor(size);
 
-        MatmulRace.RoundResult? round = await MatmulRace.RunRoundAsync(client, core, myPort, size, metric, ct: ct);
+        MatmulRace.RoundResult? round = await MatmulRace.RunRoundAsync(client, core, myPort, size, metric, ct: ct, log: log);
         bool improved = round?.NewRecord ?? false;
 
         // Plateau bookkeeping: a new record resets the counter; otherwise it ticks up.

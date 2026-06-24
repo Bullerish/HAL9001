@@ -98,6 +98,8 @@ public static class Dashboard
                 Write(ctx, "application/json", await ConsoleJsonAsync(core));
             else if (path == "/api/activity")
                 Write(ctx, "application/json", await ActivityJsonAsync(core));
+            else if (path == "/api/live")
+                Write(ctx, "application/json", LiveJson());
             else if (path.StartsWith("/audio/") && path.EndsWith(".mp3"))
             {
                 byte[]? clip = TryGetAudio(path);
@@ -376,6 +378,12 @@ public static class Dashboard
         _ when (summary ?? "").Contains("NEW RECORD") => "OK",
         _ => " >",
     };
+
+    private static string LiveJson()
+    {
+        string[] lines = LiveLog.Tail(80);
+        return JsonSerializer.Serialize(new { lines }, JsonOpts);
+    }
 
     private static string OneLine(string? s, int max)
     {
@@ -1089,7 +1097,9 @@ async function loadClips(){
 function startBed(){
   if(!AC||!bedGain||bedGain._on||!clips["grindloop"])return;
   const s=AC.createBufferSource();s.buffer=clips["grindloop"];s.loop=true;
-  s.connect(bedGain);s.start();bedGain._on=true; // low continuous grind bed, swelled by procLoop while busy
+  // highpass at 400 Hz → tinny, no bass; sits underneath the low-chord hum
+  const hp=AC.createBiquadFilter();hp.type="highpass";hp.frequency.value=400;hp.Q.value=0.7;
+  s.connect(hp);hp.connect(bedGain);s.start();bedGain._on=true;
 }
 function initAudio(){
   AC=new (window.AudioContext||window.webkitAudioContext)();
@@ -1104,7 +1114,7 @@ function initAudio(){
     const lg=AC.createGain();lg.gain.value=0.03;lfo.connect(lg);lg.connect(g.gain);lfo.start();
     o.connect(lp);lp.connect(g);g.connect(master);o.start();
   });
-  bedGain=AC.createGain();bedGain.gain.value=0.08;bedGain.connect(master); // grind bed (filled by loadClips)
+  bedGain=AC.createGain();bedGain.gain.value=0.05;bedGain.connect(master); // grind bed (filled by loadClips)
   master.gain.linearRampToValueAtTime(0.45,AC.currentTime+3);
 }
 function tone(freq,dur,type,vol){
@@ -1130,7 +1140,7 @@ let procUntil=0,procTimer=null;
 function procLoop(){
   if(!sound){procTimer=null;return;}
   const busy=Date.now()<procUntil;
-  if(bedGain&&AC)bedGain.gain.setTargetAtTime(busy?0.17:0.08,AC.currentTime,0.3);
+  if(bedGain&&AC)bedGain.gain.setTargetAtTime(busy?0.11:0.05,AC.currentTime,0.3);
   procTimer=setTimeout(procLoop,busy?260:600);
 }
 // Kick the chatter into "busy" for ms milliseconds (safe to call with sound off — just arms the window).
@@ -1182,38 +1192,39 @@ $("snd").onclick=()=>{
   if(sound){loadClips();startVisual();if(!procTimer)procLoop();} else {stopVisual();clearTimeout(procTimer);procTimer=null;}
 };
 
-// ── CRT console: type-animates real generated code, char by char ────────────────────────────────
-let crtCode="",crtPos=0,crtTimer=null,crtKey="";
-function crtAnimate(){
-  clearInterval(crtTimer);crtPos=0;
-  const el=$("crt-lines"); if(!el)return;
-  // show first screenful immediately, then stream the rest char-by-char at 18 chars/s
-  const lines=crtCode.split("\n");
-  // the real disk grind, length-matched to how much code is about to type onto the screen
-  if(sound){const n=lines.length;const tier=n<=6?"short":n<=14?"mid":n<=24?"long":"xlong";if(!playSeek(tier,0.5))sfx.blip();startProcessing(Math.min(8000,1400+n*180));}
-  const firstPage=lines.slice(0,24).join("\n");
-  el.textContent=firstPage;
-  const rest=lines.slice(24).join("\n");
-  if(!rest){el.scrollTop=el.scrollHeight;return;}
-  let buf=firstPage,i=0;
-  crtTimer=setInterval(()=>{
-    const chunk=rest.slice(i,i+3);if(!chunk){clearInterval(crtTimer);return;}
-    buf+=chunk;i+=chunk.length;
-    el.textContent=buf;el.scrollTop=el.scrollHeight;
-  },60);
+// ── CRT live feed: polls /api/live every 1.5 s and streams lines as they arrive ─────────────────
+let liveLast="",liveCode="",liveCodeKey="";
+async function refreshLive(){
+  try{
+    const d=await (await fetch("/api/live")).json();
+    const lines=d.lines||[];
+    const last=lines.length?lines[lines.length-1]:"";
+    const el=$("crt-lines");if(!el)return;
+    // append-render: show last 40 lines + separator + latest code
+    let txt=lines.slice(-40).join("\n");
+    if(liveCode)txt+="\n\n"+liveCode;
+    el.textContent=txt;
+    el.scrollTop=el.scrollHeight;
+    if(last!==liveLast&&liveLast){
+      if(sound){sfx.blip();startProcessing(2000);}
+      flareEye(false);
+    }
+    liveLast=last;
+  }catch(e){}
 }
 async function refreshConsole(){
   try{
     const d=await (await fetch("/api/console")).json();
-    const key=d.rev||(d.title+(d.code||"").length); // rev changes when a new round/champion lands
-    if(key===crtKey)return; // nothing new
-    if(crtKey)startProcessing(5000); // a fresh round/champion = the machine just computed something
-    crtKey=key;crtCode=d.code||"";
+    const key=d.rev||(d.title+(d.code||"").length);
+    if(key===liveCodeKey)return;
+    if(liveCodeKey&&sound){playSeek("mid",0.4);startProcessing(5000);flareEye(false);}
+    liveCodeKey=key;
+    liveCode=d.code||"";
     $("crt-title").textContent=d.title||"HAL 9001 · kernel";
-    crtAnimate();
   }catch(e){}
 }
-refreshConsole(); setInterval(refreshConsole,8000);
+refreshLive();setInterval(refreshLive,1500);
+refreshConsole();setInterval(refreshConsole,15000);
 
 // ── anonymized "other visitors" activity feed (bite 3): friendly, PII-free social proof ─────────
 async function refreshActivity(){
