@@ -96,6 +96,8 @@ public static class Dashboard
                 Write(ctx, "application/json", await WalletJsonAsync(core, ctx));
             else if (path == "/api/console")
                 Write(ctx, "application/json", await ConsoleJsonAsync(core));
+            else if (path == "/api/activity")
+                Write(ctx, "application/json", await ActivityJsonAsync(core));
             else if (path.StartsWith("/audio/") && path.EndsWith(".mp3"))
             {
                 byte[]? clip = TryGetAudio(path);
@@ -225,7 +227,7 @@ public static class Dashboard
         {
             var recent = (await core.Events.RecentAsync(30)).AsEnumerable().Reverse().ToList(); // newest first
             foreach (var e in recent)
-                events.Add(new { ts = e.Timestamp, actor = e.Actor, kind = e.Kind, summary = e.Summary });
+                events.Add(new { ts = e.Timestamp, kind = e.Kind, summary = ScrubSummary(e.Kind, e.Summary) }); // actor dropped + summary scrubbed (bite 3)
             nodes = recent.Select(e => e.Actor).Where(a => a.Contains(':')).Distinct().Take(8).ToList();
         }
         catch { }
@@ -249,7 +251,8 @@ public static class Dashboard
         bool boosted = false; string? boostUntil = null;
         var asks = new List<object>();
         try { var bu = await core.GetBoostUntilAsync(); if (bu is not null) { boostUntil = bu.Value.ToString("o"); boosted = bu > DateTime.UtcNow; } } catch { }
-        try { foreach (var a in await core.RecentAsksAsync(6)) asks.Add(new { sender = a.Sender, text = a.Text, reply = a.Reply, status = a.Status }); } catch { }
+        // sender is a self-chosen handle (PII-capable) — anonymize it; the question text is Sanitize()'d and is the public Q&A feature (bite 3).
+        try { foreach (var a in await core.RecentAsksAsync(6)) asks.Add(new { sender = "a visitor", text = a.Text, reply = a.Reply, status = a.Status }); } catch { }
 
         object? budget = null;
         try { var b = await core.GetBudgetAsync(); budget = new { spent = Math.Round(b.Spent, 4), limit = b.Limit, bonus = Math.Round(b.Bonus, 4), remaining = Math.Round(b.Remaining, 4) }; } catch { }
@@ -408,6 +411,72 @@ public static class Dashboard
             foreach (int v in row) sb.Append(v == 0 ? "  0" : v == 1 ? " +1" : v == -1 ? " -1" : v.ToString().PadLeft(3));
             sb.Append('\n');
         }
+    }
+
+    // ── anonymized visitor-activity feed (bite 3) ───────────────────────────────────────────────
+    // Turns the shared event log into friendly, PII-free social proof. Read-only over already-stored
+    // events; no identifiers, no visitor text — nothing here reaches the router/generator (cardinal rule).
+    private static readonly Dictionary<string, string> ActivityPhrases = new()
+    {
+        ["visitor-ask"] = "a visitor asked HAL a question",
+        ["steer-queued"] = "someone nudged the hive",
+        ["budget-funded"] = "someone funded HAL's thinking",
+        ["boost"] = "the hive was boosted",
+        ["tokens-purchased"] = "someone bought tokens to fuel HAL",
+        ["contribution-accepted"] = "a volunteer set a new record",
+        ["discovery"] = "HAL logged a candidate discovery",
+        ["matmul-record"] = "HAL beat its own speed record",
+    };
+    private static async Task<string> ActivityJsonAsync(AgentCore core)
+    {
+        var items = new List<object>();
+        var counts = new Dictionary<string, int> { ["questions"] = 0, ["funded"] = 0, ["boosted"] = 0, ["tokens"] = 0, ["records"] = 0 };
+        try
+        {
+            var recent = (await core.Events.RecentAsync(80)).AsEnumerable().Reverse().ToList(); // newest first
+            foreach (var e in recent)
+            {
+                if (!ActivityPhrases.TryGetValue(e.Kind, out var label)) continue;
+                if (items.Count < 18) items.Add(new { when = CoarseAgo(e.Timestamp), label });
+                switch (e.Kind)
+                {
+                    case "visitor-ask": counts["questions"]++; break;
+                    case "budget-funded": counts["funded"]++; break;
+                    case "boost": counts["boosted"]++; break;
+                    case "tokens-purchased": counts["tokens"]++; break;
+                    case "matmul-record": counts["records"]++; break;
+                }
+            }
+        }
+        catch { }
+        return JsonSerializer.Serialize(new { items, counts }, JsonOpts);
+    }
+    // Coarse relative time — friendlier than a clock, and avoids precise-time correlation of visitors.
+    private static string CoarseAgo(string? iso)
+    {
+        if (string.IsNullOrEmpty(iso) ||
+            !DateTime.TryParse(iso, null, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var t))
+            return "recently";
+        var dt = DateTime.UtcNow - t;
+        if (dt < TimeSpan.FromMinutes(1)) return "just now";
+        if (dt < TimeSpan.FromHours(1)) return "a few minutes ago";
+        if (dt < TimeSpan.FromHours(24)) return "earlier today";
+        return "recently";
+    }
+    // Strip identifiers from event summaries before they reach the public activity log (bite 3).
+    private static string ScrubSummary(string kind, string? summary)
+    {
+        switch (kind)
+        {
+            case "visitor-ask": return "a visitor asked HAL a question";
+            case "steer-queued": return "a visitor nudged the hive";
+            case "contribution-accepted": return "a volunteer set a new record";
+            case "contribution-rejected": return "a volunteer submission was checked";
+            case "tokens-purchased": return "someone bought tokens";
+        }
+        if (string.IsNullOrEmpty(summary)) return summary ?? "";
+        // belt-and-suspenders: strip any "handle@ip" that slipped into a work-event summary
+        return System.Text.RegularExpressions.Regex.Replace(summary, @"[\w.\-]+@[\d.]+", "a volunteer");
     }
 
     private sealed record ContributePayload(int Size, int Rank, int[][]? U, int[][]? V, int[][]? W, string? Contributor);
@@ -973,6 +1042,10 @@ public static class Dashboard
     <div id="asks"></div>
   </div>
   <div class="panel wide">
+    <h2>visitor activity</h2>
+    <div class="feed" id="activity"></div>
+  </div>
+  <div class="panel wide">
     <h2>latest journal</h2>
     <div class="quote" id="journal">—</div>
   </div>
@@ -1139,6 +1212,17 @@ async function refreshConsole(){
   }catch(e){}
 }
 refreshConsole(); setInterval(refreshConsole,8000);
+
+// ── anonymized "other visitors" activity feed (bite 3): friendly, PII-free social proof ─────────
+async function refreshActivity(){
+  try{
+    const d=await (await fetch("/api/activity")).json();
+    const el=$("activity"); if(!el)return;
+    const items=d.items||[];
+    el.innerHTML=items.length?items.map(a=>'<div class="ev"><span class="t">'+esc(a.when)+'</span><span class="s">'+esc(a.label)+'</span></div>').join(""):'<div class="empty">quiet right now — be the first to interact.</div>';
+  }catch(e){}
+}
+refreshActivity(); setInterval(refreshActivity,5000);
 
 // ── token wallet ─────────────────────────────────────────────────────────────────────────────
 // Server keeps the authoritative balance (cookie-keyed). The client mirrors it only to show the pill,
