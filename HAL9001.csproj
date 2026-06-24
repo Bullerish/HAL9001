@@ -39,4 +39,16 @@
     <Compile Remove="handlers/**/*.cs" />
   </ItemGroup>
 
+  <!--
+    The dashboard's retro disk-grind / stepper-motor MP3s are embedded INTO HAL9001.dll. LogicalName
+    pins each resource name to the bare filename (e.g. "seek-short-1.mp3") so there's no namespace /
+    identifier mangling to chase. Because CI ships ONLY HAL9001.dll, embedding is what lets the audio
+    ride the one-file deploy and keeps the dashboard fully self-contained. Served from /audio/<name>.mp3.
+  -->
+  <ItemGroup>
+    <EmbeddedResource Include="audio\*.mp3">
+      <LogicalName>%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
 </Project>

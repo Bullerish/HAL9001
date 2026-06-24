@@ -96,6 +96,12 @@ public static class Dashboard
                 Write(ctx, "application/json", await WalletJsonAsync(core, ctx));
             else if (path == "/api/console")
                 Write(ctx, "application/json", await ConsoleJsonAsync(core));
+            else if (path.StartsWith("/audio/") && path.EndsWith(".mp3"))
+            {
+                byte[]? clip = TryGetAudio(path);
+                if (clip is null) { ctx.Response.StatusCode = 404; Write(ctx, "application/json", Err("not found")); }
+                else WriteBytes(ctx, "audio/mpeg", clip, "public, max-age=31536000, immutable");
+            }
             else
                 Write(ctx, "text/html; charset=utf-8", Html);
         }
@@ -113,6 +119,50 @@ public static class Dashboard
         ctx.Response.ContentType = contentType;
         ctx.Response.ContentLength64 = bytes.Length;
         ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+    }
+
+    private static void WriteBytes(HttpListenerContext ctx, string contentType, byte[] bytes, string cache)
+    {
+        ctx.Response.ContentType = contentType;
+        ctx.Response.Headers["Cache-Control"] = cache;
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+    }
+
+    // The retro audio clips live as embedded resources in HAL9001.dll (see HAL9001.csproj). They're
+    // read once into a name->bytes map. Keys are canonicalized (strip any "<ns>.audio." prefix, fold
+    // '_'->'-', lowercase) so /audio/seek-short-1.mp3 resolves whether or not MSBuild honored LogicalName.
+    // We only ever serve from this fixed in-memory map, so path traversal is impossible by construction.
+    private static Dictionary<string, byte[]>? _audio;
+    private static readonly object _audioLock = new();
+    private static string CanonAudio(string name)
+    {
+        int i = name.IndexOf(".audio.", StringComparison.OrdinalIgnoreCase);
+        if (i >= 0) name = name.Substring(i + ".audio.".Length);
+        return name.Replace('_', '-').ToLowerInvariant();
+    }
+    private static byte[]? TryGetAudio(string path)
+    {
+        string leaf = path.Substring("/audio/".Length);
+        if (leaf.Length == 0 || leaf.IndexOfAny(new[] { '/', '\\' }) >= 0 || leaf.Contains("..")) return null;
+        if (_audio is null)
+            lock (_audioLock)
+                if (_audio is null)
+                {
+                    var map = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+                    var asm = System.Reflection.Assembly.GetExecutingAssembly();
+                    foreach (string rn in asm.GetManifestResourceNames())
+                    {
+                        if (!rn.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase)) continue;
+                        using var s = asm.GetManifestResourceStream(rn);
+                        if (s is null) continue;
+                        using var ms = new MemoryStream();
+                        s.CopyTo(ms);
+                        map[CanonAudio(rn)] = ms.ToArray();
+                    }
+                    _audio = map;
+                }
+        return _audio.TryGetValue(CanonAudio(leaf), out byte[]? bytes) ? bytes : null;
     }
 
     // Pull everything the page shows from the shared hive, as one JSON document.
@@ -685,6 +735,14 @@ public static class Dashboard
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>HAL 9001</title>
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-DWRCFTP4G7"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', 'G-DWRCFTP4G7');
+</script>
 <style>
   :root{--bg:#000;--panel:#0a0506;--line:rgba(255,60,40,.16);--line2:rgba(255,60,40,.34);--txt:#b9b2ad;--dim:#6e5a55;--red:#ff2d18;--gold:#ffd166;}
   *{box-sizing:border-box;margin:0;padding:0}
@@ -887,6 +945,35 @@ function score(c){return c.metric==="muls"?Math.round(c.score)+" muls":c.score.t
 
 // ── audio ──────────────────────────────────────────────────────────────────────────────────────
 let AC=null,master=null,sound=false,analyser=null,vdata=null,vraf=0,vlevel=0;
+let bedGain=null,clips={},clipsKicked=false;
+// Real disk-grind/stepper samples (embedded in the DLL, served from /audio). The seek length scales
+// with how much code HAL is typing on screen at that moment: a short burst -> a 1s tick, a big
+// decomposition -> a 7s grind. grindloop is the low continuous bed that sits under the hum.
+const SEEK={short:["seek-short-1","seek-short-2","seek-short-3","seek-short-4","seek-short-5","seek-short-6","seek-short-7"],
+            mid:["seek-mid-1","seek-mid-2","seek-mid-3"],
+            long:["seek-long-1","seek-long-2"],
+            xlong:["seek-xlong-1","seek-xlong-2","seek-xlong-3"]};
+const ALLCLIPS=["grindloop"].concat(SEEK.short,SEEK.mid,SEEK.long,SEEK.xlong);
+function pickClip(a){return a[(Math.random()*a.length)|0];}
+function playClip(name,vol){
+  if(!AC||!sound||!clips[name])return false; // returns false if not yet decoded -> caller can fall back
+  const s=AC.createBufferSource();s.buffer=clips[name];
+  const g=AC.createGain();g.gain.value=vol==null?0.5:vol;
+  s.connect(g);g.connect(master);s.start();return true; // through master -> drives the eye + obeys mute
+}
+function playSeek(tier,vol){return playClip(pickClip(SEEK[tier]||SEEK.short),vol);}
+async function loadClips(){
+  if(clipsKicked||!AC)return; clipsKicked=true; // fetch+decode once, on first user gesture (autoplay policy)
+  await Promise.all(ALLCLIPS.map(async n=>{
+    try{ clips[n]=await AC.decodeAudioData(await (await fetch("/audio/"+n+".mp3")).arrayBuffer()); }catch(e){}
+  }));
+  startBed();
+}
+function startBed(){
+  if(!AC||!bedGain||bedGain._on||!clips["grindloop"])return;
+  const s=AC.createBufferSource();s.buffer=clips["grindloop"];s.loop=true;
+  s.connect(bedGain);s.start();bedGain._on=true; // low continuous grind bed, swelled by procLoop while busy
+}
 function initAudio(){
   AC=new (window.AudioContext||window.webkitAudioContext)();
   master=AC.createGain();master.gain.value=0;master.connect(AC.destination);
@@ -900,6 +987,7 @@ function initAudio(){
     const lg=AC.createGain();lg.gain.value=0.03;lfo.connect(lg);lg.connect(g.gain);lfo.start();
     o.connect(lp);lp.connect(g);g.connect(master);o.start();
   });
+  bedGain=AC.createGain();bedGain.gain.value=0.08;bedGain.connect(master); // grind bed (filled by loadClips)
   master.gain.linearRampToValueAtTime(0.45,AC.currentTime+3);
 }
 function tone(freq,dur,type,vol){
@@ -917,40 +1005,16 @@ const sfx={
   discovery:()=>arp(523.25,[0,4,7,12,16,19,24],0.2),
   click:()=>tone(880,0.06,"square",0.05),
 };
-// ── old-school "computer processing" chatter ────────────────────────────────────────────────────
-// Rapid random data blips (teletype/relay clatter) + occasional tape-seek sweeps. Runs BUSY while the
-// hive is grinding a matrix round, idles to a faint machine-tick between rounds. Routed through master,
-// so it also drives the eye flicker. All gated behind the sound toggle.
-let procUntil=0,procTimer=null,seekCd=0;
-function blipData(){
-  if(!AC||!sound)return;
-  const o=AC.createOscillator();o.type=Math.random()<0.5?"square":"sawtooth";
-  o.frequency.value=380+Math.random()*1500;
-  const g=AC.createGain();g.gain.value=0;o.connect(g);g.connect(master);
-  const t=AC.currentTime,dur=0.016+Math.random()*0.05;
-  g.gain.linearRampToValueAtTime(0.028+Math.random()*0.022,t+0.004);
-  g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
-  o.start(t);o.stop(t+dur+0.02);
-}
-function seekSweep(){
-  if(!AC||!sound)return;
-  const o=AC.createOscillator();o.type="square";
-  const g=AC.createGain();g.gain.value=0.022;o.connect(g);g.connect(master);
-  const t=AC.currentTime,up=Math.random()<0.5;
-  o.frequency.setValueAtTime(up?300:1500,t);
-  o.frequency.exponentialRampToValueAtTime(up?1500:300,t+0.18);
-  g.gain.exponentialRampToValueAtTime(0.0001,t+0.2);
-  o.start(t);o.stop(t+0.22);
-}
+// ── the "computer processing" grind ─────────────────────────────────────────────────────────────
+// The continuous low grindloop bed (started in loadClips) SWELLS while the hive is grinding a matrix
+// round and settles between rounds; real stepper/disk-seek one-shots fire on events and on CRT typing
+// (see react / crtAnimate). Everything routes through master, so it all drives the eye and obeys mute.
+let procUntil=0,procTimer=null;
 function procLoop(){
   if(!sound){procTimer=null;return;}
-  const now=Date.now(),busy=now<procUntil;
-  if(busy){
-    blipData(); if(Math.random()<0.55)blipData();         // dense clatter while computing
-    if(now>seekCd&&Math.random()<0.07){seekSweep();seekCd=now+1400;}
-  }else if(Math.random()<0.4){ blipData(); }               // faint idle machine-tick
-  const next=busy?(42+Math.random()*70):(260+Math.random()*420);
-  procTimer=setTimeout(procLoop,next);
+  const busy=Date.now()<procUntil;
+  if(bedGain&&AC)bedGain.gain.setTargetAtTime(busy?0.17:0.08,AC.currentTime,0.3);
+  procTimer=setTimeout(procLoop,busy?260:600);
 }
 // Kick the chatter into "busy" for ms milliseconds (safe to call with sound off — just arms the window).
 function startProcessing(ms){ procUntil=Math.max(procUntil,Date.now()+(ms||4000)); if(sound&&!procTimer)procLoop(); }
@@ -961,11 +1025,12 @@ function react(s){
              nodes:(s.nodesLive?s.nodesLive.total:0)||0,size:s.ladder?s.ladder.currentSize:0,
              top:(s.events&&s.events[0])?s.events[0].ts+s.events[0].summary:""};
   if(prev){
-    if(cur.disc>prev.disc){flareEye(true);if(sound)sfx.discovery();startProcessing(8000);}
-    else if(cur.records>prev.records){flareEye(false);if(sound)sfx.record();startProcessing(6000);}
-    if(cur.nodes>prev.nodes){flareEye(false);if(sound)sfx.node();}
-    if(cur.size>prev.size){flareEye(false);if(sound)sfx.rise();startProcessing(6000);}
-    if(cur.top!==prev.top){flareEye(false);if(sound)sfx.blip();startProcessing(4500);}
+    // real disk-seek one-shots sized to the event; synth sfx is the graceful fallback while clips decode
+    if(cur.disc>prev.disc){flareEye(true);if(sound&&!playSeek("xlong",0.6))sfx.discovery();startProcessing(8000);}
+    else if(cur.records>prev.records){flareEye(false);if(sound&&!playSeek("long",0.55))sfx.record();startProcessing(6000);}
+    if(cur.nodes>prev.nodes){flareEye(false);if(sound&&!playSeek("short",0.4))sfx.node();}
+    if(cur.size>prev.size){flareEye(false);if(sound&&!playSeek("mid",0.5))sfx.rise();startProcessing(6000);}
+    if(cur.top!==prev.top){flareEye(false);if(sound&&!playSeek("short",0.4))sfx.blip();startProcessing(4500);}
   }
   prev=cur;
 }
@@ -997,7 +1062,7 @@ $("snd").onclick=()=>{
   master.gain.setTargetAtTime(sound?0.45:0,AC.currentTime,0.4);
   $("snd").textContent=sound?"♪ sound on":"♪ sound off";
   $("snd").className="pill snd"+(sound?" on":"");
-  if(sound){startVisual();if(!procTimer)procLoop();} else {stopVisual();clearTimeout(procTimer);procTimer=null;}
+  if(sound){loadClips();startVisual();if(!procTimer)procLoop();} else {stopVisual();clearTimeout(procTimer);procTimer=null;}
 };
 
 // ── CRT console: type-animates real generated code, char by char ────────────────────────────────
@@ -1007,6 +1072,8 @@ function crtAnimate(){
   const el=$("crt-lines"); if(!el)return;
   // show first screenful immediately, then stream the rest char-by-char at 18 chars/s
   const lines=crtCode.split("\n");
+  // the real disk grind, length-matched to how much code is about to type onto the screen
+  if(sound){const n=lines.length;const tier=n<=6?"short":n<=14?"mid":n<=24?"long":"xlong";if(!playSeek(tier,0.5))sfx.blip();startProcessing(Math.min(8000,1400+n*180));}
   const firstPage=lines.slice(0,24).join("\n");
   el.textContent=firstPage;
   const rest=lines.slice(24).join("\n");
