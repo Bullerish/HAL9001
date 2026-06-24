@@ -254,7 +254,7 @@ through Turso (they do not talk to each other directly):
 - **Caddy** fronts the dashboard with automatic Let's Encrypt TLS at `https://hal9001.io`.
 - Secrets live only in `/etc/hal9001/hal.env` (chmod 600), read at service start. Never in git, never in CI.
 
-**The box:** VPS `67.217.245.253`, domain `hal9001.io`. The repeatable kit is in
+**The box:** a VPS (IP in the private deploy notes), domain `hal9001.io`. The repeatable kit is in
 [`deploy/`](deploy/) — read [`deploy/README.md`](deploy/README.md) for the full walk-through.
 Summary:
 
@@ -282,7 +282,7 @@ If `https://hal9001.io` 404s but `curl localhost:8765` on the box works, this is
 job: build a linux-x64 self-contained publish, `scp` **only `HAL9001.dll`** to the box, `chown
 hal:hal`, restart both services, curl-verify the dashboard. **CI never sees any secret** — it only
 needs SSH. Required GitHub repo secrets (Settings → Secrets and variables → Actions):
-`DEPLOY_HOST` (=`67.217.245.253`), `DEPLOY_USER` (=`root`), `DEPLOY_SSH_KEY` (the **private** half
+`DEPLOY_HOST` (=`<box-ip>`), `DEPLOY_USER` (=`<deploy-user>`), `DEPLOY_SSH_KEY` (the **private** half
 of a keypair whose public half is in the box's `~/.ssh/authorized_keys`). To auto-deploy on push,
 uncomment the `push:` trigger once trusted.
 
@@ -514,8 +514,8 @@ context. (The encoded folder name differs per machine — it derives from the re
 ## 18. Open user actions (carried over — do these)
 
 1. **Redeploy the live box** so hal9001.io runs the current build (likely stale — §2). Highest leverage.
-2. **Add the 3 GitHub repo secrets** for CI/CD (§8.3): `DEPLOY_HOST=67.217.245.253`,
-   `DEPLOY_USER=root`, `DEPLOY_SSH_KEY=<private deploy key>`. Then delete any local hal-deploy key files.
+2. **Add the 3 GitHub repo secrets** for CI/CD (§8.3): `DEPLOY_HOST=<box-ip>`,
+   `DEPLOY_USER=<deploy-user>`, `DEPLOY_SSH_KEY=<private deploy key>`. Then delete any local hal-deploy key files.
 3. **Stripe go-live:** put `STRIPE_SECRET_KEY` (`rk_live_…`) + `STRIPE_WEBHOOK_SECRET` (`whsec_…`)
    into the box's `hal.env`; create the webhook endpoint at `https://hal9001.io/api/stripe-webhook`
    subscribed to `checkout.session.completed`. Until set, checkout + webhook are 404.

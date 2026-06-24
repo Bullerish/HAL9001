@@ -7,8 +7,8 @@ name: Deploy HAL9001
 # and are read there at service start. CI only needs SSH access to copy the DLL and restart.
 #
 # Required GitHub repo secrets (Settings → Secrets and variables → Actions):
-#   DEPLOY_HOST     - the server IP/hostname (e.g. 67.217.245.253)
-#   DEPLOY_USER     - the SSH user that can chown + systemctl restart (e.g. root)
+#   DEPLOY_HOST     - the server IP/hostname (set in repo secrets, not committed here)
+#   DEPLOY_USER     - the SSH user that can chown + systemctl restart
 #   DEPLOY_SSH_KEY  - the PRIVATE half of a deploy keypair whose PUBLIC half is in the
 #                     server's ~/.ssh/authorized_keys
 
