@@ -63,6 +63,7 @@ public static class MatmulRace
 
         double bestScore = double.MaxValue, baseline;
         string bestStrategy = "", bestSource = "";
+        string? bestScheme = null; // the winning U/V/W triple JSON (muls track only), persisted for the dashboard
 
         // Daily budget (bite 21): when the LLM budget is spent, the FREE tensor search still runs
         // (muls path), but LLM candidate generation pauses. The hive keeps grinding matrices for $0.
@@ -71,7 +72,7 @@ public static class MatmulRace
 
         if (metric == Metric.Muls)
         {
-            (bestScore, bestStrategy, bestSource) =
+            (bestScore, bestStrategy, bestSource, bestScheme) =
                 await EvaluateMulsAsync(client, champ, size, a, b, reference, randomCandidates, llmAllowed, ct);
             baseline = (double)size * size * size; // naive scalar-multiplication count
         }
@@ -88,7 +89,7 @@ public static class MatmulRace
 
         if (newRecord)
             await core.SetMatmulChampionAsync(
-                $"127.0.0.1:{myPort}", size, bestStrategy, metric, bestScore, speedup, bestSource);
+                $"127.0.0.1:{myPort}", size, bestStrategy, metric, bestScore, speedup, bestSource, bestScheme);
 
         // ── NOVELTY GATE (bite 16) ──────────────────────────────────────────────────────────
         // A new mult-count record might be genuinely novel (beats the best known to humanity). Only
@@ -254,12 +255,13 @@ public static class MatmulRace
     }
 
     // ── multiplication-count track (small sizes) ──────────────────────────────────────────
-    private static async Task<(double bestMuls, string strategy, string source)> EvaluateMulsAsync(
+    private static async Task<(double bestMuls, string strategy, string source, string? scheme)> EvaluateMulsAsync(
         AnthropicClient client, Champion? champ, int size,
         double[,] a, double[,] b, double[,] reference, int randomCandidates, bool llmAllowed, CancellationToken ct)
     {
         double bestMuls = double.MaxValue;
         string bestStrategy = "", bestSource = "";
+        string? bestScheme = null; // the winning bilinear triple (U/V/W) as JSON, when a tensor-search scheme wins
 
         // LLM-FREE FIRST (bite 17): DERIVE a better algorithm by searching the matmul tensor directly —
         // target one multiplication below the current best. This runs even when the LLM budget is spent
@@ -273,7 +275,7 @@ public static class MatmulRace
                 string src = TensorSearch.Synthesize(d);
                 var (ok, muls, exact) = EvaluateCountingSource(src, size);
                 if (ok && exact && muls < bestMuls)
-                { bestMuls = muls; bestStrategy = "tensor-search (LLM-free derivation)"; bestSource = src; }
+                { bestMuls = muls; bestStrategy = "tensor-search (LLM-free derivation)"; bestSource = src; bestScheme = SchemeJson(d); }
             }
         }
 
@@ -303,10 +305,29 @@ public static class MatmulRace
                 try { got = fn(sa, sb); } catch { continue; }
                 long muls = Scalar.Muls;
                 if (!CompareScalar(reference, got)) continue;
-                if (muls < bestMuls) { bestMuls = muls; bestStrategy = cand.Strategy; bestSource = cand.Source; }
+                if (muls < bestMuls) { bestMuls = muls; bestStrategy = cand.Strategy; bestSource = cand.Source; bestScheme = null; } // LLM source has no factor triple
             }
         }
-        return (bestMuls, bestStrategy, bestSource);
+        return (bestMuls, bestStrategy, bestSource, bestScheme);
+    }
+
+    // Serialize a derived bilinear decomposition's factor triple as compact JSON {n,rank,u,v,w} for the
+    // dashboard CRT (bite 2) — the matrices the hive is actually working. Same shape the volunteer path uses.
+    private static string SchemeJson(TensorSearch.Decomposition d)
+    {
+        static string Mat(int[,] m)
+        {
+            int rows = m.GetLength(0), cols = m.GetLength(1);
+            var rj = new string[rows];
+            for (int r = 0; r < rows; r++)
+            {
+                var cells = new int[cols];
+                for (int c = 0; c < cols; c++) cells[c] = m[r, c];
+                rj[r] = "[" + string.Join(",", cells) + "]";
+            }
+            return "[" + string.Join(",", rj) + "]";
+        }
+        return $"{{\"n\":{d.N},\"rank\":{d.Rank},\"u\":{Mat(d.U)},\"v\":{Mat(d.V)},\"w\":{Mat(d.W)}}}";
     }
 
     private static bool CompareScalar(double[,] want, Scalar[,] got)

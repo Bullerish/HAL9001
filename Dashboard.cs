@@ -326,6 +326,18 @@ public static class Dashboard
         }
         catch { sb.Append("[ offline ] hive feed unavailable.\n"); }
 
+        // ── the matrices HAL is actually working: the latest persisted bilinear scheme (U/V/W triple) ──
+        try
+        {
+            var sc = await core.GetLatestSchemeAsync();
+            if (sc is not null)
+            {
+                string grids = RenderScheme(sc.Value.Scheme);
+                if (grids.Length > 0) { sb.Append('\n').Append(grids); rev += "|s" + sc.Value.Ts; }
+            }
+        }
+        catch { }
+
         // ── latest code HAL wrote: the actual generated source (a tool or a matmul kernel) ──
         try
         {
@@ -369,6 +381,35 @@ public static class Dashboard
         return s.Length > max ? s[..max] + "..." : s;
     }
 
+    // Render a persisted bilinear scheme (the {n,rank,u,v,w} JSON) as ASCII U/V/W grids for the CRT —
+    // the literal "matrices being worked". Kept to small n so the grids stay readable in the terminal pane.
+    private sealed record SchemeDto(int n, int rank, int[][]? u, int[][]? v, int[][]? w);
+    private static string RenderScheme(string json)
+    {
+        SchemeDto? d;
+        try { d = JsonSerializer.Deserialize<SchemeDto>(json, JsonOpts); } catch { return ""; }
+        if (d is null || d.u is null || d.v is null || d.w is null) return "";
+        if (d.n < 2 || d.n > 4) return ""; // larger grids are unreadable in the terminal pane
+        var sb = new System.Text.StringBuilder();
+        sb.Append("// == matrices being worked · ").Append(d.n).Append('x').Append(d.n)
+          .Append(" · rank ").Append(d.rank).Append(" (").Append(d.rank).Append(" muls) ==\n");
+        sb.Append("// product P_r = (U_r . flatA) x (V_r . flatB);  output C = sum_r W_r . P_r\n");
+        AppendGrid(sb, "U  . A-side combination per product", d.u);
+        AppendGrid(sb, "V  . B-side combination per product", d.v);
+        AppendGrid(sb, "W  . how products assemble each output cell", d.w);
+        return sb.ToString();
+    }
+    private static void AppendGrid(System.Text.StringBuilder sb, string title, int[][] m)
+    {
+        sb.Append('\n').Append("  ").Append(title).Append('\n');
+        foreach (var row in m)
+        {
+            sb.Append("   ");
+            foreach (int v in row) sb.Append(v == 0 ? "  0" : v == 1 ? " +1" : v == -1 ? " -1" : v.ToString().PadLeft(3));
+            sb.Append('\n');
+        }
+    }
+
     private sealed record ContributePayload(int Size, int Rank, int[][]? U, int[][]? V, int[][]? W, string? Contributor);
 
     // THE TRUST BOUNDARY. A worker sends only NUMBERS (a candidate decomposition), never code. The
@@ -401,7 +442,8 @@ public static class Dashboard
         { await Log(core, "contribution-rejected", $"{who}: {p.Size}x{p.Size} {muls} muls — not better than {champ.Score:0}"); return Reject($"verified, but not an improvement ({muls} ≥ current {champ.Score:0})"); }
 
         double speedup = (double)p.Size * p.Size * p.Size / muls;
-        await core.SetMatmulChampionAsync(who, p.Size, "volunteer-contributed", MatmulRace.Metric.Muls, muls, speedup, src);
+        string scheme = JsonSerializer.Serialize(new { n = p.Size, rank = p.Rank, u = p.U, v = p.V, w = p.W }, JsonOpts);
+        await core.SetMatmulChampionAsync(who, p.Size, "volunteer-contributed", MatmulRace.Metric.Muls, muls, speedup, src, scheme);
         await Log(core, "contribution-accepted", $"{who}: NEW {p.Size}x{p.Size} champion — {muls} muls ({speedup:F2}x)");
 
         var (verdict, best, lower) = MatmulKnownBest.Classify(p.Size, muls);

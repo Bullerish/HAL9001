@@ -154,10 +154,13 @@ public sealed class AgentCore
             "strategy TEXT NOT NULL DEFAULT '', metric TEXT NOT NULL DEFAULT 'ms', " +
             "score REAL NOT NULL DEFAULT 999999, median_ms REAL NOT NULL DEFAULT 999999, " +
             "speedup REAL NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT '', " +
-            "recorded_at TEXT NOT NULL DEFAULT '')");
+            "scheme TEXT NOT NULL DEFAULT '', recorded_at TEXT NOT NULL DEFAULT '')");
         // Migrate a bite-14 table (which lacked metric/score) — duplicate-column errors are ignored.
         try { await _turso.ExecuteAsync("ALTER TABLE matmul_records ADD COLUMN metric TEXT NOT NULL DEFAULT 'ms'"); } catch { }
         try { await _turso.ExecuteAsync("ALTER TABLE matmul_records ADD COLUMN score REAL NOT NULL DEFAULT 999999"); } catch { }
+        // Bite-2 (honest dashboard): the winning bilinear scheme's U/V/W triple as JSON, so the CRT can
+        // render the actual matrices being worked. Empty for LLM-authored champions (no factor triple).
+        try { await _turso.ExecuteAsync("ALTER TABLE matmul_records ADD COLUMN scheme TEXT NOT NULL DEFAULT ''"); } catch { }
         // Prime Directive ladder (bite 15): the single shared cursor up the size ladder. idx is the
         // index into MatmulLadder.Sizes the swarm is currently racing; stale counts rounds since the
         // last improvement at that size (plateau detection); done=1 once the top size has converged.
@@ -1447,7 +1450,8 @@ public sealed class AgentCore
 
     /// <summary>Write a new matmul champion to Turso (overwrites any prior record for this size).</summary>
     public async Task SetMatmulChampionAsync(
-        string node, int size, string strategy, MatmulRace.Metric metric, double score, double speedup, string source)
+        string node, int size, string strategy, MatmulRace.Metric metric, double score, double speedup, string source,
+        string? scheme = null)
     {
         if (_turso is null) return;
         try
@@ -1457,10 +1461,10 @@ public sealed class AgentCore
             double medianMs = metric == MatmulRace.Metric.Time ? score : 0;
             await _turso.ExecuteAsync(
                 "INSERT OR REPLACE INTO matmul_records " +
-                "(size, node, strategy, metric, score, median_ms, speedup, source, recorded_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                "(size, node, strategy, metric, score, median_ms, speedup, source, scheme, recorded_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 size.ToString(), node, strategy, metricName,
                 score.ToString("F6", Inv), medianMs.ToString("F6", Inv),
-                speedup.ToString("F6", Inv), source, DateTime.UtcNow.ToString("o"));
+                speedup.ToString("F6", Inv), source, scheme ?? "", DateTime.UtcNow.ToString("o"));
             string scoreText = metric == MatmulRace.Metric.Muls ? $"{score:F0} muls" : $"{score:F2}ms";
             await Events.AppendAsync("matmul-record",
                 $"new {size}x{size} champion: {scoreText} ({speedup:F2}x vs naive) by {node} — " +
@@ -1818,6 +1822,23 @@ public sealed class AgentCore
         if (mm is null) return tool;
         // ISO-8601 "o" timestamps sort lexicographically — newer string wins.
         return string.CompareOrdinal(tool.Value.Ts, mm.Value.Ts) >= 0 ? tool : mm;
+    }
+
+    /// <summary>The most recent persisted bilinear scheme (U/V/W triple as JSON {n,rank,u,v,w}) from a
+    /// tensor-search or volunteer champion — the literal "matrices being worked" for the dashboard CRT
+    /// (bite 2). LLM-authored champions carry no triple, so this returns the latest size that has one.</summary>
+    public async Task<(int Size, string Scheme, string Ts)?> GetLatestSchemeAsync()
+    {
+        if (_turso is null) return null;
+        try
+        {
+            var r = await _turso.ExecuteAsync(
+                "SELECT size, scheme, recorded_at FROM matmul_records WHERE scheme != '' ORDER BY recorded_at DESC LIMIT 1");
+            if (r.Count > 0 && r[0].Count >= 3 && !string.IsNullOrEmpty(r[0][1]))
+                return (int.TryParse(r[0][0], out int s) ? s : 0, r[0][1]!, r[0][2] ?? "");
+        }
+        catch { }
+        return null;
     }
 
     // ── token wallet (bite 23): free starter grant, enforced spend, donation-creditable ───────────
