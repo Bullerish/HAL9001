@@ -396,7 +396,7 @@ public static class Dashboard
         {
             born,
             lifeEvents       = total,
-            toolsInvented    = K("capability-commissioned"),
+            toolsInvented    = K("capability-commissioned", "curiosity-resolved"),
             factsLearned     = K("fact-remembered", "fact-derived"),
             recordsSet       = K("matmul-record"),
             roundsRaced      = K("matmul-round"),
@@ -419,23 +419,29 @@ public static class Dashboard
     // links to its real, public source on GitHub so a visitor can independently verify HAL wrote it.
     private static async Task<string> FunctionsJsonAsync(AgentCore core)
     {
+        // HAL records building a tool TWO ways: via the router (capability-commissioned) and via a
+        // visitor "topic" steer / its own curiosity (curiosity-resolved → CommissionProposalAsync). Both
+        // are real functions it wrote, so the catalog must merge them or it silently undercounts.
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var items = new List<object>();
         try
         {
-            // every capability ever commissioned, newest first (kind-filtered so an early one is never
-            // missed by a recency window).
-            var commissioned = await core.Events.ByKindAsync("capability-commissioned", 500);
-            foreach (var e in commissioned)
+            var events = new List<HiveEvent>();
+            events.AddRange(await core.Events.ByKindAsync("capability-commissioned", 500));
+            events.AddRange(await core.Events.ByKindAsync("curiosity-resolved", 500));
+            foreach (var e in events.OrderByDescending(ev => ev.Timestamp, StringComparer.Ordinal))
             {
                 string s = e.Summary ?? "";
-                string name = Between(s, "'", "'");
-                string bracket = Between(s, "[", "]");              // "Int→String, Stable"
+                string name = Between(s, "'", "'");                 // both formats single-quote the name
+                if (string.IsNullOrEmpty(name) || !seen.Add(name)) continue; // newest occurrence wins
+                string bracket = Between(s, "[", "]");              // "Int→String, Stable" — same in both
                 string sig = bracket, stability = "";
                 int comma = bracket.LastIndexOf(", ", StringComparison.Ordinal);
                 if (comma >= 0) { sig = bracket[..comma]; stability = bracket[(comma + 2)..]; }
                 int ci = s.IndexOf("]: ", StringComparison.Ordinal);
-                string desc = ci >= 0 ? s[(ci + 3)..] : "";
-                if (string.IsNullOrEmpty(name)) name = e.Ref ?? "tool";
+                string desc;
+                if (ci >= 0) desc = s[(ci + 3)..];                  // capability-commissioned: "...]: <desc>"
+                else { string req = Between(s, "\"", "\""); desc = req.Length > 0 ? "learned to answer: " + req : ""; } // curiosity-resolved
                 // a GitHub code-search that resolves to the exact source file via its metadata header
                 string sourceUrl = "https://github.com/search?q=" +
                     Uri.EscapeDataString($"repo:Bullerish/HAL9001 \"hal9001:name={name}\"") + "&type=code";
@@ -1505,7 +1511,6 @@ async function refreshGrowth(){
     }).join("");
     const since=$("since");
     if(since)since.textContent=g.born?("· alive "+ago(g.born)+" · "+g.born.slice(0,10)):"";
-    if($("pf-tools"))$("pf-tools").textContent=(g.toolsInvented||0).toLocaleString();
     if($("pf-records"))$("pf-records").textContent=(g.recordsSet||0).toLocaleString();
   }catch(e){}
 }
@@ -1519,6 +1524,7 @@ async function refreshFunctions(){
     const el=$("functions"); if(!el)return;
     const items=d.items||[];
     const cnt=$("fn-count"); if(cnt)cnt.textContent=(d.count||0)+" written · all open-source";
+    if($("pf-tools"))$("pf-tools").textContent=(d.count||0).toLocaleString(); // proof count = distinct catalog
     if(!items.length){ el.innerHTML='<div class="empty">no functions yet — direct HAL to invent one below.</div>'; return; }
     const newestTs=items[0].ts; const firstLoad=fnSeen===null;
     el.innerHTML=items.map(f=>{
