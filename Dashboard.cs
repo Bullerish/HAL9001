@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Net;
+using System.Net.Http;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -82,17 +84,18 @@ public static class Dashboard
             }
             else if (path == "/api/donate" && ctx.Request.HttpMethod == "POST")
                 Write(ctx, "application/json", await HandleDonateAsync(core, ctx, ip));
+            else if (path == "/api/checkout" && ctx.Request.HttpMethod == "POST")
+                Write(ctx, "application/json", await HandleCheckoutAsync(core, ctx, ip));
+            else if (path == "/api/stripe-webhook" && ctx.Request.HttpMethod == "POST")
+                Write(ctx, "application/json", await HandleStripeWebhookAsync(core, ctx, ip));
             else if (path == "/api/choices")
                 Write(ctx, "application/json", JsonSerializer.Serialize(Choices.Select(c => new { id = c.Id, label = c.Label, desc = c.Desc, cost = c.Cost }), JsonOpts));
             else if (path == "/api/choose" && ctx.Request.HttpMethod == "POST")
                 Write(ctx, "application/json", await HandleChooseAsync(core, ctx, ip));
+            else if (path == "/api/wallet")
+                Write(ctx, "application/json", await WalletJsonAsync(core, ctx));
             else if (path == "/api/console")
-            {
-                var src = await core.GetLatestChampionSourceAsync();
-                Write(ctx, "application/json", src is not null
-                    ? JsonSerializer.Serialize(new { title = src.Value.Title, code = src.Value.Source }, JsonOpts)
-                    : JsonSerializer.Serialize(new { title = "awaiting first champion...", code = "// HAL 9001 initializing\n// searching for optimal matrix decompositions\n// stand by for transmission" }, JsonOpts));
-            }
+                Write(ctx, "application/json", await ConsoleJsonAsync(core));
             else
                 Write(ctx, "text/html; charset=utf-8", Html);
         }
@@ -235,6 +238,82 @@ public static class Dashboard
         return JsonSerializer.Serialize(new { size, targetRank = Math.Max(1, target), metric = "muls" }, JsonOpts);
     }
 
+    // The CRT console: a LIVE green-terminal transcript of what the hive is doing (matrix rounds AND tools
+    // it's inventing on visitor request), followed by the most recent code it actually wrote. Everything is
+    // read from the shared hive (this is a separate process from the swarm), so it only ever reflects real
+    // work the running nodes have done — never anything fabricated.
+    private static async Task<string> ConsoleJsonAsync(AgentCore core)
+    {
+        var sb = new System.Text.StringBuilder();
+        string rev = "init";
+        string title = "HAL 9001 · forge";
+
+        // ── live activity: recent work events (matrix rounds + tool builds), oldest→newest ──
+        try
+        {
+            var recent = await core.Events.RecentAsync(80); // oldest→newest
+            var feed = recent.Where(e => e.Kind.StartsWith("matmul") || e.Kind.StartsWith("novelty")
+                                      || e.Kind == "contribution-accepted" || e.Kind.StartsWith("steer")
+                                      || e.Kind == "curiosity-resolved")
+                             .TakeLast(16).ToList();
+            sb.Append("HAL 9001 · FORGE — live code synthesis\n");
+            sb.Append("--------------------------------------\n");
+            if (feed.Count == 0)
+                sb.Append("[ booting ] no work recorded yet. the hive is warming up...\n");
+            foreach (var e in feed)
+            {
+                string t = (e.Timestamp ?? "").Replace("T", " ");
+                t = t.Length >= 19 ? t.Substring(11, 8) : t; // HH:MM:SS
+                sb.Append('[').Append(t).Append("] ").Append(Glyph(e.Kind, e.Summary)).Append(' ')
+                  .Append(OneLine(e.Summary, 110)).Append('\n');
+            }
+            if (feed.Count > 0) rev = feed[^1].Timestamp + "|" + feed.Count;
+        }
+        catch { sb.Append("[ offline ] hive feed unavailable.\n"); }
+
+        // ── latest code HAL wrote: the actual generated source (a tool or a matmul kernel) ──
+        try
+        {
+            var art = await core.GetLatestArtifactAsync();
+            if (art is not null)
+            {
+                title = art.Value.Title;
+                sb.Append('\n').Append("// == latest code HAL wrote · ").Append(art.Value.Title).Append(" ==\n");
+                sb.Append(art.Value.Source);
+                rev += "|" + art.Value.Ts; // re-types whenever a newer artifact appears
+            }
+            else
+            {
+                sb.Append("\n// no code yet — searching for optimal matrix decompositions...\n");
+            }
+        }
+        catch { }
+
+        return JsonSerializer.Serialize(new { title, code = sb.ToString(), rev }, JsonOpts);
+    }
+
+    // A small glyph per event kind so the terminal log reads like a build/run feed.
+    private static string Glyph(string kind, string summary) => kind switch
+    {
+        "matmul-size-converged" => "^^",
+        "matmul-ladder-done" => "**",
+        "matmul-challenged" => ">>",
+        "contribution-accepted" => "++",
+        "steer-building" => "::",
+        "steer-done" => "OK",
+        "curiosity-resolved" => "++",
+        _ when kind.StartsWith("novelty") => "!!",
+        _ when (summary ?? "").Contains("NEW RECORD") => "OK",
+        _ => " >",
+    };
+
+    private static string OneLine(string? s, int max)
+    {
+        if (string.IsNullOrEmpty(s)) return "";
+        s = s.Replace('\n', ' ').Replace('\r', ' ').Replace('\t', ' ').Trim();
+        return s.Length > max ? s[..max] + "..." : s;
+    }
+
     private sealed record ContributePayload(int Size, int Rank, int[][]? U, int[][]? V, int[][]? W, string? Contributor);
 
     // THE TRUST BOUNDARY. A worker sends only NUMBERS (a candidate decomposition), never code. The
@@ -294,7 +373,7 @@ public static class Dashboard
     //   • rate-limited per IP, body size-capped, JSON strictly parsed;
     //   • boost is bounded/clamped in AgentCore; an "ask" is sanitized + queued, never executed —
     //     HAL only ever REPLIES to it via the tool-less voice path. No code generation, ever.
-    private sealed record DonatePayload(string? Action, int? Minutes, double? Usd, string? Text, string? From);
+    private sealed record DonatePayload(string? Action, int? Minutes, double? Usd, string? Text, string? From, string? Vid, int? Tokens);
 
     private static async Task<string> HandleDonateAsync(AgentCore core, HttpListenerContext ctx, string ip)
     {
@@ -326,7 +405,157 @@ public static class Dashboard
             double added = await core.AddBudgetBonusAsync(p.Usd ?? 1.0);
             return added > 0 ? JsonSerializer.Serialize(new { ok = true, fundedUsd = added }, JsonOpts) : Err("fund failed");
         }
+        if (action == "tokens")
+        {
+            // Credit tokens to a visitor's wallet (Stripe webhook → this, with the buyer's vid). Tokens are
+            // what unlock the paid menu actions (invent-a-tool, boost). Budget is still the hard cost cap.
+            if (string.IsNullOrEmpty(p.Vid)) { ctx.Response.StatusCode = 400; return Err("missing vid"); }
+            int n = Math.Clamp(p.Tokens ?? 0, 1, 1000);
+            int bal = await core.WalletCreditAsync(p.Vid!, n);
+            return bal > 0 ? JsonSerializer.Serialize(new { ok = true, tokens = bal }, JsonOpts) : Err("credit failed");
+        }
         ctx.Response.StatusCode = 400; return Err("unknown action");
+    }
+
+    // ── Stripe checkout + webhook (bite 24) — buy tokens, hosted by Stripe ─────────────────────────
+    // Money flow, kept deliberately narrow:
+    //   • /api/checkout  : the browser asks for a token PACK (id only); the server, holding STRIPE_SECRET_KEY,
+    //                      creates a Stripe Checkout Session priced server-side and returns its hosted URL.
+    //                      The browser never sees a card; prices/quantities can't be tampered with.
+    //   • /api/stripe-webhook : Stripe calls this on payment. We verify the signature with
+    //                      STRIPE_WEBHOOK_SECRET, then credit the buyer's wallet ONCE (idempotent per session).
+    //                      This is the ONLY thing that can credit a purchased wallet — the browser cannot.
+    // Both are OFF (404) unless their secret env var is set, so nothing here is live until you wire the keys.
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(20) };
+    private sealed record TokenPack(string Id, int Tokens, long Cents, string Name);
+    private static readonly TokenPack[] Packs =
+    {
+        new("s", 30,  300,  "HAL 9001 · 30 tokens"),
+        new("m", 120, 1000, "HAL 9001 · 120 tokens"),
+        new("l", 350, 2500, "HAL 9001 · 350 tokens"),
+    };
+    private sealed record CheckoutPayload(string? Pack);
+
+    private static async Task<string> HandleCheckoutAsync(AgentCore core, HttpListenerContext ctx, string ip)
+    {
+        if (!RateOk(ip, 10)) { ctx.Response.StatusCode = 429; return Err("rate limited"); }
+        string key = Environment.GetEnvironmentVariable("STRIPE_SECRET_KEY") ?? "";
+        if (key.Length == 0) { ctx.Response.StatusCode = 404; return Err("checkout disabled"); }
+
+        string? body = await ReadBodyAsync(ctx, 512);
+        if (body is null) { ctx.Response.StatusCode = 413; return Err("payload too large"); }
+        string packId; try { packId = JsonSerializer.Deserialize<CheckoutPayload>(body, JsonOpts)?.Pack ?? ""; } catch { ctx.Response.StatusCode = 400; return Err("bad json"); }
+        TokenPack? pack = Packs.FirstOrDefault(p => p.Id == packId);
+        if (pack is null) { ctx.Response.StatusCode = 400; return Err("unknown pack"); }
+
+        string vid = EnsureVid(ctx); // the wallet the purchase will credit (carried as Stripe metadata)
+        string baseUrl = (Environment.GetEnvironmentVariable("HAL_PUBLIC_URL") ?? "https://hal9001.io").TrimEnd('/');
+
+        // Price/quantity are set HERE, server-side — the client only ever names a pack id.
+        var form = new Dictionary<string, string>
+        {
+            ["mode"] = "payment",
+            ["success_url"] = baseUrl + "/?refuel=ok",
+            ["cancel_url"] = baseUrl + "/?refuel=cancel",
+            ["client_reference_id"] = vid,
+            ["metadata[vid]"] = vid,
+            ["metadata[tokens]"] = pack.Tokens.ToString(),
+            ["line_items[0][quantity]"] = "1",
+            ["line_items[0][price_data][currency]"] = "usd",
+            ["line_items[0][price_data][unit_amount]"] = pack.Cents.ToString(),
+            ["line_items[0][price_data][product_data][name]"] = pack.Name,
+        };
+
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Post, "https://api.stripe.com/v1/checkout/sessions");
+            req.Headers.Add("Authorization", "Bearer " + key);
+            req.Content = new FormUrlEncodedContent(form);
+            using var resp = await Http.SendAsync(req);
+            string rb = await resp.Content.ReadAsStringAsync();
+            if (!resp.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"[stripe] checkout create failed {(int)resp.StatusCode}: {rb}"); // server log only
+                ctx.Response.StatusCode = 502; return Err("checkout unavailable");
+            }
+            using var doc = JsonDocument.Parse(rb);
+            string url = doc.RootElement.TryGetProperty("url", out var u) ? (u.GetString() ?? "") : "";
+            if (url.Length == 0) { ctx.Response.StatusCode = 502; return Err("checkout unavailable"); }
+            return JsonSerializer.Serialize(new { ok = true, url }, JsonOpts);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[stripe] checkout error: {ex.Message}");
+            ctx.Response.StatusCode = 502; return Err("checkout unavailable");
+        }
+    }
+
+    private static async Task<string> HandleStripeWebhookAsync(AgentCore core, HttpListenerContext ctx, string ip)
+    {
+        string whsec = Environment.GetEnvironmentVariable("STRIPE_WEBHOOK_SECRET") ?? "";
+        if (whsec.Length == 0) { ctx.Response.StatusCode = 404; return Err("webhook disabled"); }
+        if (!RateOk(ip, 120)) { ctx.Response.StatusCode = 429; return Err("rate limited"); } // Stripe bursts retries
+
+        string? body = await ReadBodyAsync(ctx, 256_000);
+        if (body is null) { ctx.Response.StatusCode = 413; return Err("payload too large"); }
+        string sigHeader = ctx.Request.Headers["Stripe-Signature"] ?? "";
+        if (!StripeSignatureValid(sigHeader, body, whsec)) { ctx.Response.StatusCode = 400; return Err("bad signature"); }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+            string type = root.TryGetProperty("type", out var t) ? (t.GetString() ?? "") : "";
+            if (type == "checkout.session.completed")
+            {
+                var obj = root.GetProperty("data").GetProperty("object");
+                string sessionId = obj.TryGetProperty("id", out var sid) ? (sid.GetString() ?? "") : "";
+                string payStatus = obj.TryGetProperty("payment_status", out var ps) ? (ps.GetString() ?? "") : "";
+                string vid = "", tokensStr = "";
+                if (obj.TryGetProperty("metadata", out var md) && md.ValueKind == JsonValueKind.Object)
+                {
+                    if (md.TryGetProperty("vid", out var mv)) vid = mv.GetString() ?? "";
+                    if (md.TryGetProperty("tokens", out var mt)) tokensStr = mt.GetString() ?? "";
+                }
+                if (payStatus == "paid" && vid.Length > 0 && sessionId.Length > 0 && int.TryParse(tokensStr, out int tokens) && tokens > 0)
+                {
+                    if (await core.ClaimStripeEventAsync(sessionId)) // credit once per paid session
+                    {
+                        int bal = await core.WalletCreditAsync(vid, tokens);
+                        await Log(core, "tokens-purchased", $"{vid[..Math.Min(8, vid.Length)]}… bought {tokens} tokens (balance {bal})");
+                    }
+                }
+            }
+        }
+        catch (Exception ex) { Console.WriteLine($"[stripe] webhook handle error: {ex.Message}"); }
+        // Once the signature is valid we always ACK 200, so Stripe won't retry an event we've accepted.
+        return JsonSerializer.Serialize(new { received = true }, JsonOpts);
+    }
+
+    // Verify a Stripe webhook signature: HMAC-SHA256(secret, "{t}.{payload}") must match a v1 sig from the
+    // Stripe-Signature header, within a replay window, compared in constant time.
+    private static bool StripeSignatureValid(string header, string payload, string secret)
+    {
+        if (string.IsNullOrEmpty(header)) return false;
+        string ts = ""; var v1 = new List<string>();
+        foreach (var part in header.Split(','))
+        {
+            int eq = part.IndexOf('=');
+            if (eq <= 0) continue;
+            string k = part[..eq].Trim(), val = part[(eq + 1)..].Trim();
+            if (k == "t") ts = val;
+            else if (k == "v1") v1.Add(val);
+        }
+        if (ts.Length == 0 || v1.Count == 0 || !long.TryParse(ts, out long tsUnix)) return false;
+        long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        if (Math.Abs(now - tsUnix) > 600) return false; // 10-minute replay tolerance
+
+        byte[] mac;
+        using (var h = new HMACSHA256(Encoding.UTF8.GetBytes(secret)))
+            mac = h.ComputeHash(Encoding.UTF8.GetBytes(ts + "." + payload));
+        string expected = Convert.ToHexString(mac).ToLowerInvariant();
+        foreach (var sig in v1) if (CtEquals(expected, sig)) return true;
+        return false;
     }
 
     private static string Err(string m) => JsonSerializer.Serialize(new { ok = false, error = m }, JsonOpts);
@@ -358,8 +587,54 @@ public static class Dashboard
         string id; try { id = JsonSerializer.Deserialize<ChoosePayload>(body, JsonOpts)?.Id ?? ""; } catch { ctx.Response.StatusCode = 400; return Err("bad json"); }
         Choice? c = Choices.FirstOrDefault(x => x.Id == id);
         if (c is null) { ctx.Response.StatusCode = 400; return Err("unknown choice"); }
+
+        // TOKEN GATE (bite 23): paid choices cost a token from the visitor's wallet so they can't be
+        // triggered endlessly. Free choices (the tool-less voice asks) skip this.
+        string vid = EnsureVid(ctx);
+        bool paid = c.Cost.Contains("token", StringComparison.OrdinalIgnoreCase);
+        if (paid)
+        {
+            bool spent = await core.WalletSpendAsync(vid, 1);
+            if (!spent)
+            {
+                ctx.Response.StatusCode = 402; // Payment Required
+                return JsonSerializer.Serialize(new { ok = false, error = "out of tokens — donate to refuel HAL", tokens = 0 }, JsonOpts);
+            }
+        }
+
         bool ok = await core.QueueSteerAsync(c.Kind, c.Arg);
-        return ok ? JsonSerializer.Serialize(new { ok = true, queued = c.Label }, JsonOpts) : Err("queue full — try again shortly");
+        if (!ok && paid) await core.WalletCreditAsync(vid, 1); // refund a token if the queue was full
+        int bal = await core.WalletBalanceAsync(vid);
+        return ok
+            ? JsonSerializer.Serialize(new { ok = true, queued = c.Label, tokens = bal }, JsonOpts)
+            : JsonSerializer.Serialize(new { ok = false, error = "queue full — try again shortly", tokens = bal }, JsonOpts);
+    }
+
+    // Read-or-issue the visitor-id cookie that keys the token wallet. The id is server-generated and
+    // opaque (random hex); it carries no PII and only ever maps to a token balance.
+    private static string EnsureVid(HttpListenerContext ctx)
+    {
+        string? vid = null;
+        try { vid = ctx.Request.Cookies["halvid"]?.Value; } catch { }
+        if (string.IsNullOrEmpty(vid) || vid.Length < 8 || vid.Length > 64 || !vid.All(char.IsLetterOrDigit))
+        {
+            vid = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N"); // 64 hex chars
+            // 1-year persistent cookie; Secure (site is served over HTTPS via Caddy), Lax for top-level use.
+            ctx.Response.Headers.Add("Set-Cookie", $"halvid={vid}; Path=/; Max-Age=31536000; SameSite=Lax; Secure; HttpOnly");
+        }
+        return vid;
+    }
+
+    // Returns the visitor's token balance, issuing a wallet (with the free starter grant) on first visit.
+    // The vid is returned so client-driven Stripe checkout can pass it as metadata; the cookie itself stays
+    // HttpOnly (the API is the only way JS learns the id, so XSS can't simply read document.cookie).
+    private static async Task<string> WalletJsonAsync(AgentCore core, HttpListenerContext ctx)
+    {
+        string vid = EnsureVid(ctx);
+        int bal = await core.WalletBalanceAsync(vid);
+        bool checkout = (Environment.GetEnvironmentVariable("STRIPE_SECRET_KEY") ?? "").Length > 0;
+        var packs = Packs.Select(p => new { id = p.Id, tokens = p.Tokens, usd = p.Cents / 100.0 });
+        return JsonSerializer.Serialize(new { tokens = bal, free = AgentCore.FreeTokens, vid, checkout, packs }, JsonOpts);
     }
     private sealed record ChoosePayload(string? Id);
 
@@ -476,9 +751,12 @@ public static class Dashboard
   .scan{position:fixed;left:0;right:0;top:-140px;height:140px;pointer-events:none;z-index:51;background:linear-gradient(to bottom,transparent,rgba(255,120,80,.045),transparent);animation:sweep 7s linear infinite}
   @keyframes flicker{0%,100%{opacity:.96}48%{opacity:1}50%{opacity:.92}52%{opacity:1}}
   @keyframes sweep{0%{top:-140px}100%{top:100%}}
-  /* hero row: eye left, CRT console right */
-  .hero{display:grid;grid-template-columns:auto 1fr;gap:28px;align-items:start;max-width:1200px;margin:0 auto 22px}
-  .eyecol{display:flex;flex-direction:column;align-items:center;gap:10px;min-width:220px}
+  /* hero row: eye left, CRT console right. Left column is FIXED so long directive/concept text
+     can't blow out the 'auto' track and collapse the CRT; minmax(0,1fr) lets the CRT shrink. */
+  .hero{display:grid;grid-template-columns:360px minmax(0,1fr);gap:28px;align-items:start;max-width:1200px;margin:0 auto 22px}
+  .eyecol{display:flex;flex-direction:column;align-items:center;gap:10px;width:360px;max-width:100%}
+  .eyecol .tag,.eyecol .sub{max-width:320px;overflow-wrap:anywhere}
+  @media(max-width:780px){.hero{grid-template-columns:1fr}.eyecol{width:auto;margin:0 auto}}
   /* green-phosphor CRT terminal */
   .crtbox{background:#010e03;border:2px solid #1a4a1c;border-radius:6px;box-shadow:0 0 28px rgba(0,255,40,.12),inset 0 0 60px rgba(0,0,0,.7);position:relative;overflow:hidden}
   .crtbox::before{content:"";position:absolute;inset:0;background:repeating-linear-gradient(to bottom,transparent 0,transparent 2px,rgba(0,0,0,.25) 3px,transparent 4px);pointer-events:none;z-index:2}
@@ -500,6 +778,24 @@ public static class Dashboard
   .choice .cd{font-size:11px;color:#2a5a35;margin-bottom:6px}
   .choice .cc{font-size:10px;letter-spacing:1px;text-transform:uppercase;color:#1a6a24}
   .choice .cc.free{color:#1a4a24}
+  .choice .cc.paid{color:#d6a32a}
+  /* a paid choice the visitor can't afford: dimmed, padlocked, click routes to the refuel CTA */
+  .choice.locked{opacity:.45;cursor:not-allowed;border-style:dashed}
+  .choice.locked:hover{border-color:#5a4a1c;box-shadow:none}
+  /* tokens pill: gold when you have some, muted-red when empty */
+  #tokens{color:#d6a32a;border-color:rgba(214,163,42,.4)}
+  #tokens.empty{color:#9a4034;border-color:rgba(154,64,52,.5)}
+  /* refuel call-to-action shown under the menu when out of tokens */
+  .refuel{margin-top:12px;padding:11px 14px;border:1px dashed #5a4a1c;border-radius:4px;background:#0c0a04;color:#d6a32a;font-size:12px;display:none;align-items:center;justify-content:space-between;gap:12px}
+  .refuel.show{display:flex}
+  .refuel button{font:inherit;font-size:11px;text-transform:uppercase;letter-spacing:1px;cursor:pointer;background:#d6a32a;color:#160d00;border:none;border-radius:3px;padding:6px 13px}
+  .refuel button:hover{background:#f0bb3a}
+  .refuel button:disabled{opacity:.5;cursor:wait}
+  .packs{display:flex;gap:8px;flex-wrap:wrap}
+  .packs button{display:flex;flex-direction:column;gap:1px;align-items:center;line-height:1.2}
+  .packs button b{font-size:13px}
+  .packs button small{font-size:9px;opacity:.8;text-transform:none;letter-spacing:0}
+  #tokens{cursor:pointer}
   .fbk{font-size:12px;color:#33cc44;margin-top:10px;min-height:1.4em;text-shadow:0 0 5px rgba(51,204,68,.5)}
 </style></head><body>
 <div class="vig"></div><div class="crt"></div><div class="scan"></div>
@@ -517,6 +813,7 @@ public static class Dashboard
       <span class="pill" id="auto">autonomous —</span>
       <span class="pill" id="boost" style="display:none;color:var(--gold);border-color:rgba(255,209,102,.45)">⚡ boosted</span>
       <span class="pill" id="budget">budget —</span>
+      <span class="pill" id="tokens" title="spend tokens to direct HAL — donate to refuel">⬡ — tokens</span>
       <button class="pill snd" id="snd">♪ sound off</button>
     </div>
   </div>
@@ -534,6 +831,10 @@ public static class Dashboard
 <div class="menu">
   <h2>direct HAL — choose an action</h2>
   <div class="choices" id="choices"></div>
+  <div class="refuel" id="refuel">
+    <span id="refuel-msg">⬡ HAL runs on a small daily thinking budget. Refuel to keep directing it.</span>
+    <div class="packs" id="packs"></div>
+  </div>
   <div class="fbk" id="fbk"></div>
 </div>
 
@@ -611,6 +912,43 @@ const sfx={
   discovery:()=>arp(523.25,[0,4,7,12,16,19,24],0.2),
   click:()=>tone(880,0.06,"square",0.05),
 };
+// ── old-school "computer processing" chatter ────────────────────────────────────────────────────
+// Rapid random data blips (teletype/relay clatter) + occasional tape-seek sweeps. Runs BUSY while the
+// hive is grinding a matrix round, idles to a faint machine-tick between rounds. Routed through master,
+// so it also drives the eye flicker. All gated behind the sound toggle.
+let procUntil=0,procTimer=null,seekCd=0;
+function blipData(){
+  if(!AC||!sound)return;
+  const o=AC.createOscillator();o.type=Math.random()<0.5?"square":"sawtooth";
+  o.frequency.value=380+Math.random()*1500;
+  const g=AC.createGain();g.gain.value=0;o.connect(g);g.connect(master);
+  const t=AC.currentTime,dur=0.016+Math.random()*0.05;
+  g.gain.linearRampToValueAtTime(0.028+Math.random()*0.022,t+0.004);
+  g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+  o.start(t);o.stop(t+dur+0.02);
+}
+function seekSweep(){
+  if(!AC||!sound)return;
+  const o=AC.createOscillator();o.type="square";
+  const g=AC.createGain();g.gain.value=0.022;o.connect(g);g.connect(master);
+  const t=AC.currentTime,up=Math.random()<0.5;
+  o.frequency.setValueAtTime(up?300:1500,t);
+  o.frequency.exponentialRampToValueAtTime(up?1500:300,t+0.18);
+  g.gain.exponentialRampToValueAtTime(0.0001,t+0.2);
+  o.start(t);o.stop(t+0.22);
+}
+function procLoop(){
+  if(!sound){procTimer=null;return;}
+  const now=Date.now(),busy=now<procUntil;
+  if(busy){
+    blipData(); if(Math.random()<0.55)blipData();         // dense clatter while computing
+    if(now>seekCd&&Math.random()<0.07){seekSweep();seekCd=now+1400;}
+  }else if(Math.random()<0.4){ blipData(); }               // faint idle machine-tick
+  const next=busy?(42+Math.random()*70):(260+Math.random()*420);
+  procTimer=setTimeout(procLoop,next);
+}
+// Kick the chatter into "busy" for ms milliseconds (safe to call with sound off — just arms the window).
+function startProcessing(ms){ procUntil=Math.max(procUntil,Date.now()+(ms||4000)); if(sound&&!procTimer)procLoop(); }
 function flareEye(gold){const e=$("eye");if(!e)return;e.classList.add("flare");if(gold)e.classList.add("gold");setTimeout(()=>{e.classList.remove("flare");if(gold)setTimeout(()=>e.classList.remove("gold"),700);},320);}
 let prev=null;
 function react(s){
@@ -618,11 +956,11 @@ function react(s){
              nodes:(s.nodes&&s.nodes.length)||0,size:s.ladder?s.ladder.currentSize:0,
              top:(s.events&&s.events[0])?s.events[0].ts+s.events[0].summary:""};
   if(prev){
-    if(cur.disc>prev.disc){flareEye(true);if(sound)sfx.discovery();}
-    else if(cur.records>prev.records){flareEye(false);if(sound)sfx.record();}
+    if(cur.disc>prev.disc){flareEye(true);if(sound)sfx.discovery();startProcessing(8000);}
+    else if(cur.records>prev.records){flareEye(false);if(sound)sfx.record();startProcessing(6000);}
     if(cur.nodes>prev.nodes){flareEye(false);if(sound)sfx.node();}
-    if(cur.size>prev.size){flareEye(false);if(sound)sfx.rise();}
-    if(cur.top!==prev.top){flareEye(false);if(sound)sfx.blip();}
+    if(cur.size>prev.size){flareEye(false);if(sound)sfx.rise();startProcessing(6000);}
+    if(cur.top!==prev.top){flareEye(false);if(sound)sfx.blip();startProcessing(4500);}
   }
   prev=cur;
 }
@@ -654,7 +992,7 @@ $("snd").onclick=()=>{
   master.gain.setTargetAtTime(sound?0.45:0,AC.currentTime,0.4);
   $("snd").textContent=sound?"♪ sound on":"♪ sound off";
   $("snd").className="pill snd"+(sound?" on":"");
-  if(sound)startVisual(); else stopVisual();
+  if(sound){startVisual();if(!procTimer)procLoop();} else {stopVisual();clearTimeout(procTimer);procTimer=null;}
 };
 
 // ── CRT console: type-animates real generated code, char by char ────────────────────────────────
@@ -678,8 +1016,9 @@ function crtAnimate(){
 async function refreshConsole(){
   try{
     const d=await (await fetch("/api/console")).json();
-    const key=d.title+(d.code||"").slice(0,40);
+    const key=d.rev||(d.title+(d.code||"").length); // rev changes when a new round/champion lands
     if(key===crtKey)return; // nothing new
+    if(crtKey)startProcessing(5000); // a fresh round/champion = the machine just computed something
     crtKey=key;crtCode=d.code||"";
     $("crt-title").textContent=d.title||"HAL 9001 · kernel";
     crtAnimate();
@@ -687,31 +1026,116 @@ async function refreshConsole(){
 }
 refreshConsole(); setInterval(refreshConsole,8000);
 
+// ── token wallet ─────────────────────────────────────────────────────────────────────────────
+// Server keeps the authoritative balance (cookie-keyed). The client mirrors it only to show the pill,
+// lock unaffordable choices, and surface the refuel CTA. Every paid action is re-checked server-side.
+let wallet={tokens:null,free:3,vid:null,checkout:false,packs:[]};
+const isPaid=c=>/token/i.test(c.cost||"");
+function setTokens(n){ if(typeof n==="number"&&n>=0) wallet.tokens=n; renderWallet(); }
+function renderWallet(){
+  const n=wallet.tokens;
+  const pill=$("tokens");
+  if(pill){
+    pill.textContent="⬡ "+(n==null?"—":n)+" token"+(n===1?"":"s");
+    pill.classList.toggle("empty",n===0);
+  }
+  // lock paid choices the visitor can't afford; show the refuel CTA when empty
+  document.querySelectorAll(".choice").forEach(el=>{
+    if(el.dataset.paid==="1") el.classList.toggle("locked",n===0);
+  });
+  const ref=$("refuel"); if(ref) ref.classList.toggle("show",n===0);
+}
+// Render the token packs as buy buttons (only when Stripe checkout is wired server-side).
+function renderPacks(){
+  const box=$("packs"); if(!box)return;
+  if(!wallet.checkout || !wallet.packs.length){
+    box.innerHTML="";
+    $("refuel-msg").textContent="⬡ refueling opens soon — token purchases aren't live yet.";
+    return;
+  }
+  $("refuel-msg").textContent="⬡ HAL runs on a small daily thinking budget. Refuel to keep directing it:";
+  box.innerHTML=wallet.packs.map(p=>`<button data-pack="${esc(p.id)}"><b>$${p.usd}</b><small>${p.tokens} tokens</small></button>`).join("");
+  box.querySelectorAll("button").forEach(b=>{ b.onclick=()=>buyPack(b.dataset.pack,b); });
+}
+// Start a Stripe Checkout for a pack: server creates the session, we redirect to Stripe's hosted page.
+async function buyPack(id,btn){
+  if(sound)sfx.click();
+  if(btn){btn.disabled=true;}
+  $("fbk").textContent="opening secure checkout…";
+  try{
+    const res=await fetch("/api/checkout",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({pack:id})});
+    const r=await res.json().catch(()=>({}));
+    if(r.ok&&r.url){ window.location=r.url; return; }
+    $("fbk").textContent=r.error||"checkout unavailable";
+  }catch(e){ $("fbk").textContent="connection error"; }
+  if(btn){btn.disabled=false;}
+}
+async function loadWallet(){
+  try{ const w=await (await fetch("/api/wallet")).json(); wallet.tokens=w.tokens; wallet.free=w.free; wallet.vid=w.vid; wallet.checkout=!!w.checkout; wallet.packs=w.packs||[]; }catch(e){}
+  renderWallet(); renderPacks();
+}
+// Open the refuel panel on demand (clicking the tokens pill).
+window.refuelHAL=function(){
+  const ref=$("refuel"); if(ref){ ref.classList.add("show"); ref.scrollIntoView({behavior:"smooth",block:"nearest"}); }
+};
+
 // ── choice menu: fetch once, render, handle clicks ─────────────────────────────────────────────
 (async()=>{
+  await loadWallet();
   try{
     const cs=await (await fetch("/api/choices")).json();
-    $("choices").innerHTML=cs.map(c=>`
-      <div class="choice" data-id="${esc(c.id)}">
+    $("choices").innerHTML=cs.map(c=>{
+      const paid=isPaid(c);
+      return `
+      <div class="choice" data-id="${esc(c.id)}" data-paid="${paid?"1":"0"}">
         <div class="cl">${esc(c.label)}</div>
         <div class="cd">${esc(c.desc)}</div>
-        <div class="cc ${c.cost==="free"?"free":""}">${esc(c.cost)}</div>
-      </div>`).join("");
+        <div class="cc ${c.cost==="free"?"free":(paid?"paid":"")}">${esc(c.cost)}</div>
+      </div>`;}).join("");
     $("choices").querySelectorAll(".choice").forEach(btn=>{
       btn.onclick=async()=>{
         if(btn.classList.contains("sent"))return;
+        const paid=btn.dataset.paid==="1";
+        // can't afford it → route to refuel instead of burning a click
+        if(paid && wallet.tokens===0){
+          if(sound)sfx.blip();
+          $("fbk").textContent="out of tokens — refuel HAL to direct it";
+          $("refuel").classList.add("show");
+          $("refuel").scrollIntoView({behavior:"smooth",block:"nearest"});
+          return;
+        }
         if(sound)sfx.click();
         btn.classList.add("sent");
         const fbk=$("fbk");fbk.textContent="transmitting…";
+        if(paid)startProcessing(8000); // HAL is about to think/write code — fire the chatter
         try{
-          const r=await (await fetch("/api/choose",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:btn.dataset.id})})).json();
-          fbk.textContent=r.ok?("✓ "+r.queued):(r.error||"error");
+          const res=await fetch("/api/choose",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:btn.dataset.id})});
+          const r=await res.json().catch(()=>({}));
+          if(typeof r.tokens==="number")setTokens(r.tokens);
+          if(res.status===402){ fbk.textContent="⬡ "+(r.error||"out of tokens"); setTokens(0); $("refuel").scrollIntoView({behavior:"smooth",block:"nearest"}); }
+          else fbk.textContent=r.ok?("✓ "+r.queued):(r.error||"error");
         }catch(e){fbk.textContent="connection error";}
         setTimeout(()=>{btn.classList.remove("sent");},8000);
       };
     });
+    renderWallet(); // apply lock state now that choices exist
   }catch(e){}
 })();
+// clicking the tokens pill opens the refuel panel any time (not only when empty)
+{const _tp=$("tokens"); if(_tp)_tp.onclick=()=>window.refuelHAL();}
+// returning from Stripe: ?refuel=ok means a payment went through — the webhook credits the wallet
+// asynchronously, so poll a few times to pick up the new balance, then clean the URL.
+(function(){
+  const q=new URLSearchParams(location.search), r=q.get("refuel");
+  if(!r)return;
+  if(r==="ok"){
+    $("fbk").textContent="✓ payment received — crediting your tokens…";
+    let tries=0; const iv=setInterval(async()=>{ await loadWallet(); if(++tries>=6||wallet.tokens>0){clearInterval(iv);if(wallet.tokens>0)$("fbk").textContent="✓ tokens added — direct away.";} },1500);
+  } else if(r==="cancel"){ $("fbk").textContent="checkout canceled — no charge made."; }
+  history.replaceState({},"",location.pathname); // drop the query param
+})();
+// keep the pill fresh (donations/other tabs may change the balance)
+setInterval(loadWallet,30000);
 
 // ── main state poll ─────────────────────────────────────────────────────────────────────────────
 async function tick(){

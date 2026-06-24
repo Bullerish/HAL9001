@@ -1,0 +1,55 @@
+name: Deploy HAL9001
+
+# Push-to-deploy for the hal9001.io box.
+#
+# IMPORTANT: this pipeline only ever builds + ships HAL9001.dll. It never sees any of HAL's
+# secrets — ANTHROPIC_API_KEY, TURSO_*, STRIPE_* all live in /etc/hal9001/hal.env ON THE BOX
+# and are read there at service start. CI only needs SSH access to copy the DLL and restart.
+#
+# Required GitHub repo secrets (Settings → Secrets and variables → Actions):
+#   DEPLOY_HOST     - the server IP/hostname (e.g. 67.217.245.253)
+#   DEPLOY_USER     - the SSH user that can chown + systemctl restart (e.g. root)
+#   DEPLOY_SSH_KEY  - the PRIVATE half of a deploy keypair whose PUBLIC half is in the
+#                     server's ~/.ssh/authorized_keys
+
+on:
+  workflow_dispatch:        # manual: Actions tab → "Deploy HAL9001" → Run workflow
+  # Uncomment to also deploy automatically on every push to main once you trust it:
+  # push:
+  #   branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish (linux-x64, self-contained)
+        run: dotnet publish HAL9001.csproj -c Release -r linux-x64 --self-contained -o ./publish-linux
+
+      - name: Prepare SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Copy DLL to server
+        run: |
+          scp -i ~/.ssh/deploy_key ./publish-linux/HAL9001.dll \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/hal9001/HAL9001.dll"
+
+      - name: Fix ownership and restart services
+        run: |
+          ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "chown hal:hal /opt/hal9001/HAL9001.dll && systemctl restart hal-dashboard hal-swarm"
+
+      - name: Verify dashboard is up
+        run: |
+          ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "sleep 2 && curl -fs localhost:8765/api/wallet >/dev/null && echo 'dashboard OK'"

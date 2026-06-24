@@ -802,7 +802,15 @@ public static class SwarmAgent
                         switch (st.Value.Kind)
                         {
                             case "ask": await core.QueueAskAsync("a visitor", st.Value.Arg); note = $"queued visitor question: {st.Value.Arg}"; break;
-                            case "topic": { string built = await core.SteerBuildAsync(st.Value.Arg); note = built.Length > 0 ? $"invented '{built}' for topic {st.Value.Arg}" : $"explored topic {st.Value.Arg} (nothing new this time)"; break; }
+                            case "topic":
+                            {
+                                // Announce the build so the live CRT shows the work starting, then stream the result.
+                                await core.Events.AppendAsync("steer-building", $"writing a {st.Value.Arg} tool — HAL is generating code...");
+                                Console.WriteLine($"\n[steer] writing a {st.Value.Arg} tool..."); Console.Write("> ");
+                                string built = await core.SteerBuildAsync(st.Value.Arg);
+                                note = built.Length > 0 ? $"invented '{built}' for topic {st.Value.Arg}" : $"explored topic {st.Value.Arg} (nothing new this time)";
+                                break;
+                            }
                             case "boost": await core.AddBoostAsync(2); note = "a visitor nudged a short boost"; break;
                             default: note = "ignored an unknown steer"; break;
                         }
@@ -1010,11 +1018,16 @@ public static class SwarmAgent
                     {
                         Console.WriteLine("[matmul-race] all candidates failed compile or correctness this round.");
                         Console.Write("> ");
+                        // Surface the round to the hive so the (separate-process) dashboard CRT can show it live.
+                        await core.Events.AppendAsync("matmul-round",
+                            $"racing {step.Size}x{step.Size} [{unit}] (plateau {step.Stale}/{MatmulLadder.PlateauRounds}) — all candidates failed this round");
                     }
                     else
                     {
                         Console.WriteLine($"[matmul-race] {step.Round.Summary}");
                         Console.Write("> ");
+                        // Surface the round result to the hive for the live dashboard CRT transcript.
+                        await core.Events.AppendAsync("matmul-round", step.Round.Summary);
                     }
 
                     if (step.Advanced)

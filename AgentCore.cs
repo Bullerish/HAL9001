@@ -182,6 +182,21 @@ public sealed class AgentCore
         await _turso.ExecuteAsync(
             "CREATE TABLE IF NOT EXISTS steer (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, " +
             "kind TEXT NOT NULL, arg TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending')");
+        // Showcase (bite 23): the latest code HAL actually wrote — invented tools land here so the live
+        // dashboard CRT can stream the real source as it's created (matmul kernels live in matmul_records).
+        await _turso.ExecuteAsync(
+            "CREATE TABLE IF NOT EXISTS showcase (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, " +
+            "title TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '')");
+        // Token wallet (bite 23): each visitor gets a small free grant; paid menu actions deduct tokens so
+        // they can't be triggered endlessly. Donations (Stripe webhook → /api/donate) credit more tokens.
+        await _turso.ExecuteAsync(
+            "CREATE TABLE IF NOT EXISTS wallet (vid TEXT PRIMARY KEY, tokens INTEGER NOT NULL DEFAULT 0, " +
+            "created TEXT NOT NULL DEFAULT '', seen TEXT NOT NULL DEFAULT '')");
+        // Stripe event de-dupe (bite 24): Stripe may deliver the same webhook more than once. We record each
+        // fulfilled event/session id here and only credit tokens the first time, so a real payment can never
+        // double-credit a wallet on a retried delivery.
+        await _turso.ExecuteAsync(
+            "CREATE TABLE IF NOT EXISTS stripe_seen (id TEXT PRIMARY KEY, ts TEXT NOT NULL DEFAULT '')");
         var drows = await _turso.ExecuteAsync("SELECT text FROM directive WHERE id=1");
         if (drows.Count == 0 || drows[0].Count == 0 || string.IsNullOrWhiteSpace(drows[0][0]))
         {
@@ -525,6 +540,8 @@ public sealed class AgentCore
             await Events.AppendAsync("curiosity-resolved",
                 $"I couldn't answer \"{p.Request}\", so I learned '{p.Name}' [{CapTypes.Name(p.InputType)}→{CapTypes.Name(p.OutputType)}, {StabilityKinds.Name(p.Stability)}] to do it",
                 p.Request);
+            // Show the real code HAL just wrote on the live dashboard CRT (bite 23).
+            try { await PushShowcaseAsync($"tool · {p.Name} — {p.Description}", gen.Source); } catch { }
             return true;
         }
         finally { _gate.Release(); }
@@ -1747,6 +1764,121 @@ public sealed class AgentCore
             return ($"matmul {size}x{size} — {unit}", src);
         }
         catch { return null; }
+    }
+
+    // ── showcase (bite 23): the latest source HAL actually wrote (invented tools) ──────────────────
+    /// <summary>Record a freshly generated tool's source so the live dashboard can stream it. Keeps only
+    /// the most recent handful of rows.</summary>
+    public async Task PushShowcaseAsync(string title, string source)
+    {
+        if (_turso is null || string.IsNullOrEmpty(source)) return;
+        try
+        {
+            await _turso.ExecuteAsync("INSERT INTO showcase (ts, title, source) VALUES (?,?,?)",
+                DateTime.UtcNow.ToString("o"), title ?? "", source);
+            await _turso.ExecuteAsync("DELETE FROM showcase WHERE id NOT IN (SELECT id FROM showcase ORDER BY id DESC LIMIT 12)");
+        }
+        catch { }
+    }
+
+    /// <summary>The most recent code HAL wrote — whichever is newer, an invented tool (showcase) or a
+    /// matmul champion kernel (matmul_records). Drives the CRT so clicks that build a tool show up live.</summary>
+    public async Task<(string Title, string Source, string Ts)?> GetLatestArtifactAsync()
+    {
+        if (_turso is null) return null;
+        (string Title, string Source, string Ts)? tool = null, mm = null;
+        try
+        {
+            var r = await _turso.ExecuteAsync("SELECT title, source, ts FROM showcase WHERE source != '' ORDER BY id DESC LIMIT 1");
+            if (r.Count > 0 && r[0].Count >= 3 && !string.IsNullOrEmpty(r[0][1]))
+                tool = (r[0][0] ?? "tool", r[0][1]!, r[0][2] ?? "");
+        }
+        catch { }
+        try
+        {
+            var r = await _turso.ExecuteAsync("SELECT size, metric, score, source, recorded_at FROM matmul_records WHERE source != '' ORDER BY recorded_at DESC LIMIT 1");
+            if (r.Count > 0 && r[0].Count >= 5 && !string.IsNullOrEmpty(r[0][3]))
+            {
+                int size = int.TryParse(r[0][0], out int s) ? s : 0;
+                string metric = r[0][1] ?? "ms";
+                double score = ParseInv(r[0][2]) ?? 0;
+                string unit = metric == "muls" ? $"{score:F0} muls" : $"{score:F2} ms";
+                mm = ($"matmul kernel · {size}x{size} — {unit}", r[0][3]!, r[0][4] ?? "");
+            }
+        }
+        catch { }
+        if (tool is null) return mm;
+        if (mm is null) return tool;
+        // ISO-8601 "o" timestamps sort lexicographically — newer string wins.
+        return string.CompareOrdinal(tool.Value.Ts, mm.Value.Ts) >= 0 ? tool : mm;
+    }
+
+    // ── token wallet (bite 23): free starter grant, enforced spend, donation-creditable ───────────
+    public static int FreeTokens => (int)EnvD("HAL_FREE_TOKENS", 3);
+    private static bool ValidVid(string? vid) =>
+        !string.IsNullOrEmpty(vid) && vid.Length is >= 8 and <= 64 && vid.All(c => char.IsLetterOrDigit(c));
+
+    /// <summary>Current token balance for a visitor id, creating the wallet with the free grant if new.</summary>
+    public async Task<int> WalletBalanceAsync(string vid)
+    {
+        if (_turso is null || !ValidVid(vid)) return 0;
+        try
+        {
+            var r = await _turso.ExecuteAsync("SELECT tokens FROM wallet WHERE vid=?", vid);
+            if (r.Count > 0 && r[0].Count > 0 && int.TryParse(r[0][0], out int t)) return t;
+            string now = DateTime.UtcNow.ToString("o");
+            await _turso.ExecuteAsync("INSERT OR IGNORE INTO wallet (vid, tokens, created, seen) VALUES (?,?,?,?)",
+                vid, FreeTokens.ToString(), now, now);
+            return FreeTokens;
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>Deduct <paramref name="cost"/> tokens if the wallet can afford it. Returns false (and
+    /// changes nothing) when the balance is insufficient — this is what stops endless paid clicks.</summary>
+    public async Task<bool> WalletSpendAsync(string vid, int cost)
+    {
+        if (_turso is null || !ValidVid(vid) || cost <= 0) return false;
+        try
+        {
+            int bal = await WalletBalanceAsync(vid); // ensures the wallet exists
+            if (bal < cost) return false;
+            await _turso.ExecuteAsync("UPDATE wallet SET tokens = tokens - ?, seen = ? WHERE vid = ? AND tokens >= ?",
+                cost.ToString(), DateTime.UtcNow.ToString("o"), vid, cost.ToString());
+            return true;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>Add tokens to a wallet (the Stripe-webhook → donation path). Returns the new balance.</summary>
+    public async Task<int> WalletCreditAsync(string vid, int tokens)
+    {
+        if (_turso is null || !ValidVid(vid) || tokens <= 0) return 0;
+        try
+        {
+            await WalletBalanceAsync(vid); // ensure row exists
+            await _turso.ExecuteAsync("UPDATE wallet SET tokens = tokens + ?, seen = ? WHERE vid = ?",
+                tokens.ToString(), DateTime.UtcNow.ToString("o"), vid);
+            var r = await _turso.ExecuteAsync("SELECT tokens FROM wallet WHERE vid=?", vid);
+            return (r.Count > 0 && r[0].Count > 0 && int.TryParse(r[0][0], out int t)) ? t : 0;
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>Atomically claim a Stripe event/session id for processing. Returns true only the FIRST time
+    /// an id is seen, so a webhook redelivery can't double-credit a wallet. (TursoClient gives no affected-row
+    /// count, so we SELECT-then-INSERT; Stripe retries are spaced minutes apart, so the tiny race is moot.)</summary>
+    public async Task<bool> ClaimStripeEventAsync(string id)
+    {
+        if (_turso is null || string.IsNullOrWhiteSpace(id) || id.Length > 200) return false;
+        try
+        {
+            var r = await _turso.ExecuteAsync("SELECT id FROM stripe_seen WHERE id=?", id);
+            if (r.Count > 0) return false; // already processed
+            await _turso.ExecuteAsync("INSERT OR IGNORE INTO stripe_seen (id, ts) VALUES (?, ?)", id, DateTime.UtcNow.ToString("o"));
+            return true;
+        }
+        catch { return false; } // on any error, do NOT credit (fail closed)
     }
 
     // Strip control characters, collapse newlines/tabs to spaces, trim, and hard-cap the length.
