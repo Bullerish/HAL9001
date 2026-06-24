@@ -791,6 +791,29 @@ public static class SwarmAgent
                 // Paid asks above still get answered; the matmul loop's FREE tensor search keeps running.
                 if (!await core.HasBudgetAsync()) continue;
 
+                // STEERING (bite 22): act on ONE visitor menu-choice per cycle (no free text — the choice
+                // is a server-defined kind+arg). Budget-gated above. This is how clicks make HAL build.
+                try
+                {
+                    var st = await core.NextPendingSteerAsync();
+                    if (st is not null)
+                    {
+                        string note;
+                        switch (st.Value.Kind)
+                        {
+                            case "ask": await core.QueueAskAsync("a visitor", st.Value.Arg); note = $"queued visitor question: {st.Value.Arg}"; break;
+                            case "topic": { string built = await core.SteerBuildAsync(st.Value.Arg); note = built.Length > 0 ? $"invented '{built}' for topic {st.Value.Arg}" : $"explored topic {st.Value.Arg} (nothing new this time)"; break; }
+                            case "boost": await core.AddBoostAsync(2); note = "a visitor nudged a short boost"; break;
+                            default: note = "ignored an unknown steer"; break;
+                        }
+                        await core.CompleteSteerAsync(st.Value.Id);
+                        await core.Events.AppendAsync("steer-done", note);
+                        Console.WriteLine($"\n[steer] {note}"); Console.Write("> ");
+                        continue; // one steer per cycle
+                    }
+                }
+                catch { }
+
                 // Boost (bite 20): a paid boost makes the idle loop act ~5× sooner while it's hot.
                 double boostMul = 1.0;
                 try { if (await core.IsBoostedAsync()) boostMul = 0.2; } catch { }

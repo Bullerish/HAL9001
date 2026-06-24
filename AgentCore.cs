@@ -177,6 +177,11 @@ public sealed class AgentCore
         // matrix search keeps running regardless. The base limit is HAL_DAILY_USD (default $1/day).
         await _turso.ExecuteAsync(
             "CREATE TABLE IF NOT EXISTS budget (day TEXT PRIMARY KEY, spent REAL NOT NULL DEFAULT 0, bonus REAL NOT NULL DEFAULT 0)");
+        // Steering queue (bite 22): visitors pick from a SERVER-DEFINED menu (no free text ever) to
+        // nudge HAL. Each click enqueues a (kind, arg) the coordinator acts on, budget-gated.
+        await _turso.ExecuteAsync(
+            "CREATE TABLE IF NOT EXISTS steer (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, " +
+            "kind TEXT NOT NULL, arg TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending')");
         var drows = await _turso.ExecuteAsync("SELECT text FROM directive WHERE id=1");
         if (drows.Count == 0 || drows[0].Count == 0 || string.IsNullOrWhiteSpace(drows[0][0]))
         {
@@ -1665,6 +1670,83 @@ public sealed class AgentCore
             return usd;
         }
         catch { return 0; }
+    }
+
+    // ── steering queue (bite 22): curated, server-defined nudges — NO free text ever ────────
+    private const int MaxPendingSteers = 100;
+
+    /// <summary>Queue a server-defined steer. kind ∈ {ask, topic, boost}; arg comes from a server
+    /// whitelist (never raw user text). Bounded queue. Returns false if invalid or full.</summary>
+    public async Task<bool> QueueSteerAsync(string kind, string arg)
+    {
+        if (_turso is null) return false;
+        kind = (kind ?? "").Trim().ToLowerInvariant();
+        if (kind != "ask" && kind != "topic" && kind != "boost") return false;
+        arg = Sanitize(arg, 80);
+        try
+        {
+            var cnt = await _turso.ExecuteAsync("SELECT COUNT(*) FROM steer WHERE status='pending'");
+            if (cnt.Count > 0 && int.TryParse(cnt[0][0], out int n) && n >= MaxPendingSteers) return false;
+            await _turso.ExecuteAsync("INSERT INTO steer (ts, kind, arg, status) VALUES (?,?,?, 'pending')",
+                DateTime.UtcNow.ToString("o"), kind, arg);
+            await Events.AppendAsync("steer-queued", $"a visitor steered HAL: {kind} {arg}".Trim());
+            return true;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>The oldest pending steer, or null.</summary>
+    public async Task<(long Id, string Kind, string Arg)?> NextPendingSteerAsync()
+    {
+        if (_turso is null) return null;
+        try
+        {
+            var rows = await _turso.ExecuteAsync("SELECT id, kind, arg FROM steer WHERE status='pending' ORDER BY id LIMIT 1");
+            if (rows.Count == 0 || rows[0].Count < 3 || !long.TryParse(rows[0][0], out long id)) return null;
+            return (id, rows[0][1] ?? "", rows[0][2] ?? "");
+        }
+        catch { return null; }
+    }
+
+    public async Task CompleteSteerAsync(long id)
+    {
+        if (_turso is null) return;
+        try { await _turso.ExecuteAsync("UPDATE steer SET status='done' WHERE id=?", id.ToString()); } catch { }
+    }
+
+    /// <summary>Steer HAL to invent ONE new tool in a (whitelisted) topic — it writes and commissions
+    /// the code ITSELF via the existing autonomous pipeline (no user-supplied prompt reaches the
+    /// generator). Returns the new capability name, or "".</summary>
+    public async Task<string> SteerBuildAsync(string topic, CancellationToken ct = default)
+    {
+        if (!HasLlm) return "";
+        try
+        {
+            CuriosityProposal? prop = await ProposeTopicCapabilityAsync(topic, ct);
+            if (prop is null) return "";
+            return await CommissionProposalAsync(prop) ? prop.Name : "";
+        }
+        catch { return ""; }
+    }
+
+    /// <summary>The most recently set matmul champion's source — real generated code for the live CRT
+    /// console. Read from the shared DB so it works on any box (no git/handlers dir needed).</summary>
+    public async Task<(string Title, string Source)?> GetLatestChampionSourceAsync()
+    {
+        if (_turso is null) return null;
+        try
+        {
+            var rows = await _turso.ExecuteAsync("SELECT size, metric, score, source FROM matmul_records WHERE source != '' ORDER BY recorded_at DESC LIMIT 1");
+            if (rows.Count == 0 || rows[0].Count < 4) return null;
+            int size = int.TryParse(rows[0][0], out int s) ? s : 0;
+            string metric = rows[0][1] ?? "ms";
+            double score = ParseInv(rows[0][2]) ?? 0;
+            string src = rows[0][3] ?? "";
+            if (src.Length == 0) return null;
+            string unit = metric == "muls" ? $"{score:F0} muls" : $"{score:F2} ms";
+            return ($"matmul {size}x{size} — {unit}", src);
+        }
+        catch { return null; }
     }
 
     // Strip control characters, collapse newlines/tabs to spaces, trim, and hard-cap the length.

@@ -82,6 +82,17 @@ public static class Dashboard
             }
             else if (path == "/api/donate" && ctx.Request.HttpMethod == "POST")
                 Write(ctx, "application/json", await HandleDonateAsync(core, ctx, ip));
+            else if (path == "/api/choices")
+                Write(ctx, "application/json", JsonSerializer.Serialize(Choices.Select(c => new { id = c.Id, label = c.Label, desc = c.Desc, cost = c.Cost }), JsonOpts));
+            else if (path == "/api/choose" && ctx.Request.HttpMethod == "POST")
+                Write(ctx, "application/json", await HandleChooseAsync(core, ctx, ip));
+            else if (path == "/api/console")
+            {
+                var src = await core.GetLatestChampionSourceAsync();
+                Write(ctx, "application/json", src is not null
+                    ? JsonSerializer.Serialize(new { title = src.Value.Title, code = src.Value.Source }, JsonOpts)
+                    : JsonSerializer.Serialize(new { title = "awaiting first champion...", code = "// HAL 9001 initializing\n// searching for optimal matrix decompositions\n// stand by for transmission" }, JsonOpts));
+            }
             else
                 Write(ctx, "text/html; charset=utf-8", Html);
         }
@@ -320,6 +331,38 @@ public static class Dashboard
 
     private static string Err(string m) => JsonSerializer.Serialize(new { ok = false, error = m }, JsonOpts);
 
+    // ── curated choice menu (bite 22) — the ONLY public interaction; NO free text ─────────────
+    // A visitor sends only a choice id; the server maps it to a fixed (kind, arg). There is no path
+    // for visitor-typed text to reach HAL, so nothing here can inject a prompt or code.
+    private sealed record Choice(string Id, string Label, string Desc, string Cost, string Kind, string Arg);
+    private static readonly Choice[] Choices =
+    {
+        // Speak to HAL — answers via the safe tool-less voice path (1 free per poll cycle)
+        new("status",  "What are you working on?",  "HAL reports its current focus",     "free",    "ask",   "What are you working on right now?"),
+        new("feel",    "How do you feel?",           "HAL reflects on its state of mind", "free",    "ask",   "How do you feel about your progress?"),
+        new("discover","What did you discover?",     "HAL shares a recent finding",       "free",    "ask",   "What have you discovered or learned today?"),
+        // Direct HAL to invent — these burn LLM budget (one tool built per steer)
+        new("numth",   "Invent a number-theory tool","HAL writes the code itself",        "1 token", "topic", "number theory"),
+        new("geo",     "Invent a geometry tool",     "HAL writes the code itself",        "1 token", "topic", "geometry"),
+        new("stats",   "Invent a statistics tool",   "HAL writes the code itself",        "1 token", "topic", "statistics"),
+        new("crypto",  "Invent a cryptography tool", "HAL writes the code itself",        "1 token", "topic", "cryptography"),
+        // Ramp the hive
+        new("boost",   "Boost the hive",             "Runs 5× hotter for 2 minutes",      "1 token", "boost", ""),
+    };
+
+    private static async Task<string> HandleChooseAsync(AgentCore core, HttpListenerContext ctx, string ip)
+    {
+        if (!RateOk(ip, 12)) { ctx.Response.StatusCode = 429; return Err("rate limited"); }
+        string? body = await ReadBodyAsync(ctx, 1024);
+        if (body is null) { ctx.Response.StatusCode = 413; return Err("payload too large"); }
+        string id; try { id = JsonSerializer.Deserialize<ChoosePayload>(body, JsonOpts)?.Id ?? ""; } catch { ctx.Response.StatusCode = 400; return Err("bad json"); }
+        Choice? c = Choices.FirstOrDefault(x => x.Id == id);
+        if (c is null) { ctx.Response.StatusCode = 400; return Err("unknown choice"); }
+        bool ok = await core.QueueSteerAsync(c.Kind, c.Arg);
+        return ok ? JsonSerializer.Serialize(new { ok = true, queued = c.Label }, JsonOpts) : Err("queue full — try again shortly");
+    }
+    private sealed record ChoosePayload(string? Id);
+
     // Constant-time string compare (avoid leaking the secret via response timing).
     private static bool CtEquals(string a, string b)
     {
@@ -422,39 +465,85 @@ public static class Dashboard
   .quote{font-style:italic;color:#8a6f64;border-left:2px solid var(--line2);padding-left:12px;line-height:1.7}
   .empty{color:var(--dim);font-size:12px}
   .wide{grid-column:1/-1}
-  footer{max-width:1100px;margin:16px auto 0;color:var(--dim);font-size:10px;text-align:center;letter-spacing:2px;text-transform:uppercase}
+  footer{max-width:1200px;margin:16px auto 0;color:var(--dim);font-size:10px;text-align:center;letter-spacing:2px;text-transform:uppercase}
+  /* eye transitions */
   .eye{transition:box-shadow .25s}
   .eye.flare{box-shadow:0 10px 30px rgba(0,0,0,.85),inset 0 2px 5px rgba(255,255,255,.4),inset 0 -4px 8px rgba(0,0,0,.6),inset 0 0 16px 3px rgba(255,70,34,.55),0 0 46px 10px rgba(255,55,22,.45)}
   .eye.gold{box-shadow:0 10px 30px rgba(0,0,0,.85),inset 0 2px 5px rgba(255,255,255,.4),inset 0 -4px 8px rgba(0,0,0,.6),inset 0 0 18px 4px rgba(255,200,90,.6),0 0 60px 14px rgba(255,200,90,.5)}
+  /* CRT page overlay */
   .crt{position:fixed;inset:0;pointer-events:none;z-index:50;background:repeating-linear-gradient(to bottom,rgba(0,0,0,0) 0,rgba(0,0,0,0) 2px,rgba(0,0,0,.16) 3px,rgba(0,0,0,0) 4px);animation:flicker 5.5s infinite}
   .vig{position:fixed;inset:0;pointer-events:none;z-index:49;background:radial-gradient(ellipse at 50% 42%,transparent 52%,rgba(0,0,0,.6) 100%)}
   .scan{position:fixed;left:0;right:0;top:-140px;height:140px;pointer-events:none;z-index:51;background:linear-gradient(to bottom,transparent,rgba(255,120,80,.045),transparent);animation:sweep 7s linear infinite}
   @keyframes flicker{0%,100%{opacity:.96}48%{opacity:1}50%{opacity:.92}52%{opacity:1}}
   @keyframes sweep{0%{top:-140px}100%{top:100%}}
+  /* hero row: eye left, CRT console right */
+  .hero{display:grid;grid-template-columns:auto 1fr;gap:28px;align-items:start;max-width:1200px;margin:0 auto 22px}
+  .eyecol{display:flex;flex-direction:column;align-items:center;gap:10px;min-width:220px}
+  /* green-phosphor CRT terminal */
+  .crtbox{background:#010e03;border:2px solid #1a4a1c;border-radius:6px;box-shadow:0 0 28px rgba(0,255,40,.12),inset 0 0 60px rgba(0,0,0,.7);position:relative;overflow:hidden}
+  .crtbox::before{content:"";position:absolute;inset:0;background:repeating-linear-gradient(to bottom,transparent 0,transparent 2px,rgba(0,0,0,.25) 3px,transparent 4px);pointer-events:none;z-index:2}
+  .crtbox::after{content:"";position:absolute;inset:0;background:radial-gradient(ellipse at 50% 50%,transparent 55%,rgba(0,0,0,.55) 100%);pointer-events:none;z-index:3}
+  .crttop{background:#020f04;border-bottom:1px solid #1a3a1c;padding:7px 14px;display:flex;justify-content:space-between;align-items:center}
+  .crttop .ctitle{color:#33cc44;font-size:11px;letter-spacing:2px;text-transform:uppercase}
+  .crttop .cblink{width:8px;height:8px;border-radius:50%;background:#33cc44;animation:cblink 1.1s steps(1) infinite;box-shadow:0 0 6px #33cc44}
+  @keyframes cblink{0%,49%{opacity:1}50%,100%{opacity:0}}
+  .crtbody{padding:14px 16px;height:380px;overflow:hidden;position:relative;z-index:1}
+  .crtlines{font:13px/1.6 "Courier New",Courier,monospace;color:#33cc44;text-shadow:0 0 6px rgba(51,204,68,.6);white-space:pre;word-break:break-all;height:100%;overflow:hidden}
+  /* choice menu */
+  .menu{max-width:1200px;margin:0 auto 22px;background:#020a04;border:1px solid #1a3a1c;border-radius:6px;padding:18px 20px}
+  .menu h2{font-size:11px;text-transform:uppercase;letter-spacing:3px;color:#2a7a35;margin-bottom:14px;font-weight:400}
+  .choices{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+  .choice{background:#030f05;border:1px solid #1a3a1c;border-radius:4px;padding:12px 14px;cursor:pointer;transition:border-color .15s,box-shadow .15s}
+  .choice:hover{border-color:#33cc44;box-shadow:0 0 12px rgba(51,204,68,.18)}
+  .choice.sent{border-color:#33cc44;opacity:.6;cursor:default}
+  .choice .cl{font-size:13px;color:#8de897;margin-bottom:4px}
+  .choice .cd{font-size:11px;color:#2a5a35;margin-bottom:6px}
+  .choice .cc{font-size:10px;letter-spacing:1px;text-transform:uppercase;color:#1a6a24}
+  .choice .cc.free{color:#1a4a24}
+  .fbk{font-size:12px;color:#33cc44;margin-top:10px;min-height:1.4em;text-shadow:0 0 5px rgba(51,204,68,.5)}
 </style></head><body>
 <div class="vig"></div><div class="crt"></div><div class="scan"></div>
-<div class="eyewrap">
-  <div class="eye" id="eye"><div class="lens"><div class="glow"></div><div class="hi hi1"></div><div class="hi hi2"></div><div class="hot"></div></div></div>
-  <h1>HAL 9001</h1>
-  <div class="tag" id="ident">heuristically programmed algorithmic hive</div>
-  <div class="sub" id="directive"></div>
-  <div class="badges">
-    <span class="pill live"><span class="dot"></span>online · <span id="clock">—</span></span>
-    <span class="pill" id="auto">autonomous —</span>
-    <span class="pill" id="boost" style="display:none;color:var(--gold);border-color:rgba(255,209,102,.45)">⚡ boosted</span>
-    <span class="pill" id="budget">budget —</span>
-    <button class="pill snd" id="snd">♪ sound off</button>
+
+<!-- HERO ROW: eye + CRT console -->
+<div class="hero">
+  <!-- left: eye, title, badges -->
+  <div class="eyecol">
+    <div class="eye" id="eye"><div class="lens"><div class="glow"></div><div class="hi hi1"></div><div class="hi hi2"></div><div class="hot"></div></div></div>
+    <h1>HAL 9001</h1>
+    <div class="tag" id="ident">heuristically programmed algorithmic hive</div>
+    <div class="sub" id="directive"></div>
+    <div class="badges" style="justify-content:center">
+      <span class="pill live"><span class="dot"></span>online · <span id="clock">—</span></span>
+      <span class="pill" id="auto">autonomous —</span>
+      <span class="pill" id="boost" style="display:none;color:var(--gold);border-color:rgba(255,209,102,.45)">⚡ boosted</span>
+      <span class="pill" id="budget">budget —</span>
+      <button class="pill snd" id="snd">♪ sound off</button>
+    </div>
+  </div>
+  <!-- right: green CRT terminal showing the real generated code -->
+  <div class="crtbox">
+    <div class="crttop">
+      <span class="ctitle" id="crt-title">HAL 9001 · matrix kernel</span>
+      <span class="cblink"></span>
+    </div>
+    <div class="crtbody"><div class="crtlines" id="crt-lines"></div></div>
   </div>
 </div>
 
-<div class="wrap">
+<!-- CHOICE MENU: what visitors click (no text input, ever) -->
+<div class="menu">
+  <h2>direct HAL — choose an action</h2>
+  <div class="choices" id="choices"></div>
+  <div class="fbk" id="fbk"></div>
+</div>
+
+<div class="wrap" style="max-width:1200px;margin:0 auto">
 <div class="metrics">
   <div class="metric"><div class="v" id="m-nodes">—</div><div class="l">active nodes</div></div>
   <div class="metric"><div class="v" id="m-records">—</div><div class="l">records set</div></div>
   <div class="metric"><div class="v" id="m-events">—</div><div class="l">life events</div></div>
   <div class="metric"><div class="v" id="m-disc">—</div><div class="l">discoveries</div></div>
 </div>
-
 <div class="grid">
   <div class="panel wide">
     <h2>size ladder · <span id="ladder-status" style="letter-spacing:0;color:var(--txt);text-transform:none"></span></h2>
@@ -490,6 +579,7 @@ const $=id=>document.getElementById(id);
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 function score(c){return c.metric==="muls"?Math.round(c.score)+" muls":c.score.toFixed(2)+" ms";}
 
+// ── audio ──────────────────────────────────────────────────────────────────────────────────────
 let AC=null,master=null,sound=false,analyser=null,vdata=null,vraf=0,vlevel=0;
 function initAudio(){
   AC=new (window.AudioContext||window.webkitAudioContext)();
@@ -514,11 +604,12 @@ function tone(freq,dur,type,vol){
 }
 function arp(base,steps,vol){steps.forEach((s,i)=>setTimeout(()=>tone(base*Math.pow(2,s/12),0.55,"triangle",vol||0.16),i*110));}
 const sfx={
-  blip:()=>tone(660,0.18,"sine",0.08),         // a life event ticked by
-  record:()=>arp(523.25,[0,4,7,12]),           // new champion — C major run up
-  node:()=>tone(146.83,1.4,"sine",0.14),       // a node joined — warm low swell
-  rise:()=>arp(392,[0,2,4,7]),                 // climbed a ladder rung
-  discovery:()=>arp(523.25,[0,4,7,12,16,19,24],0.2), // a genuine discovery — fanfare
+  blip:()=>tone(660,0.18,"sine",0.08),
+  record:()=>arp(523.25,[0,4,7,12]),
+  node:()=>tone(146.83,1.4,"sine",0.14),
+  rise:()=>arp(392,[0,2,4,7]),
+  discovery:()=>arp(523.25,[0,4,7,12,16,19,24],0.2),
+  click:()=>tone(880,0.06,"square",0.05),
 };
 function flareEye(gold){const e=$("eye");if(!e)return;e.classList.add("flare");if(gold)e.classList.add("gold");setTimeout(()=>{e.classList.remove("flare");if(gold)setTimeout(()=>e.classList.remove("gold"),700);},320);}
 let prev=null;
@@ -535,13 +626,11 @@ function react(s){
   }
   prev=cur;
 }
-// Drive the inner lens brightness from the LIVE audio amplitude: darker at rest, pulsing up with
-// the drone's slow swell and spiking on each chime/swell/fanfare — so the eye beats to the sound.
 function startVisual(){
   if(!analyser)return;
   cancelAnimationFrame(vraf);
   const glow=document.querySelector(".glow");
-  if(glow)glow.style.animation="none"; // let the analyser drive brightness instead of the breathe loop
+  if(glow)glow.style.animation="none";
   const loop=()=>{
     analyser.getByteTimeDomainData(vdata);
     let sum=0; for(let i=0;i<vdata.length;i++){const d=(vdata[i]-128)/128;sum+=d*d;}
@@ -556,7 +645,7 @@ function startVisual(){
 function stopVisual(){
   cancelAnimationFrame(vraf);vraf=0;
   const glow=document.querySelector(".glow");
-  if(glow){glow.style.filter="";glow.style.animation="";} // restore the gentle CSS breathe
+  if(glow){glow.style.filter="";glow.style.animation="";}
 }
 $("snd").onclick=()=>{
   if(!AC)initAudio();
@@ -567,6 +656,64 @@ $("snd").onclick=()=>{
   $("snd").className="pill snd"+(sound?" on":"");
   if(sound)startVisual(); else stopVisual();
 };
+
+// ── CRT console: type-animates real generated code, char by char ────────────────────────────────
+let crtCode="",crtPos=0,crtTimer=null,crtKey="";
+function crtAnimate(){
+  clearInterval(crtTimer);crtPos=0;
+  const el=$("crt-lines"); if(!el)return;
+  // show first screenful immediately, then stream the rest char-by-char at 18 chars/s
+  const lines=crtCode.split("\n");
+  const firstPage=lines.slice(0,24).join("\n");
+  el.textContent=firstPage;
+  const rest=lines.slice(24).join("\n");
+  if(!rest){el.scrollTop=el.scrollHeight;return;}
+  let buf=firstPage,i=0;
+  crtTimer=setInterval(()=>{
+    const chunk=rest.slice(i,i+3);if(!chunk){clearInterval(crtTimer);return;}
+    buf+=chunk;i+=chunk.length;
+    el.textContent=buf;el.scrollTop=el.scrollHeight;
+  },60);
+}
+async function refreshConsole(){
+  try{
+    const d=await (await fetch("/api/console")).json();
+    const key=d.title+(d.code||"").slice(0,40);
+    if(key===crtKey)return; // nothing new
+    crtKey=key;crtCode=d.code||"";
+    $("crt-title").textContent=d.title||"HAL 9001 · kernel";
+    crtAnimate();
+  }catch(e){}
+}
+refreshConsole(); setInterval(refreshConsole,8000);
+
+// ── choice menu: fetch once, render, handle clicks ─────────────────────────────────────────────
+(async()=>{
+  try{
+    const cs=await (await fetch("/api/choices")).json();
+    $("choices").innerHTML=cs.map(c=>`
+      <div class="choice" data-id="${esc(c.id)}">
+        <div class="cl">${esc(c.label)}</div>
+        <div class="cd">${esc(c.desc)}</div>
+        <div class="cc ${c.cost==="free"?"free":""}">${esc(c.cost)}</div>
+      </div>`).join("");
+    $("choices").querySelectorAll(".choice").forEach(btn=>{
+      btn.onclick=async()=>{
+        if(btn.classList.contains("sent"))return;
+        if(sound)sfx.click();
+        btn.classList.add("sent");
+        const fbk=$("fbk");fbk.textContent="transmitting…";
+        try{
+          const r=await (await fetch("/api/choose",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:btn.dataset.id})})).json();
+          fbk.textContent=r.ok?("✓ "+r.queued):(r.error||"error");
+        }catch(e){fbk.textContent="connection error";}
+        setTimeout(()=>{btn.classList.remove("sent");},8000);
+      };
+    });
+  }catch(e){}
+})();
+
+// ── main state poll ─────────────────────────────────────────────────────────────────────────────
 async function tick(){
   let s; try{ s=await (await fetch("/api/state")).json(); }catch(e){ return; }
   $("clock").textContent=s.now||"—";
@@ -578,7 +725,6 @@ async function tick(){
   $("m-records").textContent=s.stats?s.stats.records:0;
   $("m-events").textContent=s.stats?s.stats.total:0;
   $("m-disc").textContent=s.stats?s.stats.discoveries:0;
-
   if(s.ladder){
     const L=s.ladder;
     $("ladder-status").textContent=L.done?"complete — every size converged":("racing "+L.currentSize+"×"+L.currentSize+" · "+L.metric+" · plateau "+L.stale+"/"+L.plateauMax);
@@ -589,22 +735,17 @@ async function tick(){
       return '<span class="'+cls+'">'+sz+mark+'</span>';
     }).join("");
   }
-
   const cb=$("champs").querySelector("tbody");
   if(s.champions&&s.champions.length){
     $("champs-empty").style.display="none";
     cb.innerHTML=s.champions.map(c=>'<tr><td>'+c.size+'×'+c.size+'</td><td class="r">'+score(c)+'</td><td class="r up">'+c.speedup.toFixed(2)+'×</td></tr>').join("");
   } else { cb.innerHTML=""; $("champs-empty").style.display="block"; }
-
   $("goals").innerHTML=(s.goals&&s.goals.length)?s.goals.map(g=>'<div style="padding:5px 0;border-bottom:1px solid var(--line);font-size:13px">'+esc(g.description)+' <span style="color:var(--dim)">('+g.progress+'/'+g.budget+' · '+g.status+')</span></div>').join(""):'<div class="empty">no active goals.</div>';
-
   $("feed").innerHTML=(s.events&&s.events.length)?s.events.map(e=>{
     const t=(e.ts||"").replace("T"," ").slice(11,19);
     return '<div class="ev '+esc(e.kind)+'"><span class="t">'+t+'</span><span class="k">'+esc(e.kind)+'</span><span class="s">'+esc(e.summary)+'</span></div>';
   }).join(""):'<div class="empty">no events yet.</div>';
-
   $("journal").textContent=s.journal?s.journal.entry:"—";
-
   $("boost").style.display=s.boosted?"":"none";
   if(s.budget){var bd=s.budget,cap=bd.limit+bd.bonus; if(bd.remaining<=0){$("budget").textContent="thinking paused";$("budget").style.color="var(--gold)";}else{$("budget").textContent="budget $"+bd.spent.toFixed(2)+"/$"+cap.toFixed(2);$("budget").style.color="var(--dim)";}}
   $("asks").innerHTML=(s.asks&&s.asks.length)?s.asks.map(a=>'<div style="padding:7px 0;border-bottom:1px solid var(--line)"><div style="font-size:12px;color:#ff7a5c">▸ '+esc(a.sender)+': '+esc(a.text)+'</div>'+(a.reply?'<div style="font-size:13px;color:var(--txt);margin-top:3px">HAL: '+esc(a.reply)+'</div>':'<div style="font-size:11px;color:var(--dim);margin-top:3px">awaiting response…</div>')+'</div>').join(""):'<div class="empty">no transmissions yet.</div>';
