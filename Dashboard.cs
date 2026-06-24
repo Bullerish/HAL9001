@@ -100,6 +100,8 @@ public static class Dashboard
                 Write(ctx, "application/json", await ActivityJsonAsync(core));
             else if (path == "/api/live")
                 Write(ctx, "application/json", LiveJson());
+            else if (path == "/api/growth")
+                Write(ctx, "application/json", await GrowthJsonAsync(core));
             else if (path.StartsWith("/audio/") && path.EndsWith(".mp3"))
             {
                 byte[]? clip = TryGetAudio(path);
@@ -383,6 +385,50 @@ public static class Dashboard
     {
         string[] lines = LiveLog.Tail(80);
         return JsonSerializer.Serialize(new { lines }, JsonOpts);
+    }
+
+    // Everything HAL has grown into since it was born — derived ENTIRELY from cumulative, never-deleted
+    // facts: the per-kind episodic event tally (events are append-only, so these are true since-birth
+    // totals) plus a live count of the code it's carrying. Honest by construction — no fabricated numbers.
+    private static async Task<string> GrowthJsonAsync(AgentCore core)
+    {
+        var byKind = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        int total = 0; string? born = null;
+        try
+        {
+            var stats = await core.Events.StatsAsync();
+            total = stats.Total; born = stats.Earliest;
+            foreach (var (kind, count) in stats.ByKind) byKind[kind] = count;
+        }
+        catch { }
+        // identity.born is the canonical birthday; fall back to the earliest event if it's unset.
+        if (core.Identity is { } id && !string.IsNullOrEmpty(id.Born)) born = id.Born;
+
+        int K(params string[] kinds) { int s = 0; foreach (var k in kinds) if (byKind.TryGetValue(k, out int c)) s += c; return s; }
+
+        (int lines, int items) code = (0, 0);
+        try { code = await core.CodeOnBoardAsync(); } catch { }
+
+        var growth = new
+        {
+            born,
+            lifeEvents       = total,
+            toolsInvented    = K("capability-commissioned"),
+            factsLearned     = K("fact-remembered", "fact-derived"),
+            recordsSet       = K("matmul-record"),
+            roundsRaced      = K("matmul-round"),
+            sizesConverged   = K("matmul-size-converged"),
+            nodesSpawned     = K("node-hired"),
+            journalEntries   = K("journal-written"),
+            selfImprovements = K("self-improved"),
+            thoughtsShared   = K("thought-broadcast", "hive-synthesized"),
+            goalsSet         = K("goal-set"),
+            goalsDone        = K("goal-done"),
+            discoveries      = K("discovery"),
+            codeLines        = code.lines,
+            codeItems        = code.items,
+        };
+        return JsonSerializer.Serialize(growth, JsonOpts);
     }
 
     private static string OneLine(string? s, int max)
@@ -904,6 +950,12 @@ public static class Dashboard
   .metric .l{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:2px;margin-top:2px}
   .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
   .panel{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:14px 16px}
+  .since{font-size:10px;color:var(--dim);text-transform:none;letter-spacing:0;margin-left:8px}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(115px,1fr));gap:8px}
+  .stat{border:1px solid var(--line);border-radius:4px;padding:10px 8px;text-align:center;background:rgba(0,0,0,.18)}
+  .stat .n{font-size:22px;color:#ff5a3c;font-weight:400;font-variant-numeric:tabular-nums}
+  .stat .k{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:1.5px;margin-top:3px;line-height:1.3}
+  .stat.lit .n{color:var(--gold)}
   .panel h2{font-size:11px;text-transform:uppercase;letter-spacing:3px;color:#a3453a;margin-bottom:10px;font-weight:400}
   .ladder{display:flex;gap:6px;flex-wrap:wrap}
   .rung{font-size:12px;padding:6px 10px;border-radius:3px;border:1px solid var(--line);color:var(--dim);background:#0c0708}
@@ -1027,7 +1079,13 @@ public static class Dashboard
   <div class="metric"><div class="v" id="m-nodes">—</div><div class="l" id="m-nodes-l">live nodes</div></div>
   <div class="metric"><div class="v" id="m-records">—</div><div class="l">records set</div></div>
   <div class="metric"><div class="v" id="m-events">—</div><div class="l">life events</div></div>
-  <div class="metric"><div class="v" id="m-disc">—</div><div class="l">discoveries</div></div>
+  <div class="metric" title="A discovery is a matmul algorithm that BEATS humanity's known-best multiplication count (2x2=7, 3x3=23, 4x4=49) and survives 64-trial exact verification. Matching or beating HAL's own previous record is a 'record set', not a discovery — so this stays 0 until HAL beats the world.">
+    <div class="v" id="m-disc">—</div><div class="l">discoveries ⓘ</div></div>
+</div>
+<!-- GROWTH: everything HAL has learned/built since it was born (cumulative, append-only event tallies) -->
+<div class="panel wide" style="margin-bottom:12px">
+  <h2>what HAL has grown into<span class="since" id="since">—</span></h2>
+  <div class="stats" id="growth"></div>
 </div>
 <div class="grid">
   <div class="panel wide">
@@ -1236,6 +1294,33 @@ async function refreshActivity(){
   }catch(e){}
 }
 refreshActivity(); setInterval(refreshActivity,5000);
+
+// ── growth panel: everything HAL has learned/built since birth ───────────────────────────────────
+const GROWTH_CELLS=[
+  ["codeLines","lines of code",1],["toolsInvented","tools invented",1],["factsLearned","facts learned",0],
+  ["recordsSet","records set",0],["roundsRaced","rounds raced",0],["sizesConverged","sizes converged",0],
+  ["nodesSpawned","nodes spawned",1],["selfImprovements","self-improvements",0],["journalEntries","journal entries",0],
+  ["thoughtsShared","thoughts shared",0],["goalsDone","goals done",0],["discoveries","discoveries",0],
+];
+function ago(iso){
+  if(!iso)return "";
+  const t=Date.parse(iso); if(isNaN(t))return "";
+  const s=Math.max(0,(Date.now()-t)/1000), d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60);
+  if(d>0)return d+"d "+h+"h"; if(h>0)return h+"h "+m+"m"; return m+"m";
+}
+async function refreshGrowth(){
+  try{
+    const g=await (await fetch("/api/growth")).json();
+    const el=$("growth"); if(!el)return;
+    el.innerHTML=GROWTH_CELLS.map(([k,label,lit])=>{
+      const v=g[k]||0;
+      return '<div class="stat'+(lit&&v>0?' lit':'')+'"><div class="n">'+v.toLocaleString()+'</div><div class="k">'+label+'</div></div>';
+    }).join("");
+    const since=$("since");
+    if(since)since.textContent=g.born?("· alive "+ago(g.born)+" · "+g.born.slice(0,10)):"";
+  }catch(e){}
+}
+refreshGrowth(); setInterval(refreshGrowth,8000);
 
 // ── token wallet ─────────────────────────────────────────────────────────────────────────────
 // Server keeps the authoritative balance (cookie-keyed). The client mirrors it only to show the pill,

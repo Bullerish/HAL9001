@@ -1824,6 +1824,30 @@ public sealed class AgentCore
         return string.CompareOrdinal(tool.Value.Ts, mm.Value.Ts) >= 0 ? tool : mm;
     }
 
+    /// <summary>
+    /// How much code HAL is carrying right now: total newline-counted lines and item count across the
+    /// tools it has on the showcase board plus its champion matmul kernels. NOTE this is the LIVE
+    /// portfolio (showcase keeps only the most recent rows, matmul_records keeps one champion per size),
+    /// not an all-time cumulative — the honest "lines of code HAL is running", not "ever typed". The
+    /// all-time count of tools it has invented is the cumulative <c>capability-commissioned</c> event tally.
+    /// </summary>
+    public async Task<(int Lines, int Items)> CodeOnBoardAsync()
+    {
+        if (_turso is null) return (0, 0);
+        try
+        {
+            // newline count + 1 per non-empty source, summed over both code tables in one pass.
+            var r = await _turso.ExecuteAsync(
+                "SELECT COALESCE(SUM(LENGTH(source) - LENGTH(REPLACE(source, char(10), '')) + 1), 0), COUNT(*) " +
+                "FROM (SELECT source FROM showcase WHERE source != '' " +
+                "      UNION ALL SELECT source FROM matmul_records WHERE source != '')");
+            if (r.Count > 0 && r[0].Count >= 2)
+                return (int.TryParse(r[0][0], out int ln) ? ln : 0, int.TryParse(r[0][1], out int it) ? it : 0);
+        }
+        catch { }
+        return (0, 0);
+    }
+
     /// <summary>The most recent persisted bilinear scheme (U/V/W triple as JSON {n,rank,u,v,w}) from a
     /// tensor-search or volunteer champion — the literal "matrices being worked" for the dashboard CRT
     /// (bite 2). LLM-authored champions carry no triple, so this returns the latest size that has one.</summary>
