@@ -50,7 +50,9 @@ jobs:
       - name: Fix ownership and restart services
         run: |
           ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
-            "chown hal:hal /opt/hal9001/HAL9001.dll && systemctl restart hal-dashboard hal-swarm"
+            "chown hal:hal /opt/hal9001/HAL9001.dll && \
+             pkill -9 -f 'HAL9001 swarm' || true; sleep 2; \
+             systemctl restart hal-dashboard hal-swarm"
 
       - name: Verify dashboard is up
         run: |

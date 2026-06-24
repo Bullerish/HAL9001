@@ -830,7 +830,9 @@ public static class SwarmAgent
                 // AUTO-HIRE (persistent mesh): keep ~targetNodes helpers alive so the hive stays a mesh that
                 // can cross-query. Gate on ACTUAL peer count (not our own child count) so a leadership change
                 // can't over-spawn; node death heals by re-hiring up to target. Hard ceiling + grace bound the rate.
-                if (isAuto)
+                // CRITICAL: only the ROOT node hires. A hired worker is started with HAL_NO_AUTOHIRE=1 and must
+                // NEVER hire, or each spawned (initially solo) node would recursively spawn more → a fork bomb.
+                if (isAuto && Environment.GetEnvironmentVariable("HAL_NO_AUTOHIRE") != "1")
                 {
                     hiredProcesses.RemoveAll(p => p.HasExited);
                     if (node.Peers.Count < targetNodes

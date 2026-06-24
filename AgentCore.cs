@@ -1413,6 +1413,9 @@ public sealed class AgentCore
             CreateNoWindow = true,
             RedirectStandardInput = true,  // Console.IsInputRedirected=true in child → skips REPL
         };
+        // CRITICAL: a hired worker must NEVER auto-hire, or each spawned (initially solo) node recursively
+        // spawns more → a fork bomb. Only the ROOT node (no HAL_NO_AUTOHIRE) maintains the target mesh size.
+        psi.EnvironmentVariables["HAL_NO_AUTOHIRE"] = "1";
         System.Diagnostics.Process? proc = System.Diagnostics.Process.Start(psi);
         if (proc is null) { Console.WriteLine($"  [hire] Process.Start returned null for port {newPort}."); return null; }
 
