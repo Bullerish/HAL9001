@@ -5,13 +5,49 @@ Everything in this file assumes you are starting from a fresh checkout with **no
 of the local secrets or tooling yet in place.
 
 > **Repo:** `git@hal9001.github.com:Bullerish/HAL9001.git`
-> (GitHub: https://github.com/Bullerish/HAL9001 — private)
+> (GitHub: https://github.com/Bullerish/HAL9001 — **PUBLIC**; see "Pick up here" below)
 > **Branch:** `main` (in sync with origin). For the exact commit list and per-feature
 > evidence, see `git log` and `README.md` → *Release notes* (newest-first).
 > **Where the work is right now:** the project is **LIVE at https://hal9001.io** (bite 22)
 > with a token economy + Stripe checkout (bites 23–24) and is mid-way through the
 > **"honest & alive dashboard"** track (live node count = done; richer CRT + activity feed = next).
 > See §2 for the real current state and §18 for the open user actions.
+
+---
+
+## ⏩ Pick up here — session of 2026-06-24 (live "honest & alive" dashboard)
+
+**The repo is now PUBLIC** (decided this session). It's the core "HAL is real" trust signal — no secrets are committed (CI is secret-free; real secrets live only in `/etc/hal9001/hal.env` on the box). The box IP + root-deploy recipe were scrubbed from the public docs, though the IP remains in earlier git history (see Open threads).
+
+**Shipped & LIVE at hal9001.io this session:**
+- Live CRT activity feed (`/api/live`) + new tinny grind audio bed
+- "Matrices being worked" panel — streams the tensor-search U/V/W grids live (`/api/matrix`)
+- "What HAL has grown into" panel (`/api/growth`) + a discoveries explainer (why it reads 0)
+- **Function catalog** (`/api/functions`) — every tool HAL has written, each linking to its public source
+- "How you know this is real" **proof panel** + a "source on github" header link
+- **Typewriter**: the CRT now types the newest function on, char-by-char (length-scaled ~12s, click to skip, respects reduced-motion)
+- More curated "suggest a tool" chips (combinatorics / graph theory / calculus / probability)
+- Full **SEO**: title/description/keywords/OG/Twitter/JSON-LD, `/robots.txt`, `/sitemap.xml`, `/og.svg`
+
+**▶ DO FIRST on the new machine:**
+1. `git push origin main` (if anything is unpushed), then **`gh workflow run deploy.yml`**.
+   The catalog-completeness fix (`b2d43cf`) is pushed but **NOT yet deployed** — the last deploy (18:42Z) predates it. Deploying ships it.
+2. After deploy, verify: `/api/functions` count jumps (it now also counts visitor-steered tools — e.g. `bayes-theorem-calculator`); `/api/matrix` populates on the **next tensor-search round** (rounds fire ~every 12 min, so give it time).
+
+**Manual box steps (gated — run on the box yourself):**
+- **Caddy www→apex redirect:** copy the updated `deploy/Caddyfile` to `/etc/caddy/Caddyfile`, then `systemctl reload caddy` (SEO duplicate-content fix; non-load-bearing).
+- **Box hardening** (recommended now the IP is effectively public): SSH key-only (disable password auth), `fail2ban`, consider a non-root deploy user with scoped sudo.
+
+**Open threads / next ideas:**
+- **Live "run a function on a sample input"** in the dashboard (deferred) — would let visitors watch HAL's real code execute. Safe path: compile tool source straight from the Turso `showcase` table (needs no git on the box). Strongest realness signal — build next if wanted.
+- **Box IP in git history** (commits `7ca38e3`, `4c0dd2f`). Decide: accept it (an exposed IP is effectively permanent → just harden the box) vs rewrite history (BFG/filter-repo + force-push — fully removes it but breaks every commit SHA and the dashboard's new GitHub source links).
+- Bite 17 tensor-search rank-7 still unreliable (~1/9) — see the `bite17-search-notes` memory.
+
+**Ops gotchas learned this session (also in memory `dashboard-live-ipc`):**
+- `/api/live` + `/api/matrix` are **file-IPC under `/opt/hal9001`** (NOT `/tmp` — both services run `PrivateTmp=true`, so `/tmp` is per-service and not shared). Path = `AppContext.BaseDirectory`.
+- **Matmul rounds fire ~every 12 min**, not 2. Live surfaces populate slowly after a redeploy — confirm a round actually fired (newest `matmul-round` ts in `/api/state` vs the deploy time) before calling anything broken.
+- The **tool catalog = `capability-commissioned` + `curiosity-resolved` events** — visitor-steered/curiosity tools use the latter; reading only one kind undercounts.
+- `curl` to the box TLS-errors in Git Bash (exit 35); use PowerShell `Invoke-WebRequest -UseBasicParsing` to verify endpoints.
 
 ---
 
