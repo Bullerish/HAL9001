@@ -345,6 +345,11 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 
 > Newest first. Each rung was verified before the next was built. Commit hashes are on `main`.
 
+### Fix: the hive froze at 32×32 + the "matrices being worked" panel now follows every size
+Two linked bugs surfaced once the live box climbed the size ladder:
+- **The race stalled at 32×32.** The LLM-free tensor search materializes the full n²×n²×n² (= n⁶) matmul tensor — fine for small n, but **n=32 is ~1.07 billion ints (~4 GB)**, which OOM/GC-thrashed the box and hung the whole Prime Directive race loop (and with it the dashboard's live panels). `TensorSearch.Search` now declines gracefully above `MaxTensorCells` (≈120 MB) and the size falls back to the LLM/wall-clock track, so the ladder keeps climbing instead of wedging.
+- **The "matrices being worked" panel only rendered sizes ≤ 4**, so once the hive climbed past 4×4 the panel froze on the last small scheme and looked dead. It now publishes a compact live status for larger sizes (`racing 32×32 · plateau X/8 · <round summary>`, with a fresh timestamp) via `LiveMatrix.PublishStatus`, and the dashboard renders that line — so the panel follows the hive all the way up the ladder.
+
 ### Idle self-driving — the hive runs itself when no one's watching (autonomy: persistent mesh + cross-node querying)
 When `autonomous` mode is ON and no one is interacting (no paid asks/steers), the hive drives itself — and now keeps a *mesh* doing it, not a lone node. This is the first half ("spin up nodes, have them query each other") of HAL running itself between visitors.
 - **Persistent mesh (bite A):** auto-hire no longer fires only "when solo" — it maintains a target of `HAL_TARGET_NODES` helper nodes (default **2**; hard ceiling **5**), gated on the *actual peer count* so a leadership change can't over-spawn, and it heals node death by re-hiring back up to target. Spawning a node costs no tokens; each node budget-gates its own LLM use.

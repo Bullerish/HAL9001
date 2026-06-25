@@ -1129,6 +1129,18 @@ public static class SwarmAgent
                         await core.Events.AppendAsync("matmul-round", step.Round.Summary);
                     }
 
+                    // Keep the "matrices being worked" panel FOLLOWING the hive for sizes too big to draw
+                    // as U/V/W grids (the grid onSnap only fires for n≤4). Publish a compact live status so
+                    // the panel shows the CURRENT size + a fresh timestamp instead of freezing on the last
+                    // small scheme. (n≤4 keeps streaming full grids via the search snapshot.)
+                    if (step.Size > 4)
+                    {
+                        string note = $"racing {step.Size}x{step.Size} [{unit}] · plateau {step.Stale}/{MatmulLadder.PlateauRounds}"
+                                    + (step.Round is null ? " · no candidate beat the bar this round" : " · " + step.Round.Summary);
+                        int best = step.Round is not null ? (int)Math.Round(step.Round.Score) : 0;
+                        LiveMatrix.PublishStatus(step.Size, best, 0, note);
+                    }
+
                     if (step.Advanced)
                     {
                         Console.WriteLine($"[matmul-race] {step.Size}x{step.Size} CONVERGED — climbing the ladder to {step.NextSize}x{step.NextSize}.");

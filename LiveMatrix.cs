@@ -38,6 +38,15 @@ static class LiveMatrix
         }
     }
 
+    /// <summary>Publish a compact "currently working" status for sizes too large to render as U/V/W grids
+    /// (n &gt; 4). Keeps the panel FRESH and following the hive up the ladder instead of frozen on the last
+    /// small scheme. Carries no grids — just n, the current best (muls), and a human note.</summary>
+    public static void PublishStatus(int n, int rank, int error, string note)
+    {
+        string safe = (note ?? "").Replace("\\", " ").Replace("\"", "'").Replace("\n", " ").Replace("\r", " ");
+        Publish($"{{\"n\":{n},\"rank\":{rank},\"note\":\"{safe}\"}}", error);
+    }
+
     /// <summary>The latest published snapshot wrapper, or "" if none. The dashboard parses ts/error/scheme.</summary>
     public static string Read()
     {

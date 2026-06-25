@@ -35,11 +35,27 @@ public sealed class TensorSearch
     /// Returns the decomposition on success (error 0), or null if none was found within the budget;
     /// <paramref name="bestError"/> reports the lowest residual seen (0 == exact).
     /// </summary>
+    /// <summary>Cap on the n²×n²×n² (= n⁶) tensor the direct search materializes — ~120 MB of int.
+    /// Above this the allocation OOMs/stalls a small box and freezes the race loop (n=32 ⇒ ~1.07e9
+    /// cells ≈ 4 GB), so larger sizes decline the direct search and fall back to the LLM track.</summary>
+    public const long MaxTensorCells = 30_000_000;
+
+    /// <summary>True if the direct (LLM-free) search is feasible at this size without exhausting memory.</summary>
+    public static bool Feasible(int n) => (long)n * n * n * n * n * n <= MaxTensorCells;
+
     public static Decomposition? Search(
         int n, int rank, out int bestError,
         int maxRestarts = 100000, double maxSeconds = 25, int? seed = null,
         Action<string>? onProgress = null, Action<Decomposition, int>? onSnapshot = null)
     {
+        // Decline gracefully when the n⁶ tensor would be too large to hold — building it would OOM or
+        // GC-thrash the box and hang the whole Prime Directive race (this is what froze the hive at 32×32).
+        if (!Feasible(n))
+        {
+            bestError = -1;
+            onProgress?.Invoke($"{n}x{n} tensor too large for direct search ({(long)n*n*n*n*n*n:N0} cells) — skipping (LLM track only)");
+            return null;
+        }
         var runner = new Runner(n, rank, seed ?? Environment.TickCount);
         return runner.Run(maxRestarts, maxSeconds, out bestError, onProgress, onSnapshot);
     }

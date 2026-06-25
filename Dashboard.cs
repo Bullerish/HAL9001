@@ -469,13 +469,24 @@ public static class Dashboard
 
     // Render a persisted bilinear scheme (the {n,rank,u,v,w} JSON) as ASCII U/V/W grids for the CRT —
     // the literal "matrices being worked". Kept to small n so the grids stay readable in the terminal pane.
-    private sealed record SchemeDto(int n, int rank, int[][]? u, int[][]? v, int[][]? w);
+    private sealed record SchemeDto(int n, int rank, int[][]? u, int[][]? v, int[][]? w, string? note);
     private static string RenderScheme(string json)
     {
         SchemeDto? d;
         try { d = JsonSerializer.Deserialize<SchemeDto>(json, JsonOpts); } catch { return ""; }
-        if (d is null || d.u is null || d.v is null || d.w is null) return "";
-        if (d.n < 2 || d.n > 4) return ""; // larger grids are unreadable in the terminal pane
+        if (d is null) return "";
+        // Sizes too large to draw as grids (n>4), or status-only snapshots: show a compact "working now"
+        // line so the panel FOLLOWS the hive up the ladder instead of freezing on the last small scheme.
+        if (d.u is null || d.v is null || d.w is null || d.n < 2 || d.n > 4)
+        {
+            if (string.IsNullOrWhiteSpace(d.note)) return "";
+            var s2 = new System.Text.StringBuilder();
+            s2.Append("// == matrices being worked · ").Append(d.n).Append('x').Append(d.n).Append(" ==\n");
+            s2.Append("// ").Append(d.note).Append('\n');
+            s2.Append("//\n// (U/V/W grids are drawn for sizes ≤ 4; larger schemes are summarized —\n");
+            s2.Append("//  the hive is racing a ").Append(d.n).Append('x').Append(d.n).Append(" tensor right now.)\n");
+            return s2.ToString();
+        }
         var sb = new System.Text.StringBuilder();
         sb.Append("// == matrices being worked · ").Append(d.n).Append('x').Append(d.n)
           .Append(" · rank ").Append(d.rank).Append(" (").Append(d.rank).Append(" muls) ==\n");
