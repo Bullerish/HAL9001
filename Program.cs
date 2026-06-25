@@ -82,6 +82,22 @@ switch (args[0].ToLowerInvariant())
         break;
     }
 
+    // autonomous [on|off] → headless control of autonomous mode (otherwise a REPL-only toggle). Needs the
+    // TURSO_* hive but NO API key — it just flips the shared flag every node reads. No arg → prints state.
+    // This is how you switch the self-driving hive on/off from a box that has no interactive console; the
+    // change is shared + persisted, so it takes effect on the live box within a cycle.
+    case "autonomous":
+    {
+        var core = new AgentCore(AnthropicClient.FromEnvironment());
+        if (!core.HasHive) { Console.WriteLine("No hive configured — set TURSO_DATABASE_URL + TURSO_AUTH_TOKEN."); break; }
+        try { await core.EnsureHiveAsync(); } catch (Exception ex) { Console.WriteLine($"hive unavailable: {ex.Message}"); break; }
+        string sub = args.Length >= 2 ? args[1].Trim().ToLowerInvariant() : "status";
+        if (sub is "on" or "1" or "true") await core.SetAutonomousAsync(true);
+        else if (sub is "off" or "0" or "false") await core.SetAutonomousAsync(false);
+        else Console.WriteLine($"  [autonomous] currently {(await core.IsAutonomousAsync() ? "ON — the hive self-drives" : "OFF — it waits for approval")}.");
+        break;
+    }
+
     // hive → speak as the collective consciousness: synthesize all nodes' broadcast thoughts into one
     // first-person voice. Standalone (no swarm needed) — proves the collective self lives in the shared
     // DB, not in any process. Needs the TURSO_* env vars + ANTHROPIC_API_KEY (for synthesis).
