@@ -111,6 +111,25 @@ public static class SwarmAgent
         // Run AFTER the actor is set so an identity BIRTH is attributed to this node. No-op without Turso.
         try { await core.EnsureHiveAsync(); }
         catch (Exception ex) { Console.WriteLine($"[hive] knowledge store unavailable: {ex.Message}"); }
+
+        // AUTONOMY AT STARTUP (headless box): autonomous mode is otherwise a REPL-only toggle
+        // (`autonomous on`), but a systemd node has no console — so a box that gets switched off can
+        // never be switched back on, and nothing self-drives (no matmul race, goals stuck "Proposed").
+        // HAL_AUTONOMOUS lets the box's hal.env drive it: on/1/true/yes → enable, off/0/false/no →
+        // disable, unset → leave the persisted setting untouched. Applied once, only when it differs
+        // (so we don't spam autonomous-mode events on every restart).
+        {
+            string? autoEnv = Environment.GetEnvironmentVariable("HAL_AUTONOMOUS")?.Trim().ToLowerInvariant();
+            bool? want = autoEnv is "on" or "1" or "true" or "yes" ? true
+                       : autoEnv is "off" or "0" or "false" or "no" ? false
+                       : (bool?)null;
+            if (want is not null)
+            {
+                try { if (await core.IsAutonomousAsync() != want.Value) await core.SetAutonomousAsync(want.Value); }
+                catch { }
+            }
+        }
+
         var pending = new ConcurrentDictionary<string, string>(); // reqId -> origin asker (coordinator role: in-progress guard)
         int roundRobin = 0;
 
