@@ -672,6 +672,10 @@ public static class Dashboard
             if (string.IsNullOrEmpty(p.Vid)) { ctx.Response.StatusCode = 400; return Err("missing vid"); }
             int n = Math.Clamp(p.Tokens ?? 0, 1, 1000);
             int bal = await core.WalletCreditAsync(p.Vid!, n);
+            // Also fund today's thinking budget so the buyer's steers can actually run (HAL_DAILY_USD=0 ⇒
+            // nothing thinks unless paid). Price it from the matching pack; an allowance/cap, not a transfer.
+            var pk = Packs.FirstOrDefault(x => x.Tokens == n);
+            if (pk is not null) await core.AddBudgetBonusAsync(pk.Cents / 100.0);
             return bal > 0 ? JsonSerializer.Serialize(new { ok = true, tokens = bal }, JsonOpts) : Err("credit failed");
         }
         ctx.Response.StatusCode = 400; return Err("unknown action");
@@ -782,7 +786,14 @@ public static class Dashboard
                     if (await core.ClaimStripeEventAsync(sessionId)) // credit once per paid session
                     {
                         int bal = await core.WalletCreditAsync(vid, tokens);
-                        await Log(core, "tokens-purchased", $"{vid[..Math.Min(8, vid.Length)]}… bought {tokens} tokens (balance {bal})");
+                        // A purchase also funds today's THINKING budget so the buyer's steers actually run —
+                        // with HAL_DAILY_USD=0 nothing thinks unless paid. This is an allowance/CAP, not a
+                        // transfer: HAL only spends the few cents each steer truly costs, so the pack keeps its
+                        // margin. Inside the same idempotent claim, so a replayed event can't double-fund.
+                        double usd = obj.TryGetProperty("amount_total", out var at) && at.ValueKind == JsonValueKind.Number
+                            ? at.GetInt64() / 100.0 : 0;
+                        if (usd > 0) await core.AddBudgetBonusAsync(usd);
+                        await Log(core, "tokens-purchased", $"{vid[..Math.Min(8, vid.Length)]}… bought {tokens} tokens (balance {bal}), +${usd:F2} budget");
                     }
                 }
             }
