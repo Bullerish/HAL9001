@@ -345,6 +345,9 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 
 > Newest first. Each rung was verified before the next was built. Commit hashes are on `main`.
 
+### Cost guard: HAL never spends the owner's Anthropic key unless someone pays
+The daily budget meter's base allowance (`HAL_DAILY_USD`) now **defaults to 0**. With it at 0, HAL does **no** LLM work on the owner's key for free — no autonomous self-driving (matmul LLM candidates, goals, journaling, gap-fill) **and no free visitor asks** (those were previously answered *above* the budget gate, a free-spend/abuse leak — now budget-gated too). HAL only "thinks" once a payment/donation tops up today's budget (`AddBudgetBonusAsync`, the `fund` action). The zero-cost CPU work (tensor/matmul search at small sizes, wall-clock benchmarks) keeps running regardless, since it spends no Anthropic tokens. Set `HAL_DAILY_USD` above 0 only to deliberately grant a free daily self-improvement allowance out of pocket.
+
 ### Fix: the hive froze at 32×32 + the "matrices being worked" panel now follows every size
 Two linked bugs surfaced once the live box climbed the size ladder:
 - **The race stalled at 32×32.** The LLM-free tensor search materializes the full n²×n²×n² (= n⁶) matmul tensor — fine for small n, but **n=32 is ~1.07 billion ints (~4 GB)**, which OOM/GC-thrashed the box and hung the whole Prime Directive race loop (and with it the dashboard's live panels). `TensorSearch.Search` now declines gracefully above `MaxTensorCells` (≈120 MB) and the size falls back to the LLM/wall-clock track, so the ladder keeps climbing instead of wedging.

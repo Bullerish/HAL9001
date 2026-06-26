@@ -829,6 +829,12 @@ public static class SwarmAgent
                     var ask = await core.NextPendingAskAsync();
                     if (ask is not null)
                     {
+                        // Visitor Q&A also spends the owner's Anthropic key, so gate it on the SAME budget as
+                        // everything else. With no funded budget (HAL_DAILY_USD=0 and no donation) HAL will NOT
+                        // answer free asks on the owner's dime — they wait until someone funds the hive. This is
+                        // what makes "no spend unless someone pays" actually hold (it also closes a free-asks
+                        // abuse vector on the public page). Paid steers are budget-gated below as well.
+                        if (!await core.HasBudgetAsync()) continue;
                         string reply = await core.RespondToVisitorAsync(ask.Value.Sender, ask.Value.Text);
                         if (reply.Length > 0)
                         {

@@ -1663,8 +1663,11 @@ public sealed class AgentCore
         string? v = Environment.GetEnvironmentVariable(key);
         return double.TryParse(v, System.Globalization.NumberStyles.Any, Inv, out double d) ? d : def;
     }
-    /// <summary>Owner's baseline daily LLM budget in USD (env HAL_DAILY_USD, default 1.0).</summary>
-    public static double DailyBudgetUsd => EnvD("HAL_DAILY_USD", 1.0);
+    /// <summary>Owner's baseline daily LLM budget in USD that HAL may spend on its OWN key with NObody
+    /// paying (env HAL_DAILY_USD). DEFAULT 0 — HAL does not spend the owner's Anthropic usage on autonomous
+    /// self-driving or free visitor asks; it only thinks once a payment/donation tops up today's budget
+    /// (AddBudgetBonusAsync). Set HAL_DAILY_USD &gt; 0 to grant a free daily self-improvement allowance.</summary>
+    public static double DailyBudgetUsd => EnvD("HAL_DAILY_USD", 0.0);
     private static double PriceInPerMTok => EnvD("HAL_PRICE_IN", 1.0);    // USD per 1M input tokens
     private static double PriceOutPerMTok => EnvD("HAL_PRICE_OUT", 5.0);  // USD per 1M output tokens
     private static string BudgetDay => DateTime.UtcNow.ToString("yyyy-MM-dd");
