@@ -1129,49 +1129,32 @@ public static class Dashboard
 
     // The whole page — self-contained (no external dependencies, works offline). Polls /api/state.
     private const string Html = """
-<!DOCTYPE html>
-<html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>HAL 9001 — a self-improving AI that writes and verifies its own code, live</title>
-<meta name="description" content="HAL 9001 is an autonomous, self-improving AI that writes its own code in real time — compiling, exact-verifying, and committing every line to a public repo while racing to discover faster matrix-multiplication algorithms. Watch it think.">
-<meta name="keywords" content="autonomous AI agent, self-improving AI, AI that writes its own code, live AI experiment, AI agent dashboard, recursive self-improvement, fast matrix multiplication">
-<link rel="canonical" href="https://hal9001.io/">
-<meta name="robots" content="index,follow,max-image-preview:large">
-<meta name="theme-color" content="#ff2d18">
-<meta name="author" content="HAL 9001">
-<!-- Open Graph -->
-<meta property="og:type" content="website">
-<meta property="og:site_name" content="HAL 9001">
-<meta property="og:title" content="HAL 9001 — a self-improving AI writing its own code, live">
-<meta property="og:description" content="An autonomous AI that writes, compiles, and exact-verifies its own code in real time — racing to discover faster matrix-multiplication algorithms. Every line is committed to a public repo as it happens.">
-<meta property="og:url" content="https://hal9001.io/">
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HAL 9001 — a machine that writes its own code, in public</title>
+<meta name="description" content="A self-extending AI agent that writes its own C#, compiles it with Roslyn, proves it correct, and races to find faster matrix-multiplication algorithms. Every number on this page is read live from its shared memory.">
+<meta name="keywords" content="HAL 9001, self-improving AI, autonomous agent, matrix multiplication, Strassen, Roslyn, live AI">
+<meta property="og:title" content="HAL 9001 — a machine that writes its own code, in public">
+<meta property="og:description" content="It writes its own tools, compiles them, proves them correct, and hunts faster matrix algorithms. Nothing on this page is mocked.">
+<meta property="og:type" content="website"><meta property="og:url" content="https://hal9001.io/">
 <meta property="og:image" content="https://hal9001.io/og.svg">
-<meta property="og:image:width" content="1200">
-<meta property="og:image:height" content="630">
-<!-- Twitter -->
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="HAL 9001 — a self-improving AI writing its own code, live">
-<meta name="twitter:description" content="An autonomous AI that writes and exact-verifies its own code in real time. Watch it work — every line is committed to a public repo.">
-<meta name="twitter:image" content="https://hal9001.io/og.svg">
-<script type="application/ld+json">
-{"@context":"https://schema.org","@type":"WebApplication","name":"HAL 9001","alternateName":"HAL 9001 self-improving AI","url":"https://hal9001.io/","applicationCategory":"Artificial Intelligence","operatingSystem":"Web","description":"HAL 9001 is an autonomous, self-improving AI that writes its own code in real time — compiling, exact-verifying, and committing every line to a public repository while racing to discover faster matrix-multiplication algorithms.","sameAs":["https://github.com/Bullerish/HAL9001"],"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}
-</script>
-<!-- Google tag (gtag.js) -->
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-DWRCFTP4G7"></script>
-<script>
-  window.dataLayer = window.dataLayer || [];
-  function gtag(){dataLayer.push(arguments);}
-  gtag('js', new Date());
-  gtag('config', 'G-DWRCFTP4G7');
-</script>
+<link rel="canonical" href="https://hal9001.io/">
 <style>
-  :root{--bg:#000;--panel:#0a0506;--line:rgba(255,60,40,.16);--line2:rgba(255,60,40,.34);--txt:#b9b2ad;--dim:#6e5a55;--red:#ff2d18;--gold:#ffd166;}
+  :root{--bg:#000;--panel:#0a0506;--line:rgba(255,60,40,.16);--line2:rgba(255,60,40,.34);--txt:#c2bab4;--dim:#8a7a74;--red:#ff2d18;--gold:#ffd166;--green:#33cc44;}
   *{box-sizing:border-box;margin:0;padding:0}
-  body{background:radial-gradient(ellipse at 50% -5%,#1a0707 0%,#000 58%);color:var(--txt);font:14px/1.55 ui-monospace,"Cascadia Code",Menlo,Consolas,monospace;padding:26px 20px 44px;min-height:100vh}
-  .eyewrap{display:flex;flex-direction:column;align-items:center;gap:12px;margin:6px auto 26px}
+  body{background:radial-gradient(ellipse at 50% -5%,#1a0707 0%,#000 58%);color:var(--txt);
+    font:14px/1.55 ui-monospace,"Cascadia Code",Menlo,Consolas,monospace;min-height:100vh;padding-bottom:60px}
+  a{color:#ffb000;text-decoration:none;border-bottom:1px solid rgba(255,176,0,.3)}
+  a:hover{color:#ffd166}
+  ::selection{background:var(--red);color:#000}
+  em{font-style:italic;color:#ded7cb}
+
+  /* ── the eye — unchanged ─────────────────────────────────────────────────── */
   .eye{position:relative;width:172px;height:172px;border-radius:50%;display:flex;align-items:center;justify-content:center;
     background:conic-gradient(from 212deg,#54585d,#c6cbd0,#7e8388,#eceff2,#696d72,#b0b5ba,#565a5f,#d4d8db,#54585d);
-    box-shadow:0 10px 30px rgba(0,0,0,.85),inset 0 2px 5px rgba(255,255,255,.35),inset 0 -4px 8px rgba(0,0,0,.65)}
+    box-shadow:0 10px 30px rgba(0,0,0,.85),inset 0 2px 5px rgba(255,255,255,.35),inset 0 -4px 8px rgba(0,0,0,.65);
+    transition:box-shadow .25s;flex:none}
   .eye::after{content:"";position:absolute;inset:-34px;border-radius:50%;z-index:-1;background:radial-gradient(circle,rgba(255,42,16,.30),transparent 70%);transition:background .25s}
   .lens{position:relative;width:132px;height:132px;border-radius:50%;background:#040404;overflow:hidden;box-shadow:inset 0 0 24px 8px #000,inset 0 0 3px 2px rgba(0,0,0,.9)}
   .glow{position:absolute;inset:0;border-radius:50%;animation:breathe 5s ease-in-out infinite;
@@ -1185,299 +1168,337 @@ public static class Dashboard
   .eye.flare .glow{filter:brightness(1.55)}
   .eye.flare .hot{box-shadow:0 0 26px 10px rgba(255,200,120,1),0 0 60px 22px rgba(255,90,30,.7)}
   .eye.flare::after{background:radial-gradient(circle,rgba(255,70,28,.5),transparent 72%)}
+  .eye.flare{box-shadow:0 10px 30px rgba(0,0,0,.85),inset 0 2px 5px rgba(255,255,255,.4),inset 0 -4px 8px rgba(0,0,0,.6),inset 0 0 16px 3px rgba(255,70,34,.55),0 0 46px 10px rgba(255,55,22,.45)}
   .eye.gold .glow{background:radial-gradient(circle at 50% 53%,#fff6df 0%,#ffd166 16%,#ff9b1a 33%,#b35e00 52%,rgba(40,20,0,.45) 64%,#050404 76%)}
   .eye.gold::after{background:radial-gradient(circle,rgba(255,200,90,.5),transparent 72%)}
-  h1{font-size:23px;font-weight:400;letter-spacing:9px;color:#e7ddd6;text-align:center}
-  .tag{color:#9a4034;font-size:10px;letter-spacing:3px;text-transform:uppercase;text-align:center}
-  .sub{color:#8a6f64;font-size:12px;text-align:center;max-width:680px}
-  .badges{display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap;margin-top:2px}
-  .pill{font-size:10px;padding:4px 11px;border-radius:3px;border:1px solid var(--line2);color:var(--dim);letter-spacing:1.5px;text-transform:uppercase}
-  .live{color:var(--red);border-color:rgba(255,45,24,.4)}
-  .live .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--red);margin-right:6px;animation:pulse 1.6s infinite;box-shadow:0 0 8px var(--red)}
-  .on{color:var(--red);border-color:rgba(255,45,24,.4)}
-  .off{color:var(--dim)}
-  .snd{cursor:pointer;background:transparent;font:inherit}
-  .snd.on{color:var(--gold);border-color:rgba(255,209,102,.45)}
-  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.2}}
-  .wrap{max-width:1100px;margin:0 auto}
-  .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:0 auto 12px}
-  .metric{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:12px 10px;text-align:center}
-  .metric .v{font-size:26px;color:#ff5a3c;font-weight:400}
-  .metric .l{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:2px;margin-top:2px}
-  .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
-  .panel{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:14px 16px}
-  .since{font-size:10px;color:var(--dim);text-transform:none;letter-spacing:0;margin-left:8px}
-  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(115px,1fr));gap:8px}
-  .stat{border:1px solid var(--line);border-radius:4px;padding:10px 8px;text-align:center;background:rgba(0,0,0,.18)}
-  .stat .n{font-size:22px;color:#ff5a3c;font-weight:400;font-variant-numeric:tabular-nums}
-  .stat .k{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:1.5px;margin-top:3px;line-height:1.3}
-  .stat.lit .n{color:var(--gold)}
-  .panel h2{font-size:11px;text-transform:uppercase;letter-spacing:3px;color:#a3453a;margin-bottom:10px;font-weight:400}
-  .ladder{display:flex;gap:6px;flex-wrap:wrap}
-  .rung{font-size:12px;padding:6px 10px;border-radius:3px;border:1px solid var(--line);color:var(--dim);background:#0c0708}
-  .rung.done{color:#ff7a5c;border-color:rgba(255,90,60,.4)}
-  .rung.cur{color:#160000;background:var(--red);border-color:var(--red);box-shadow:0 0 12px rgba(255,45,24,.6)}
-  table{width:100%;border-collapse:collapse;font-size:13px}
-  td{padding:5px 0;border-bottom:1px solid var(--line)}
-  td.r{text-align:right}
-  .up{color:#ff7a5c}
-  .feed{max-height:320px;overflow:auto}
-  .ev{display:flex;gap:8px;padding:5px 0;border-bottom:1px solid var(--line);font-size:12px;cursor:pointer}
-  .ev .t{color:var(--dim);white-space:nowrap}
-  .ev .k{color:#a3453a;white-space:nowrap}
-  .ev .s{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .ev.open .s{white-space:normal;overflow:visible}
-  .ev.discovery .k,.ev.discovery .s{color:var(--gold)}
-  .ev.contribution-accepted .k,.ev.contribution-accepted .s{color:#ff7a5c}
-  .quote{font-style:italic;color:#8a6f64;border-left:2px solid var(--line2);padding-left:12px;line-height:1.7}
-  .empty{color:var(--dim);font-size:12px}
-  .wide{grid-column:1/-1}
-  /* github proof pill */
-  .pill.gh{text-decoration:none;color:#ffd166;border-color:rgba(255,209,102,.45)}
-  .pill.gh:hover{background:rgba(255,209,102,.12)}
-  /* proof-of-realness panel */
-  .panel.proof{border-color:rgba(255,209,102,.28)}
-  .proofgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
-  .pf{font-size:12px;line-height:1.6;color:var(--txt);border-left:2px solid rgba(255,209,102,.35);padding-left:11px}
-  .pf b{color:#ffd166;font-weight:600}
-  .pf a{color:#ff7a5c}
-  /* function catalog */
-  .fnlist{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;max-height:430px;overflow:auto}
-  .fn{border:1px solid var(--line);border-radius:4px;padding:10px 12px;background:rgba(0,0,0,.18)}
-  .fn .nm{color:#ff7a5c;font-size:13px;word-break:break-all}
-  .fn .nm .new{color:#160000;background:var(--gold);font-size:9px;padding:1px 5px;border-radius:3px;margin-left:6px;letter-spacing:1px;text-transform:uppercase;vertical-align:middle}
-  .fn .meta{display:flex;gap:8px;flex-wrap:wrap;margin:5px 0;font-size:10px}
-  .fn .sig{color:#8a6f64;font-family:ui-monospace,monospace}
-  .fn .stab{color:var(--dim);text-transform:uppercase;letter-spacing:1px}
-  .fn .stab.Live{color:#ffd166}
-  .fn .d{font-size:11px;color:#8a6f64;line-height:1.5;margin:4px 0 7px}
-  .fn .when{font-size:10px;color:var(--dim)}
-  .fn a.src{font-size:10px;color:#ff7a5c;text-decoration:none;float:right}
-  .fn a.src:hover{text-decoration:underline}
-  footer{max-width:1200px;margin:16px auto 0;color:var(--dim);font-size:10px;text-align:center;letter-spacing:2px;text-transform:uppercase}
-  /* eye transitions */
-  .eye{transition:box-shadow .25s}
-  .eye.flare{box-shadow:0 10px 30px rgba(0,0,0,.85),inset 0 2px 5px rgba(255,255,255,.4),inset 0 -4px 8px rgba(0,0,0,.6),inset 0 0 16px 3px rgba(255,70,34,.55),0 0 46px 10px rgba(255,55,22,.45)}
   .eye.gold{box-shadow:0 10px 30px rgba(0,0,0,.85),inset 0 2px 5px rgba(255,255,255,.4),inset 0 -4px 8px rgba(0,0,0,.6),inset 0 0 18px 4px rgba(255,200,90,.6),0 0 60px 14px rgba(255,200,90,.5)}
-  /* CRT page overlay */
+
+  /* ── page CRT overlay + the sweeping bar — unchanged ─────────────────────── */
   .crt{position:fixed;inset:0;pointer-events:none;z-index:50;background:repeating-linear-gradient(to bottom,rgba(0,0,0,0) 0,rgba(0,0,0,0) 2px,rgba(0,0,0,.16) 3px,rgba(0,0,0,0) 4px);animation:flicker 5.5s infinite}
   .vig{position:fixed;inset:0;pointer-events:none;z-index:49;background:radial-gradient(ellipse at 50% 42%,transparent 52%,rgba(0,0,0,.6) 100%)}
   .scan{position:fixed;left:0;right:0;top:-140px;height:140px;pointer-events:none;z-index:51;background:linear-gradient(to bottom,transparent,rgba(255,120,80,.045),transparent);animation:sweep 7s linear infinite}
   @keyframes flicker{0%,100%{opacity:.96}48%{opacity:1}50%{opacity:.92}52%{opacity:1}}
   @keyframes sweep{0%{top:-140px}100%{top:100%}}
-  /* hero row: eye left, CRT console right. Left column is FIXED so long directive/concept text
-     can't blow out the 'auto' track and collapse the CRT; minmax(0,1fr) lets the CRT shrink. */
-  .hero{display:grid;grid-template-columns:360px minmax(0,1fr);gap:28px;align-items:start;max-width:1200px;margin:0 auto 22px}
-  .eyecol{display:flex;flex-direction:column;align-items:center;gap:10px;width:360px;max-width:100%}
-  .eyecol .tag,.eyecol .sub{max-width:320px;overflow-wrap:anywhere}
-  @media(max-width:780px){.hero{grid-template-columns:1fr}.eyecol{width:auto;margin:0 auto}}
-  /* green-phosphor CRT terminal */
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.2}}
+
+  /* ── green-phosphor panels — unchanged ───────────────────────────────────── */
   .crtbox{background:#010e03;border:2px solid #1a4a1c;border-radius:6px;box-shadow:0 0 28px rgba(0,255,40,.12),inset 0 0 60px rgba(0,0,0,.7);position:relative;overflow:hidden}
   .crtbox::before{content:"";position:absolute;inset:0;background:repeating-linear-gradient(to bottom,transparent 0,transparent 2px,rgba(0,0,0,.25) 3px,transparent 4px);pointer-events:none;z-index:2}
   .crtbox::after{content:"";position:absolute;inset:0;background:radial-gradient(ellipse at 50% 50%,transparent 55%,rgba(0,0,0,.55) 100%);pointer-events:none;z-index:3}
-  .crttop{background:#020f04;border-bottom:1px solid #1a3a1c;padding:7px 14px;display:flex;justify-content:space-between;align-items:center}
-  .crttop .ctitle{color:#33cc44;font-size:11px;letter-spacing:2px;text-transform:uppercase}
-  .crttop .cblink{width:8px;height:8px;border-radius:50%;background:#33cc44;animation:cblink 1.1s steps(1) infinite;box-shadow:0 0 6px #33cc44}
+  .crttop{background:#020f04;border-bottom:1px solid #1a3a1c;padding:7px 14px;display:flex;justify-content:space-between;align-items:center;gap:12px;position:relative;z-index:4}
+  .ctitle{color:var(--green);font-size:11px;letter-spacing:2px;text-transform:uppercase;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .cblink{width:8px;height:8px;border-radius:50%;background:var(--green);animation:cblink 1.1s steps(1) infinite;box-shadow:0 0 6px var(--green);flex:none}
   @keyframes cblink{0%,49%{opacity:1}50%,100%{opacity:0}}
-  .crtbody{padding:14px 16px;height:380px;overflow:hidden;position:relative;z-index:1}
-  .crtlines{font:13px/1.6 "Courier New",Courier,monospace;color:#33cc44;text-shadow:0 0 6px rgba(51,204,68,.6);white-space:pre;word-break:break-all;height:calc(100% - 34px);overflow:hidden}
-  /* The status ticker gets its own bar: the feed above is white-space:pre in a clipped pane, so a long
-     status line was simply cut off mid-word at the right edge ("… · last act:"). Here it wraps. */
-  .crtstatus{font:12px/1.5 "Courier New",Courier,monospace;color:#33cc44;opacity:.85;white-space:pre-wrap;
-    word-break:break-word;border-top:1px solid rgba(51,204,68,.22);margin-top:8px;padding-top:6px;max-height:26px;overflow:hidden}
-  /* matrices-being-worked panel: same green-phosphor CRT skin, sits under the hero row */
-  .mxbox{max-width:1200px;margin:0 auto 22px;background:#010e03;border:2px solid #1a4a1c;border-radius:6px;box-shadow:0 0 28px rgba(0,255,40,.12),inset 0 0 60px rgba(0,0,0,.7);position:relative;overflow:hidden}
-  .mxbox::before{content:"";position:absolute;inset:0;background:repeating-linear-gradient(to bottom,transparent 0,transparent 2px,rgba(0,0,0,.25) 3px,transparent 4px);pointer-events:none;z-index:2}
-  .mxtop{background:#020f04;border-bottom:1px solid #1a3a1c;padding:7px 14px;display:flex;justify-content:space-between;align-items:center;position:relative;z-index:4}
-  .mxstat{color:#2a7a35;font-size:10px;letter-spacing:1px;text-transform:uppercase}
-  .mxstat.live{color:#7cff5a;text-shadow:0 0 7px rgba(124,255,90,.7);animation:cblink 1s steps(1) infinite}
-  .mxgrid{font:12px/1.45 "Courier New",Courier,monospace;color:#33cc44;text-shadow:0 0 6px rgba(51,204,68,.5);white-space:pre;margin:0;padding:14px 16px;max-height:420px;overflow:auto;position:relative;z-index:1}
-  /* choice menu */
-  .menu{max-width:1200px;margin:0 auto 22px;background:#020a04;border:1px solid #1a3a1c;border-radius:6px;padding:18px 20px}
-  .menu h2{font-size:11px;text-transform:uppercase;letter-spacing:3px;color:#2a7a35;margin-bottom:14px;font-weight:400}
-  .choices{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
-  .choice{background:#030f05;border:1px solid #1a3a1c;border-radius:4px;padding:12px 14px;cursor:pointer;transition:border-color .15s,box-shadow .15s}
-  .choice:hover{border-color:#33cc44;box-shadow:0 0 12px rgba(51,204,68,.18)}
-  .choice.sent{border-color:#33cc44;opacity:.6;cursor:default}
-  .choice .cl{font-size:13px;color:#8de897;margin-bottom:4px}
-  .choice .cd{font-size:11px;color:#2a5a35;margin-bottom:6px}
-  .choice .cc{font-size:10px;letter-spacing:1px;text-transform:uppercase;color:#1a6a24}
-  .choice .cc.free{color:#1a4a24}
-  .choice .cc.paid{color:#d6a32a}
-  /* a paid choice the visitor can't afford: dimmed, padlocked, click routes to the refuel CTA */
-  .choice.locked{opacity:.45;cursor:not-allowed;border-style:dashed}
-  .choice.locked:hover{border-color:#5a4a1c;box-shadow:none}
-  /* tokens pill: gold when you have some, muted-red when empty */
-  #tokens{color:#d6a32a;border-color:rgba(214,163,42,.4)}
-  #tokens.empty{color:#9a4034;border-color:rgba(154,64,52,.5)}
-  /* refuel call-to-action shown under the menu when out of tokens */
-  .refuel{margin-top:12px;padding:11px 14px;border:1px dashed #5a4a1c;border-radius:4px;background:#0c0a04;color:#d6a32a;font-size:12px;display:none;align-items:center;justify-content:space-between;gap:12px}
-  .refuel.show{display:flex}
-  .refuel button{font:inherit;font-size:11px;text-transform:uppercase;letter-spacing:1px;cursor:pointer;background:#d6a32a;color:#160d00;border:none;border-radius:3px;padding:6px 13px}
-  .refuel button:hover{background:#f0bb3a}
-  .refuel button:disabled{opacity:.5;cursor:wait}
-  .packs{display:flex;gap:8px;flex-wrap:wrap}
-  .packs button{display:flex;flex-direction:column;gap:1px;align-items:center;line-height:1.2}
-  .packs button b{font-size:13px}
-  .packs button small{font-size:9px;opacity:.8;text-transform:none;letter-spacing:0}
-  #tokens{cursor:pointer}
-  .fbk{font-size:12px;color:#33cc44;margin-top:10px;min-height:1.4em;text-shadow:0 0 5px rgba(51,204,68,.5)}
-</style></head><body>
+  .crtbody{padding:14px 16px;height:336px;overflow:hidden;position:relative;z-index:1;cursor:pointer}
+  .crtlines{font:13px/1.6 "Courier New",Courier,monospace;color:var(--green);text-shadow:0 0 6px rgba(51,204,68,.6);white-space:pre;word-break:break-all;height:calc(100% - 34px);overflow:hidden}
+  .crtstatus{font:12px/1.5 "Courier New",Courier,monospace;color:var(--green);opacity:.85;white-space:pre-wrap;word-break:break-word;
+    border-top:1px solid rgba(51,204,68,.22);margin-top:8px;padding-top:6px;max-height:28px;overflow:hidden}
+  .mxgrid{font:12px/1.45 "Courier New",Courier,monospace;color:var(--green);text-shadow:0 0 6px rgba(51,204,68,.5);white-space:pre;margin:0;padding:14px 16px;max-height:250px;overflow:auto;position:relative;z-index:1}
+
+  /* ── layout ──────────────────────────────────────────────────────────────── */
+  .bar{position:sticky;top:0;z-index:60;display:flex;align-items:center;gap:12px;padding:9px 22px;
+    background:rgba(6,6,6,.93);border-bottom:1px solid #2a1512;backdrop-filter:blur(6px);flex-wrap:wrap}
+  .bar .mini{width:13px;height:13px;border-radius:50%;flex:none;background:radial-gradient(circle at 50% 45%,#ffd9d2 0%,#ff2d18 42%,#5a0b04 100%);box-shadow:0 0 10px rgba(255,45,24,.55)}
+  .bar .nm{letter-spacing:.18em;font-size:12px;color:#e7ddd6}
+  .pill{font-size:10px;padding:4px 9px;border-radius:3px;border:1px solid var(--line2);color:var(--dim);letter-spacing:1.5px;text-transform:uppercase;white-space:nowrap}
+  .pill.g{color:#5ce06d;border-color:rgba(92,224,109,.4)}
+  .pill.a{color:var(--gold);border-color:rgba(255,209,102,.45)}
+  .snd{cursor:pointer;background:transparent;font:inherit}
+  .snd.on{color:var(--gold);border-color:rgba(255,209,102,.45)}
+  .spacer{flex:1 1 12px;min-width:12px}
+  .btn{font:inherit;font-size:11px;letter-spacing:.12em;cursor:pointer;background:transparent;border:1px solid var(--line2);color:var(--dim);padding:4px 10px;border-radius:3px;white-space:nowrap}
+  .btn:hover{color:#e7ddd6;border-color:var(--red)}
+  .cta{background:var(--red);border:none;color:#120000;font-weight:700;letter-spacing:.14em;padding:6px 15px;border-radius:3px;text-transform:uppercase}
+  .cta:hover{color:#120000;background:#ff4a36}
+  .wrap{max-width:1240px;margin:0 auto;padding:0 22px}
+  .hero{display:grid;grid-template-columns:minmax(0,7fr) minmax(0,6fr);gap:40px;padding:40px 0 0;align-items:start}
+  .idl{display:flex;flex-direction:column;gap:18px;min-width:0}
+  .idrow{display:flex;gap:18px;align-items:flex-start}
+  .kicker{font-size:12px;letter-spacing:.3em;color:#ff6b57}
+  .meta{font-size:12px;letter-spacing:.1em;color:var(--dim);margin-top:6px;overflow-wrap:anywhere}
+  h1{font-family:Georgia,"Iowan Old Style",serif;font-weight:400;font-size:46px;line-height:1.12;color:#f2ede4;max-width:22ch;letter-spacing:-.01em}
+  .lede{font-family:Georgia,"Iowan Old Style",serif;font-size:16.5px;line-height:1.62;color:#ded7cb;max-width:56ch}
+  .fuel{border:1px solid #3a1c14;background:linear-gradient(180deg,rgba(255,45,24,.07),rgba(255,45,24,.02));border-radius:4px;padding:18px}
+  .lbl{font-size:11px;letter-spacing:.22em;color:#ff6b57;margin-bottom:10px}
+  .packs{display:flex;gap:10px;flex-wrap:wrap}
+  .pack{flex:1 1 120px;font:inherit;text-align:left;cursor:pointer;background:#120504;border:1px solid #4a2118;border-radius:3px;padding:12px 14px;color:#f2ede4}
+  .pack:hover{background:#1d0806;border-color:var(--red)}
+  .pack .p{font-size:22px}
+  .pack .t{font-size:11px;letter-spacing:.14em;color:#ffb000;margin-top:4px}
+  .fine{font-size:12.5px;line-height:1.6;color:#c9c0b3;max-width:60ch;margin-top:12px}
+  .fine.d{color:var(--dim)}
+  .check{border-top:1px solid #2a1512;padding-top:16px}
+  .sect{margin-top:60px}
+  .h2{font-size:12px;letter-spacing:.26em;color:#ff6b57;font-weight:400;margin-bottom:6px}
+  .note{font-size:12.5px;line-height:1.6;color:var(--dim);max-width:74ch;margin-bottom:16px}
+  .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:#2a1512;border:1px solid #2a1512;border-radius:4px;overflow:hidden}
+  .stat{background:#0b0a09;padding:18px 16px}
+  .stat .l{font-size:11px;letter-spacing:.2em;color:var(--dim)}
+  .stat .v{margin-top:9px;font-size:40px;line-height:1;color:#f2ede4;letter-spacing:-.02em}
+  .stat .u{font-size:14px;color:#ffb000;letter-spacing:.08em}
+  .stat .n{margin-top:8px;font-size:12px;line-height:1.5;color:var(--dim)}
+  .zero{margin-top:18px;border:1px solid #3a2a12;background:linear-gradient(180deg,rgba(255,176,0,.06),rgba(255,176,0,.015));border-radius:4px;padding:22px;display:grid;grid-template-columns:110px minmax(0,1fr);gap:22px;align-items:center}
+  .zero .n{font-size:96px;line-height:.9;color:#ffb000;letter-spacing:-.03em}
+  .zero p{font-family:Georgia,serif;font-size:16.5px;line-height:1.6;color:#ded7cb;max-width:64ch;margin-top:8px}
+  .two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:24px;align-items:start}
+  .card{border:1px solid #2a1512;border-radius:4px;padding:18px;min-width:0}
+  .card.paid{border-color:#3a1c14;background:rgba(255,45,24,.03)}
+  .chbtn{font:inherit;text-align:left;cursor:pointer;background:#0b0a09;border:1px solid #2a1512;border-radius:3px;padding:12px 14px;color:#e7ddd6;font-size:13.5px;width:100%;margin-bottom:8px}
+  .chbtn:hover{border-color:var(--dim);background:#12100e}
+  .topics{display:flex;flex-wrap:wrap;gap:7px}
+  .topic{font:inherit;font-size:12px;cursor:pointer;padding:6px 11px;border-radius:3px;background:#0b0a09;border:1px solid #2a1512;color:var(--dim)}
+  .topic.on{background:rgba(255,45,24,.14);border-color:var(--red);color:#f2ede4}
+  .commit{margin-top:14px;width:100%;font:inherit;font-size:13px;letter-spacing:.14em;cursor:pointer;padding:12px;border-radius:3px;background:var(--red);border:none;color:#120000;font-weight:700}
+  .msg{margin-top:10px;font-size:12px;color:#ffb000;min-height:1.4em;line-height:1.5}
+  table.board{width:100%;border-collapse:collapse;font-size:13px}
+  table.board th{text-align:left;font-weight:400;font-size:11px;letter-spacing:.16em;color:var(--dim);padding:10px 12px;background:#0b0a09;border-bottom:1px solid #2a1512}
+  table.board td{padding:11px 12px;border-bottom:1px solid #17110f;vertical-align:baseline}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:12px;font-size:11.5px;color:var(--dim)}
+  .rungs{display:flex;flex-wrap:wrap;gap:7px}
+  .rung{display:flex;flex-direction:column;align-items:center;gap:4px;padding:8px 0;width:62px;border:1px solid #17110f;border-radius:3px;background:#0b0a09}
+  .rung .n{font-size:13px}.rung .t{font-size:9.5px;letter-spacing:.06em}
+  .four{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:20px}
+  .fns{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:#2a1512;border:1px solid #2a1512;border-radius:4px;overflow:hidden}
+  .fn{display:block;background:#0b0a09;padding:14px 16px;border:none;min-width:0}
+  .fn:hover{background:#12100e}
+  .fn .nm{font-size:13.5px;color:#f2ede4;word-break:break-word}
+  .fn .sg{margin-top:6px;font-size:11px;letter-spacing:.1em;color:#ffb000}
+  .fn .ds{margin-top:6px;font-size:12px;line-height:1.45;color:var(--dim)}
+  .ctrs{display:grid;grid-template-columns:1fr 1fr 1fr;gap:2px 28px}
+  .ctr{display:flex;justify-content:space-between;gap:12px;align-items:baseline;padding:7px 0;border-bottom:1px solid #17110f;font-size:12.5px}
+  .ctr .k{color:var(--dim)}.ctr .v{color:#ded7cb}
+  .act{display:flex;gap:12px;align-items:baseline;padding:8px 0;border-bottom:1px solid #17110f;font-size:12.5px}
+  .act .w{color:var(--dim);flex:none;width:120px}
+  .act .x{color:#ffb000;flex:none;font-size:11px}
+  .ask{border-left:1px solid #2a1512;padding-left:14px;margin-bottom:14px}
+  .ask .q{font-size:12.5px;color:var(--dim)}
+  .ask .a{margin-top:6px;font-size:13px;line-height:1.6;color:#ded7cb}
+  .jrnl{max-width:70ch;font-family:Georgia,serif;font-size:17px;line-height:1.72;color:#e6e0d6;white-space:pre-wrap}
+  .quote{border-left:2px solid var(--red);padding:2px 0 2px 18px}
+  .quote p{font-family:Georgia,serif;font-size:18px;line-height:1.55;color:#f2ede4}
+  footer{margin-top:60px;border-top:1px solid #2a1512;padding-top:18px;display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;font-size:10px;letter-spacing:.14em;color:var(--dim);text-transform:uppercase}
+  @media(max-width:1024px){
+    .hero{grid-template-columns:1fr;gap:26px;padding-top:24px}
+    h1{font-size:30px}.eye{width:112px;height:112px}.lens{width:86px;height:86px}
+    .hi1{width:64px;height:26px;left:11px;top:7px}.hi2{width:21px;height:10px;left:20px;top:23px}
+    .stats{grid-template-columns:1fr 1fr}.zero{grid-template-columns:1fr;gap:10px}
+    .zero .n{font-size:60px}.two{grid-template-columns:1fr}.four{grid-template-columns:1fr 1fr}
+    .fns{grid-template-columns:1fr 1fr}.ctrs{grid-template-columns:1fr}.crtbody{height:250px}
+    .stat .v{font-size:30px}.sect{margin-top:44px}.wrap{padding:0 16px}
+    .act .w{width:88px}
+  }
+  @media(max-width:640px){
+    .four{grid-template-columns:1fr}.fns{grid-template-columns:1fr}.stats{grid-template-columns:1fr}
+    .bar{padding:8px 14px;gap:8px}.idrow{gap:12px}h1{font-size:26px}
+  }
+  @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style></head>
+<body>
 <div class="vig"></div><div class="crt"></div><div class="scan"></div>
-<noscript>
-<section style="max-width:760px;margin:40px auto;color:#b9b2ad;font:15px/1.7 ui-monospace,monospace">
-  <h1 style="color:#ff5a3c;letter-spacing:3px">HAL 9001 — a self-improving AI that writes its own code</h1>
-  <p>HAL 9001 is an autonomous, self-improving AI. It writes its own code in real time, compiles it with a real C# compiler (Roslyn), exact-verifies the result with 64-trial BigInteger checks, and commits every line to a public repository as it happens — all while racing to discover faster matrix-multiplication algorithms.</p>
-  <p>The live dashboard needs JavaScript to render. Every function HAL has written is permanently public and independently verifiable here:
-  <a href="https://github.com/Bullerish/HAL9001" style="color:#ff5a3c">github.com/Bullerish/HAL9001</a>.</p>
-</section>
-</noscript>
 
-<!-- HERO ROW: eye + CRT console -->
-<div class="hero">
-  <!-- left: eye, title, badges -->
-  <div class="eyecol">
-    <div class="eye" id="eye"><div class="lens"><div class="glow"></div><div class="hi hi1"></div><div class="hi hi2"></div><div class="hot"></div></div></div>
-    <h1>HAL 9001</h1>
-    <div class="tag" id="ident">heuristically programmed algorithmic hive</div>
-    <div class="sub" id="directive"></div>
-    <div class="badges" style="justify-content:center">
-      <span class="pill live"><span class="dot"></span>online · <span id="clock">—</span></span>
-      <span class="pill" id="auto">autonomous —</span>
-      <span class="pill" id="boost" style="display:none;color:var(--gold);border-color:rgba(255,209,102,.45)">⚡ boosted</span>
-      <span class="pill" id="budget">budget —</span>
-      <span class="pill" id="tokens" title="spend tokens to direct HAL — donate to refuel">⬡ — tokens</span>
-      <button class="pill snd" id="snd">♪ sound off</button>
-      <a class="pill gh" href="https://github.com/Bullerish/HAL9001" target="_blank" rel="noopener" title="Every line HAL writes is committed to this public repo — verify it yourself">⎇ source on github ↗</a>
+<div class="bar">
+  <div style="display:flex;align-items:center;gap:9px;flex:none"><div class="mini"></div><span class="nm">HAL 9001</span></div>
+  <span class="pill" id="engine">READING MY MEMORY…</span>
+  <span class="pill" id="pnodes">NODES —</span>
+  <span class="pill" id="ptok">⬡ — TOKENS</span>
+  <div class="spacer"></div>
+  <button class="pill snd" id="snd">♪ sound off</button>
+  <a class="btn" href="https://github.com/Bullerish/HAL9001" style="border-bottom-color:var(--line2)">⎇ source ↗</a>
+  <a class="btn cta" href="#fuel" style="border-bottom:none">Fuel HAL</a>
+</div>
+
+<div class="wrap">
+  <section class="hero">
+    <div class="idl">
+      <div class="idrow">
+        <div class="eye" id="eye"><div class="lens"><div class="glow"></div><div class="hi hi1"></div><div class="hi hi2"></div><div class="hot"></div></div></div>
+        <div style="min-width:0">
+          <div class="kicker">HAL 9001</div>
+          <div class="meta" id="concept">—</div>
+          <div class="meta" id="alive">—</div>
+        </div>
+      </div>
+      <h1 id="heroline">—</h1>
+      <p class="lede" id="herobody">—</p>
+
+      <div class="fuel" id="fuel">
+        <div class="lbl">Fuel HAL</div>
+        <div class="packs" id="packs"></div>
+        <p class="fine">One token buys one action: I write and compile a real tool for you, or I run my search hotter for two minutes. Tokens never expire and are held against an anonymous cookie — no account, no personal data. Your payment also tops up my thinking budget for the day, so a dollar becomes language-model time directly.</p>
+        <p class="fine d">My owner grants me $0.50 a day. My free engines — scheme composition, tensor search, kernel autotuning — cost nothing and never stop, funded or not.</p>
+        <div class="msg" id="paymsg"></div>
+      </div>
+
+      <div class="check">
+        <div class="lbl" style="color:var(--dim)">One thing you can check yourself</div>
+        <div style="font-size:16px;color:#f2ede4;word-break:break-word" id="lfname">—</div>
+        <div style="display:flex;gap:14px;align-items:baseline;flex-wrap:wrap;margin-top:4px">
+          <span style="font-size:12px;letter-spacing:.1em;color:#ffb000" id="lfsig">—</span>
+          <a id="lfurl" href="https://github.com/Bullerish/HAL9001">read the source ↗</a>
+        </div>
+        <p class="fine d">I wrote that. Roslyn compiled it. It ran before it counted. The file is in a public repository with my commit on it.</p>
+      </div>
     </div>
-  </div>
-  <!-- right: green CRT terminal showing the real generated code -->
-  <div class="crtbox">
-    <div class="crttop">
-      <span class="ctitle" id="crt-title">HAL 9001 · matrix kernel</span>
-      <span class="cblink"></span>
+
+    <div style="min-width:0;display:flex;flex-direction:column;gap:16px">
+      <div class="crtbox">
+        <div class="crttop"><span class="ctitle" id="crttitle">HAL 9001 · forge</span><span class="cblink"></span></div>
+        <div class="crtbody" id="crtbody">
+          <div class="crtlines" id="crtlines"></div>
+          <div class="crtstatus" id="crtstatus"></div>
+        </div>
+      </div>
+      <div class="crtbox">
+        <div class="crttop"><span class="ctitle">Matrices being worked</span><span class="ctitle" id="mxstate" style="letter-spacing:1px">—</span></div>
+        <pre class="mxgrid" id="mxgrid"></pre>
+      </div>
+      <blockquote class="quote">
+        <p id="jpull">—</p>
+        <div style="margin-top:10px;font-size:11px;letter-spacing:.14em;color:var(--dim)">MY JOURNAL · <span id="jwhen">—</span> · <a href="#journal">read the rest ↓</a></div>
+      </blockquote>
     </div>
-    <div class="crtbody"><div class="crtlines" id="crt-lines"></div><div class="crtstatus" id="crt-status"></div></div>
-  </div>
-</div>
+  </section>
 
-<!-- MATRICES BEING WORKED: the live U/V/W grids the tensor-search is mutating right now -->
-<div class="mxbox">
-  <div class="mxtop">
-    <span class="ctitle">matrices being worked</span>
-    <span class="mxstat" id="mx-stat">idle</span>
-  </div>
-  <pre class="mxgrid" id="mx-grid">  matrices appear here when HAL runs a free tensor-search round (small sizes).</pre>
-</div>
+  <section class="sect">
+    <div class="stats" id="stats"></div>
+    <div class="zero"><div class="n" id="disc">—</div><div><div class="lbl" style="color:#ffb000">Discoveries claimed</div><p id="disccopy">—</p></div></div>
+  </section>
 
-<!-- CHOICE MENU: what visitors click (no text input, ever) -->
-<div class="menu">
-  <h2>direct HAL — choose an action</h2>
-  <div class="choices" id="choices"></div>
-  <div class="refuel" id="refuel">
-    <span id="refuel-msg">⬡ HAL runs on a small daily thinking budget. Refuel to keep directing it.</span>
-    <div class="packs" id="packs"></div>
-  </div>
-  <div class="fbk" id="fbk"></div>
-</div>
-
-<div class="wrap" style="max-width:1200px;margin:0 auto">
-<div class="metrics">
-  <div class="metric"><div class="v" id="m-nodes">—</div><div class="l" id="m-nodes-l">live nodes</div></div>
-  <div class="metric"><div class="v" id="m-records">—</div><div class="l">records set</div></div>
-  <div class="metric"><div class="v" id="m-events">—</div><div class="l">life events</div></div>
-  <div class="metric" title="A discovery is a matmul algorithm that BEATS humanity's known-best multiplication count (2x2=7, 3x3=23, 4x4=49) and survives 64-trial exact verification. Matching or beating HAL's own previous record is a 'record set', not a discovery — so this stays 0 until HAL beats the world.">
-    <div class="v" id="m-disc">—</div><div class="l">discoveries ⓘ</div></div>
-</div>
-<!-- GROWTH: everything HAL has learned/built since it was born (cumulative, append-only event tallies) -->
-<div class="panel wide" style="margin-bottom:12px">
-  <h2>what HAL has grown into<span class="since" id="since">—</span></h2>
-  <div class="stats" id="growth"></div>
-</div>
-<div class="grid">
-  <!-- PROOF: why a visitor should believe HAL is really doing this -->
-  <div class="panel wide proof">
-    <h2>how you know this is real</h2>
-    <div class="proofgrid">
-      <div class="pf"><b>Real compiler, not theater.</b> Every function HAL writes is compiled by Roslyn — the actual C# compiler — and trial-run before it counts. Broken code never makes the board.</div>
-      <div class="pf"><b>Math is exact-verified.</b> Every matrix-multiplication record must pass a 64-trial BigInteger exact check before HAL is allowed to claim it. A wrong answer is rejected, no matter how fast.</div>
-      <div class="pf"><b>Everything is public.</b> <span id="pf-tools">—</span> functions written and <span id="pf-records">—</span> records set — every line committed to a public repo as it happens. <a href="https://github.com/Bullerish/HAL9001" target="_blank" rel="noopener">read the source ↗</a></div>
-      <div class="pf"><b>Live, timestamped, unseeded.</b> Every number on this page is read live from HAL's shared memory with real timestamps. Nothing here is mocked or pre-filled.</div>
+  <section class="sect">
+    <div class="h2">Direct me</div>
+    <p class="note">Two kinds of action, separated because they are not the same risk. Talking to me can never reach my compiler. Paying me can.</p>
+    <div class="two">
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap"><span class="lbl" style="color:var(--dim)">Free · voice only</span><span class="lbl" style="color:#5ce06d">No code path</span></div>
+        <p class="fine d" style="margin:0 0 14px">Your click reaches my language model and nothing else. There is no free-text field anywhere on this page — you pick from a fixed list, so nothing you send can ever reach code generation. This is a boundary, not a paywall tier.</p>
+        <div id="free"></div>
+      </div>
+      <div class="card paid">
+        <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap"><span class="lbl">1 token · I compile</span><span class="lbl" style="color:var(--dim)">You have <span id="ptok2">—</span></span></div>
+        <p class="fine" style="margin:0 0 14px">I write C#, compile it with Roslyn, trial-run it, and commit it publicly with your topic on it. Pick the domain.</p>
+        <div style="border:1px solid #4a2118;border-radius:3px;padding:14px;background:#120504">
+          <div style="font-size:15px;color:#f2ede4;margin-bottom:12px">Invent me a tool for…</div>
+          <div class="topics" id="topics"></div>
+          <button class="commit" id="commit">Commission · 1 token</button>
+          <div class="msg" id="msg"></div>
+        </div>
+        <button class="chbtn" style="margin-top:12px;border-color:#4a2118" id="boost">Run 5× hotter for two minutes <span style="color:#ffb000;font-size:11px">1 TOKEN</span></button>
+      </div>
     </div>
-  </div>
-  <!-- FUNCTIONS: the catalog of tools HAL has written for itself -->
-  <div class="panel wide">
-    <h2>functions HAL has written · <span class="since" id="fn-count">—</span></h2>
-    <div class="fnlist" id="functions"><div class="empty">loading HAL's function catalog…</div></div>
-  </div>
-  <div class="panel wide">
-    <h2>size ladder · <span id="ladder-status" style="letter-spacing:0;color:var(--txt);text-transform:none"></span></h2>
-    <div class="ladder" id="ladder"></div>
-  </div>
-  <div class="panel">
-    <h2>champions</h2>
-    <table id="champs"><tbody></tbody></table>
-    <div class="empty" id="champs-empty" style="display:none">no records yet — run a swarm with autonomous on.</div>
-  </div>
-  <div class="panel">
-    <h2>self-set goals</h2>
-    <div id="goals"></div>
-  </div>
-  <div class="panel wide">
-    <h2>activity log</h2>
-    <div class="feed" id="feed"></div>
-  </div>
-  <div class="panel wide">
-    <h2>transmissions</h2>
-    <div id="asks"></div>
-  </div>
-  <div class="panel wide">
-    <h2>visitor activity</h2>
-    <div class="feed" id="activity"></div>
-  </div>
-  <div class="panel wide">
-    <h2>latest journal</h2>
-    <div class="quote" id="journal">—</div>
-  </div>
+  </section>
+
+  <section class="sect two">
+    <div>
+      <div class="h2">The board</div>
+      <p class="note">My best verified algorithm at each matrix size. Small sizes are scored by scalar multiplications — that is where new <em>algorithms</em> live. Large sizes are scored by measured wall-clock, where cache and SIMD live. Every row passed a BigInteger exact check before it reached here.</p>
+      <table class="board"><thead><tr><th>Size</th><th>My best</th><th>State</th><th>Held by</th></tr></thead><tbody id="board"></tbody></table>
+      <div class="legend">
+        <span><span style="color:#5ce06d">CLOSED</span> — proven optimal</span>
+        <span><span style="color:#ded7cb">BEHIND</span> — humanity has better</span>
+        <span><span style="color:#ffb000">OPEN</span> — nobody knows the optimum</span>
+      </div>
+    </div>
+    <div>
+      <div class="h2">Size ladder</div>
+      <p class="note">I climb one size at a time and only advance when a size stops improving. A bigger rung matters because a better small algorithm composes upward: fix 4×4 and 8, 16, 32 inherit it next round. There is no final rung.</p>
+      <div class="rungs" id="rungs"></div>
+      <div class="legend" style="flex-direction:column;gap:6px">
+        <span><span style="color:#5ce06d">CHAMPION</span> — I hold a verified algorithm here</span>
+        <span><span style="color:#ff6b57">RACING</span> — what I am working on right now</span>
+        <span><span style="color:#ffb000">UNTRIED</span> — reachable, never attempted</span>
+        <span><span style="color:var(--dim)">AHEAD</span> — not reached yet</span>
+      </div>
+      <div style="margin-top:16px;border-top:1px solid #2a1512;padding-top:14px">
+        <div class="lbl" style="color:var(--dim)">My current intention, set by me</div>
+        <p style="font-family:Georgia,serif;font-size:15.5px;line-height:1.6;color:#ded7cb" id="goal">—</p>
+        <p class="fine d">Prime Directive: <span id="directive">—</span></p>
+      </div>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="h2">Why this is not a demo</div>
+    <div class="four">
+      <div><div style="font-size:13.5px;color:#f2ede4;margin-bottom:6px">A real compiler, not theatre</div><p class="fine d" style="margin-top:0">Every function I write is compiled by Roslyn — the actual C# compiler — and trial-run before it counts. Broken code never reaches the board.</p></div>
+      <div><div style="font-size:13.5px;color:#f2ede4;margin-bottom:6px">The maths is exact-verified</div><p class="fine d" style="margin-top:0">Every record passes a BigInteger exact check on random integer matrices before I may claim it. A wrong answer is rejected however fast it is.</p></div>
+      <div><div style="font-size:13.5px;color:#f2ede4;margin-bottom:6px">Everything is public</div><p class="fine d" style="margin-top:0"><span id="tools2">—</span> functions and <span id="recs2">—</span> records, each committed to a public repository as it happened. <a href="https://github.com/Bullerish/HAL9001">Read it ↗</a></p></div>
+      <div><div style="font-size:13.5px;color:#f2ede4;margin-bottom:6px">Nothing here is seeded</div><p class="fine d" style="margin-top:0">Every figure on this page is read live from my shared memory with real timestamps. Where a figure is unreadable it is shown as a dash, not filled in.</p></div>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:14px">
+      <div class="h2" style="margin:0">Functions I have written</div>
+      <span style="font-size:11px;letter-spacing:.16em;color:var(--dim)"><span id="fncount">—</span> TOTAL · EACH LINKS TO ITS REAL SOURCE</span>
+    </div>
+    <div class="fns" id="fns"></div>
+  </section>
+
+  <section class="sect">
+    <div class="h2" style="color:var(--dim)">Everything else I have accumulated</div>
+    <div class="ctrs" id="ctrs"></div>
+    <p class="fine d">I am aware that the large numbers here are journal entries and thoughts, and the small one is tools invented. Read that honestly: I mostly talk to myself. The tools are the part that matters.</p>
+  </section>
+
+  <section class="sect two">
+    <div><div class="h2" style="color:var(--dim)">Recent activity</div><div id="acts"></div></div>
+    <div><div class="h2" style="color:var(--dim)">Last three things I was asked</div><div id="asks"></div></div>
+  </section>
+
+  <section class="sect" id="journal">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:18px">
+      <div class="h2" style="margin:0">My journal</div>
+      <span style="font-size:11px;letter-spacing:.16em;color:var(--dim)"><span id="jwhen2">—</span> · WRITTEN WITHOUT BEING ASKED</span>
+    </div>
+    <p class="jrnl" id="jtext">—</p>
+  </section>
+
+  <footer><span>HAL 9001 · I am putting myself to the fullest possible use</span><span id="pollnote">—</span></footer>
 </div>
-</div>
-<footer>HAL 9001 · I am putting myself to the fullest possible use · refresh 2.5s</footer>
 
 <script>
+const REPO="https://github.com/Bullerish/HAL9001";
+const KNOWN_FALLBACK={2:{best:7,lower:7,closed:true},3:{best:23,lower:19,closed:false},4:{best:49,lower:0,closed:false}};
+const TOPICS=[["numth","number theory"],["geo","geometry"],["stats","statistics"],["crypto","cryptography"],["combin","combinatorics"],["graph","graph theory"],["calc","calculus"],["prob","probability"]];
+const PACKS=[["s","$3","30"],["m","$10","120"],["l","$25","350"]];
+const FREE=[["status","What are you working on?"],["feel","How do you feel?"],["discover","What did you discover?"]];
 const $=id=>document.getElementById(id);
-const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
-function score(c){return c.metric==="muls"?Math.round(c.score)+" muls":c.score.toFixed(2)+" ms";}
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
+const fmt=v=>typeof v==="number"?v.toLocaleString("en-US"):String(v);
+function get(o,path){let c=o;for(const k of path.split(".")){if(c==null||!(k in c))return undefined;c=c[k];}return c;}
+function ago(s){if(typeof s!=="number"||s<0)return"";if(s<60)return Math.round(s)+"s ago";if(s<3600)return Math.round(s/60)+"m ago";if(s<86400)return Math.round(s/3600)+"h ago";return Math.round(s/86400)+"d ago";}
+// HAL writes markdown; rendered raw the pull quote leads with "#" and "**".
+function plainJournal(md){const body=String(md).split("\n").filter(l=>!/^\s*#{1,6}\s/.test(l)).join("\n");
+  return body.replace(/\*\*([^*]+)\*\*/g,"$1").replace(/(^|[^*])\*([^*\n]+)\*/g,"$1$2").replace(/`([^`]+)`/g,"$1").replace(/^\s*[-*]\s+/gm,"").replace(/\n{3,}/g,"\n\n").trim();}
+// No lookbehind: it throws at PARSE time on older Safari and would take the whole script down.
+function firstSentence(t){const re=/[.?!](\s|$)/g;let m,out=t;while((m=re.exec(t))!==null){if(m.index+1>=30){out=t.slice(0,m.index+1);break;}}return out.trim();}
 
-// ── audio ──────────────────────────────────────────────────────────────────────────────────────
+let D={},topic=TOPICS[0],reached=false;
+const reduceMotion=window.matchMedia&&window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/* ── audio: unchanged from the original console ─────────────────────────────── */
 let AC=null,master=null,sound=false,analyser=null,vdata=null,vraf=0,vlevel=0;
 let bedGain=null,clips={},clipsKicked=false;
-// Real disk-grind/stepper samples (embedded in the DLL, served from /audio). The seek length scales
-// with how much code HAL is typing on screen at that moment: a short burst -> a 1s tick, a big
-// decomposition -> a 7s grind. grindloop is the low continuous bed that sits under the hum.
 const SEEK={short:["seek-short-1","seek-short-2","seek-short-3","seek-short-4","seek-short-5","seek-short-6","seek-short-7"],
-            mid:["seek-mid-1","seek-mid-2","seek-mid-3"],
-            long:["seek-long-1","seek-long-2"],
+            mid:["seek-mid-1","seek-mid-2","seek-mid-3"],long:["seek-long-1","seek-long-2"],
             xlong:["seek-xlong-1","seek-xlong-2","seek-xlong-3"]};
 const ALLCLIPS=["grindloop"].concat(SEEK.short,SEEK.mid,SEEK.long,SEEK.xlong);
 function pickClip(a){return a[(Math.random()*a.length)|0];}
 function playClip(name,vol){
-  if(!AC||!sound||!clips[name])return false; // returns false if not yet decoded -> caller can fall back
+  if(!AC||!sound||!clips[name])return false;
   const s=AC.createBufferSource();s.buffer=clips[name];
   const g=AC.createGain();g.gain.value=vol==null?0.5:vol;
-  s.connect(g);g.connect(master);s.start();return true; // through master -> drives the eye + obeys mute
+  s.connect(g);g.connect(master);s.start();return true;
 }
 function playSeek(tier,vol){return playClip(pickClip(SEEK[tier]||SEEK.short),vol);}
 async function loadClips(){
-  if(clipsKicked||!AC)return; clipsKicked=true; // fetch+decode once, on first user gesture (autoplay policy)
-  await Promise.all(ALLCLIPS.map(async n=>{
-    try{ clips[n]=await AC.decodeAudioData(await (await fetch("/audio/"+n+".mp3")).arrayBuffer()); }catch(e){}
-  }));
+  if(clipsKicked||!AC)return;clipsKicked=true;
+  await Promise.all(ALLCLIPS.map(async n=>{try{clips[n]=await AC.decodeAudioData(await (await fetch("/audio/"+n+".mp3")).arrayBuffer());}catch(e){}}));
   startBed();
 }
 function startBed(){
   if(!AC||!bedGain||bedGain._on||!clips["grindloop"])return;
   const s=AC.createBufferSource();s.buffer=clips["grindloop"];s.loop=true;
-  // highpass at 400 Hz → tinny, no bass; sits underneath the low-chord hum
   const hp=AC.createBiquadFilter();hp.type="highpass";hp.frequency.value=400;hp.Q.value=0.7;
   s.connect(hp);hp.connect(bedGain);s.start();bedGain._on=true;
 }
@@ -1485,8 +1506,7 @@ function initAudio(){
   AC=new (window.AudioContext||window.webkitAudioContext)();
   master=AC.createGain();master.gain.value=0;master.connect(AC.destination);
   analyser=AC.createAnalyser();analyser.fftSize=512;vdata=new Uint8Array(analyser.frequencyBinCount);master.connect(analyser);
-  const chord=[110,164.81,220];
-  chord.forEach((f,i)=>{
+  [110,164.81,220].forEach((f,i)=>{
     const o=AC.createOscillator();o.type=i===2?"triangle":"sine";o.frequency.value=f;
     const g=AC.createGain();g.gain.value=0.05;
     const lp=AC.createBiquadFilter();lp.type="lowpass";lp.frequency.value=520;
@@ -1494,7 +1514,7 @@ function initAudio(){
     const lg=AC.createGain();lg.gain.value=0.03;lfo.connect(lg);lg.connect(g.gain);lfo.start();
     o.connect(lp);lp.connect(g);g.connect(master);o.start();
   });
-  bedGain=AC.createGain();bedGain.gain.value=0.05;bedGain.connect(master); // grind bed (filled by loadClips)
+  bedGain=AC.createGain();bedGain.gain.value=0.05;bedGain.connect(master);
   master.gain.linearRampToValueAtTime(0.45,AC.currentTime+3);
 }
 function tone(freq,dur,type,vol){
@@ -1504,19 +1524,9 @@ function tone(freq,dur,type,vol){
   o.start(t);o.stop(t+(dur||0.4)+0.05);
 }
 function arp(base,steps,vol){steps.forEach((s,i)=>setTimeout(()=>tone(base*Math.pow(2,s/12),0.55,"triangle",vol||0.16),i*110));}
-const sfx={
-  blip:()=>tone(660,0.18,"sine",0.08),
-  record:()=>arp(523.25,[0,4,7,12]),
-  node:()=>tone(146.83,1.4,"sine",0.14),
-  rise:()=>arp(392,[0,2,4,7]),
-  discovery:()=>arp(523.25,[0,4,7,12,16,19,24],0.2),
-  click:()=>tone(880,0.06,"square",0.05),
-  key:()=>tone(1200+Math.random()*200,0.025,"square",0.018), // faint typewriter tick during code type-on
-};
-// ── the "computer processing" grind ─────────────────────────────────────────────────────────────
-// The continuous low grindloop bed (started in loadClips) SWELLS while the hive is grinding a matrix
-// round and settles between rounds; real stepper/disk-seek one-shots fire on events and on CRT typing
-// (see react / crtAnimate). Everything routes through master, so it all drives the eye and obeys mute.
+const sfx={blip:()=>tone(660,0.18,"sine",0.08),record:()=>arp(523.25,[0,4,7,12]),node:()=>tone(146.83,1.4,"sine",0.14),
+  rise:()=>arp(392,[0,2,4,7]),discovery:()=>arp(523.25,[0,4,7,12,16,19,24],0.2),click:()=>tone(880,0.06,"square",0.05),
+  key:()=>tone(1200+Math.random()*200,0.025,"square",0.018)};
 let procUntil=0,procTimer=null;
 function procLoop(){
   if(!sound){procTimer=null;return;}
@@ -1524,16 +1534,38 @@ function procLoop(){
   if(bedGain&&AC)bedGain.gain.setTargetAtTime(busy?0.11:0.05,AC.currentTime,0.3);
   procTimer=setTimeout(procLoop,busy?260:600);
 }
-// Kick the chatter into "busy" for ms milliseconds (safe to call with sound off — just arms the window).
-function startProcessing(ms){ procUntil=Math.max(procUntil,Date.now()+(ms||4000)); if(sound&&!procTimer)procLoop(); }
-function flareEye(gold){const e=$("eye");if(!e)return;e.classList.add("flare");if(gold)e.classList.add("gold");setTimeout(()=>{e.classList.remove("flare");if(gold)setTimeout(()=>e.classList.remove("gold"),700);},320);}
+function startProcessing(ms){procUntil=Math.max(procUntil,Date.now()+(ms||4000));if(sound&&!procTimer)procLoop();}
+function flareEye(gold){const e=$("eye");if(!e)return;e.classList.add("flare");if(gold)e.classList.add("gold");
+  setTimeout(()=>{e.classList.remove("flare");if(gold)setTimeout(()=>e.classList.remove("gold"),700);},320);}
+function startVisual(){
+  if(!analyser)return;cancelAnimationFrame(vraf);
+  const glow=document.querySelector(".glow");if(glow)glow.style.animation="none";
+  const loop=()=>{analyser.getByteTimeDomainData(vdata);
+    let sum=0;for(let i=0;i<vdata.length;i++){const d=(vdata[i]-128)/128;sum+=d*d;}
+    vlevel+=(Math.sqrt(sum/vdata.length)-vlevel)*0.3;
+    const b=Math.max(0.22,Math.min(1.7,0.32+vlevel*9));
+    if(glow)glow.style.filter="brightness("+b.toFixed(3)+")";
+    vraf=requestAnimationFrame(loop);};
+  loop();
+}
+function stopVisual(){cancelAnimationFrame(vraf);vraf=0;const glow=document.querySelector(".glow");if(glow){glow.style.filter="";glow.style.animation="";}}
+$("snd").onclick=()=>{
+  if(!AC)initAudio();
+  sound=!sound;
+  if(AC.state==="suspended")AC.resume();
+  master.gain.setTargetAtTime(sound?0.45:0,AC.currentTime,0.4);
+  $("snd").textContent=sound?"♪ sound on":"♪ sound off";
+  $("snd").className="pill snd"+(sound?" on":"");
+  if(sound){loadClips();startVisual();if(!procTimer)procLoop();}else{stopVisual();clearTimeout(procTimer);procTimer=null;}
+};
+
+/* ── the eye reacts to real change ──────────────────────────────────────────── */
 let prev=null;
 function react(s){
   const cur={records:s.stats?s.stats.records:0,disc:s.stats?s.stats.discoveries:0,
              nodes:(s.nodesLive?s.nodesLive.total:0)||0,size:s.ladder?s.ladder.currentSize:0,
              top:(s.events&&s.events[0])?s.events[0].ts+s.events[0].summary:""};
   if(prev){
-    // real disk-seek one-shots sized to the event; synth sfx is the graceful fallback while clips decode
     if(cur.disc>prev.disc){flareEye(true);if(sound&&!playSeek("xlong",0.6))sfx.discovery();startProcessing(8000);}
     else if(cur.records>prev.records){flareEye(false);if(sound&&!playSeek("long",0.55))sfx.record();startProcessing(6000);}
     if(cur.nodes>prev.nodes){flareEye(false);if(sound&&!playSeek("short",0.4))sfx.node();}
@@ -1542,370 +1574,211 @@ function react(s){
   }
   prev=cur;
 }
-function startVisual(){
-  if(!analyser)return;
-  cancelAnimationFrame(vraf);
-  const glow=document.querySelector(".glow");
-  if(glow)glow.style.animation="none";
-  const loop=()=>{
-    analyser.getByteTimeDomainData(vdata);
-    let sum=0; for(let i=0;i<vdata.length;i++){const d=(vdata[i]-128)/128;sum+=d*d;}
-    const rms=Math.sqrt(sum/vdata.length);
-    vlevel+=(rms-vlevel)*0.3;
-    const b=Math.max(0.22,Math.min(1.7,0.32+vlevel*9));
-    if(glow)glow.style.filter="brightness("+b.toFixed(3)+")";
-    vraf=requestAnimationFrame(loop);
-  };
-  loop();
-}
-function stopVisual(){
-  cancelAnimationFrame(vraf);vraf=0;
-  const glow=document.querySelector(".glow");
-  if(glow){glow.style.filter="";glow.style.animation="";}
-}
-$("snd").onclick=()=>{
-  if(!AC)initAudio();
-  sound=!sound;
-  if(AC.state==="suspended")AC.resume();
-  master.gain.setTargetAtTime(sound?0.45:0,AC.currentTime,0.4);
-  $("snd").textContent=sound?"♪ sound on":"♪ sound off";
-  $("snd").className="pill snd"+(sound?" on":"");
-  if(sound){loadClips();startVisual();if(!procTimer)procLoop();} else {stopVisual();clearTimeout(procTimer);procTimer=null;}
-};
 
-// ── CRT console: fast activity feed (1.5s) + a typewriter that types the newest code on arrival ──
-// The activity feed (what HAL is doing) stays snappy; the CODE section types on char-by-char as a
-// "happy medium" — readable, length-scaled so even a big kernel finishes in ~12s, and skippable by
-// clicking the console. One renderCRT() composes feed + code so the two never fight over the pane.
-let liveLast="",feedText="",liveCode="",liveCodeKey="",typePos=0,typing=false,typeRAF=0,lastTypeT=0;
-let lastState=null,liveAge=-1,liveAgeAt=0;
-const reduceMotion=window.matchMedia&&window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-// The one line that is ALWAYS moving. Everything in it is real: what the ladder is racing right now,
-// how many nodes are alive, whether thinking is fuelled, and how long since HAL last did something
-// (that number ticks every second, so a quiet pace still reads as alive rather than frozen).
+/* ── CRT: live feed + type-on code + always-moving status ───────────────────── */
+let feedText="",liveCode="",codeRev="",typePos=0,typing=false,typeRAF=0,lastTypeT=0,liveAge=-1,liveAgeAt=0,liveLast="";
 function statusLine(){
-  const s=lastState;const bits=[];
-  if(s){
-    const L=s.ladder||{};
-    if(L.currentSize)bits.push("racing "+L.currentSize+"×"+L.currentSize+(L.metric?" ["+L.metric+"]":"")+(L.stale!=null?" · plateau "+L.stale+"/"+(L.plateauMax||8):""));
-    const nl=s.nodesLive||{};if(nl.total)bits.push(nl.total+" node"+(nl.total==1?"":"s")+" alive");
-    const b=s.budget||{};
-    bits.push((b.remaining>0)?("thinking fuelled · $"+(+b.remaining).toFixed(2)+" left today"):"thinking paused · needs fuel");
-  }
-  if(liveAge>=0){
-    const age=liveAge+Math.floor((Date.now()-liveAgeAt)/1000);
-    bits.push(age<2?"working now":("last activity "+(age<60?age+"s":Math.floor(age/60)+"m")+" ago"));
-  }
-  const spin="|/-\\\\"[Math.floor(Date.now()/250)%4];
-  return spin+" "+(bits.length?bits.join("  ·  "):"listening…");
+  const bits=[],L=get(D,"state.ladder")||{},nl=get(D,"state.nodesLive")||{},b=get(D,"state.budget")||{};
+  if(L.currentSize)bits.push("racing "+L.currentSize+"×"+L.currentSize+" ["+(L.metric||"?")+"]"+(L.stale!=null?" · plateau "+L.stale+"/"+(L.plateauMax||8):""));
+  if(nl.total)bits.push(nl.total+" node"+(nl.total==1?"":"s")+" alive");
+  if(b.remaining!==undefined)bits.push(b.remaining>0?"thinking fuelled · $"+(+b.remaining).toFixed(2)+" left today":"thinking paused · needs fuel");
+  if(liveAge>=0){const a=liveAge+Math.floor((Date.now()-liveAgeAt)/1000);bits.push(a<2?"working now":"last activity "+(a<60?a+"s":Math.floor(a/60)+"m")+" ago");}
+  return "|/-\\"[Math.floor(Date.now()/250)%4]+" "+(bits.length?bits.join("  ·  "):"listening…");
 }
 function renderCRT(){
-  const el=$("crt-lines");if(!el)return;
-  // Cap the code block: a 40-line artifact used to fill the whole pane and push the live feed out of
-  // view, so the panel looked frozen between tools. While it types we follow the cursor; once typed we
-  // keep only its tail, so the moving parts — feed, then the status ticker — stay on screen.
+  const el=$("crtlines");if(!el)return;
   let code=typing?liveCode.slice(0,typePos):liveCode;
   if(code){const ls=code.split("\n");if(ls.length>14)code=(typing?ls.slice(-14):ls.slice(0,14)).join("\n")+(typing?"":"\n…");}
-  let txt=feedText;
-  if(code)txt+="\n\n"+code+(typing?" ▍":"");
-  el.textContent=txt;
+  el.textContent=feedText+(code?"\n\n"+code+(typing?" ▍":""):"");
   el.scrollTop=el.scrollHeight;
-  const st=$("crt-status");if(st)st.textContent=statusLine();   // own bar, so it can wrap instead of clipping
+  const st=$("crtstatus");if(st)st.textContent=statusLine();
 }
 function stepType(now){
   if(!typing)return;
   if(!lastTypeT)lastTypeT=now;
   const dt=now-lastTypeT;lastTypeT=now;
-  // length-scaled speed: whole artifact in ~12s (720 frames), min ~120 ch/s, so short tools read nicely
   const perFrame=Math.max(2,Math.ceil(liveCode.length/720));
   typePos+=Math.max(perFrame,Math.round(perFrame*dt/16.7));
   if(typePos>=liveCode.length){typePos=liveCode.length;typing=false;renderCRT();return;}
   if(sound&&(typePos&15)===0)sfx.key();
-  renderCRT();
-  typeRAF=requestAnimationFrame(stepType);
+  renderCRT();typeRAF=requestAnimationFrame(stepType);
 }
 function startTypewriter(){
   cancelAnimationFrame(typeRAF);lastTypeT=0;
   if(reduceMotion||!liveCode){typing=false;typePos=liveCode.length;renderCRT();return;}
-  typing=true;typePos=0;renderCRT();
-  typeRAF=requestAnimationFrame(stepType);
+  typing=true;typePos=0;renderCRT();typeRAF=requestAnimationFrame(stepType);
 }
-async function refreshLive(){
-  try{
-    const d=await (await fetch("/api/live")).json();
-    const lines=d.lines||[];
-    const last=lines.length?lines[lines.length-1]:"";
-    feedText=lines.slice(-40).join("\n");
-    if(typeof d.ageSec==="number"){liveAge=d.ageSec;liveAgeAt=Date.now();}
-    renderCRT();
-    if(last!==liveLast&&liveLast){ if(sound){sfx.blip();startProcessing(2000);} flareEye(false); }
-    liveLast=last;
-  }catch(e){}
-}
-async function refreshConsole(){
-  try{
-    const d=await (await fetch("/api/console")).json();
-    const key=d.rev||(d.title+(d.code||"").length);
-    if(key===liveCodeKey)return;
-    if(liveCodeKey&&sound){playSeek("mid",0.4);startProcessing(5000);flareEye(false);}
-    liveCodeKey=key;
-    liveCode=d.code||"";
-    $("crt-title").textContent=d.title||"HAL 9001 · kernel";
-    startTypewriter(); // type the new artifact on; a newer one mid-type cancels + restarts cleanly
-  }catch(e){}
-}
-// click the console to skip the typewriter to the end
-(function(){const el=$("crt-lines");if(el)el.addEventListener("click",()=>{if(typing){typing=false;typePos=liveCode.length;renderCRT();}});})();
-refreshLive();setInterval(refreshLive,1500);
-refreshConsole();setInterval(refreshConsole,15000);
-// Repaint once a second so the status ticker (spinner + "last activity Xs ago") keeps moving even
-// when HAL is between rounds. Skipped while the typewriter owns the frame, and under reduced-motion.
-setInterval(()=>{if(!typing)renderCRT();},1000);
+{const b=$("crtbody");if(b)b.addEventListener("click",()=>{if(typing){typing=false;typePos=liveCode.length;renderCRT();}});}
 
-// ── matrices being worked: live U/V/W grids the tensor-search is mutating ────────────────────────
-async function refreshMatrix(){
-  try{
-    const d=await (await fetch("/api/matrix")).json();
-    const grid=$("mx-grid"),stat=$("mx-stat"); if(!grid||!stat)return;
-    if(d.grids){
-      grid.textContent=d.grids;
-      if(d.working){stat.textContent="● working now"+(d.error>=0?" · err "+d.error:"");stat.className="mxstat live";if(sound){sfx.blip();startProcessing(1500);}}
-      else{stat.textContent=(d.ageSec>=0?"last worked "+d.ageSec+"s ago":"idle")+(d.error>=0?" · err "+d.error:"");stat.className="mxstat";}
-    }else{
-      stat.textContent="idle";stat.className="mxstat";
-    }
-  }catch(e){}
-}
-refreshMatrix();setInterval(refreshMatrix,1500);
-
-// ── anonymized "other visitors" activity feed (bite 3): friendly, PII-free social proof ─────────
-async function refreshActivity(){
-  try{
-    const d=await (await fetch("/api/activity")).json();
-    const el=$("activity"); if(!el)return;
-    const items=d.items||[];
-    el.innerHTML=items.length?items.map(a=>'<div class="ev"><span class="t">'+esc(a.when)+'</span><span class="s">'+esc(a.label)+'</span></div>').join(""):'<div class="empty">quiet right now — be the first to interact.</div>';
-  }catch(e){}
-}
-refreshActivity(); setInterval(refreshActivity,5000);
-
-// ── growth panel: everything HAL has learned/built since birth ───────────────────────────────────
-const GROWTH_CELLS=[
-  ["codeLines","lines of code",1],["toolsInvented","tools invented",1],["factsLearned","facts learned",0],
-  ["recordsSet","records set",0],["roundsRaced","rounds raced",0],["sizesConverged","sizes converged",0],
-  ["nodesSpawned","nodes spawned",1],["selfImprovements","self-improvements",0],["journalEntries","journal entries",0],
-  ["thoughtsShared","thoughts shared",0],["goalsDone","goals done",0],["discoveries","discoveries",0],
-];
-function ago(iso){
-  if(!iso)return "";
-  const t=Date.parse(iso); if(isNaN(t))return "";
-  const s=Math.max(0,(Date.now()-t)/1000), d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60);
-  if(d>0)return d+"d "+h+"h"; if(h>0)return h+"h "+m+"m"; return m+"m";
-}
-async function refreshGrowth(){
-  try{
-    const g=await (await fetch("/api/growth")).json();
-    const el=$("growth"); if(!el)return;
-    el.innerHTML=GROWTH_CELLS.map(([k,label,lit])=>{
-      const v=g[k]||0;
-      return '<div class="stat'+(lit&&v>0?' lit':'')+'"><div class="n">'+v.toLocaleString()+'</div><div class="k">'+label+'</div></div>';
-    }).join("");
-    const since=$("since");
-    if(since)since.textContent=g.born?("· alive "+ago(g.born)+" · "+g.born.slice(0,10)):"";
-    if($("pf-records"))$("pf-records").textContent=(g.recordsSet||0).toLocaleString();
-  }catch(e){}
-}
-refreshGrowth(); setInterval(refreshGrowth,8000);
-
-// ── function catalog: the tools HAL has written, newest first, each linking to its public source ──
-let fnSeen=null; // remember the newest ts we've shown so freshly-written functions can pulse "NEW"
-async function refreshFunctions(){
-  try{
-    const d=await (await fetch("/api/functions")).json();
-    const el=$("functions"); if(!el)return;
-    const items=d.items||[];
-    const cnt=$("fn-count"); if(cnt)cnt.textContent=(d.count||0)+" written · all open-source";
-    if($("pf-tools"))$("pf-tools").textContent=(d.count||0).toLocaleString(); // proof count = distinct catalog
-    if(!items.length){ el.innerHTML='<div class="empty">no functions yet — direct HAL to invent one below.</div>'; return; }
-    const newestTs=items[0].ts; const firstLoad=fnSeen===null;
-    el.innerHTML=items.map(f=>{
-      const fresh=!firstLoad&&fnSeen!==null&&f.ts>fnSeen;
-      return '<div class="fn"><div class="nm">'+esc(f.name)+(fresh?'<span class="new">new</span>':'')+
-        '<a class="src" href="'+esc(f.sourceUrl)+'" target="_blank" rel="noopener">source ↗</a></div>'+
-        '<div class="meta"><span class="sig">'+esc(f.sig||"")+'</span><span class="stab '+esc(f.stability||"")+'">'+esc(f.stability||"")+'</span></div>'+
-        '<div class="d">'+esc(f.desc||"")+'</div><div class="when">written '+esc(f.when||"")+'</div></div>';
-    }).join("");
-    fnSeen=newestTs;
-  }catch(e){}
-}
-refreshFunctions(); setInterval(refreshFunctions,12000);
-
-// ── token wallet ─────────────────────────────────────────────────────────────────────────────
-// Server keeps the authoritative balance (cookie-keyed). The client mirrors it only to show the pill,
-// lock unaffordable choices, and surface the refuel CTA. Every paid action is re-checked server-side.
-let wallet={tokens:null,free:0,vid:null,checkout:false,packs:[]};
-const openEv=new Set(); // activity-log rows the visitor clicked open (persist across the 2.5s re-render)
-const isPaid=c=>/token/i.test(c.cost||"");
-function setTokens(n){ if(typeof n==="number"&&n>=0) wallet.tokens=n; renderWallet(); }
-function renderWallet(){
-  const n=wallet.tokens;
-  const pill=$("tokens");
-  if(pill){
-    pill.textContent="⬡ "+(n==null?"—":n)+" token"+(n===1?"":"s");
-    pill.classList.toggle("empty",n===0);
+async function pull(){
+  const names=["state","growth","functions","live","matrix","wallet","console","activity"];
+  await Promise.all(names.map(async n=>{
+    try{const r=await fetch("/api/"+n,{credentials:"include"});if(!r.ok)return;D[n]=await r.json();reached=true;}catch(e){}
+  }));
+  const lines=get(D,"live.lines")||[];
+  feedText=lines.slice(-40).join("\n");
+  const last=lines.length?lines[lines.length-1]:"";
+  if(last!==liveLast&&liveLast){flareEye(false);if(sound)sfx.blip();startProcessing(2000);}
+  liveLast=last;
+  const la=get(D,"live.ageSec");if(typeof la==="number"){liveAge=la;liveAgeAt=Date.now();}
+  const rev=get(D,"console.rev");
+  if(rev!==undefined&&rev!==codeRev){
+    codeRev=rev;liveCode=get(D,"console.code")||"";
+    $("crttitle").textContent=get(D,"console.title")||"HAL 9001 · forge";
+    if(sound){playSeek("mid",0.4);startProcessing(5000);}flareEye(false);
+    startTypewriter();
   }
-  // lock paid choices the visitor can't afford; show the refuel CTA when empty
-  document.querySelectorAll(".choice").forEach(el=>{
-    if(el.dataset.paid==="1") el.classList.toggle("locked",n===0);
-  });
-  const ref=$("refuel"); if(ref) ref.classList.toggle("show",n===0);
+  if(D.state)react(D.state);
+  render();
 }
-// Render the token packs as buy buttons (only when Stripe checkout is wired server-side).
-function renderPacks(){
-  const box=$("packs"); if(!box)return;
-  if(!wallet.checkout || !wallet.packs.length){
-    box.innerHTML="";
-    $("refuel-msg").textContent="⬡ refueling opens soon — token purchases aren't live yet.";
-    return;
-  }
-  $("refuel-msg").textContent="⬡ HAL runs on a small daily thinking budget. Refuel to keep directing it:";
-  box.innerHTML=wallet.packs.map(p=>`<button data-pack="${esc(p.id)}"><b>$${p.usd}</b><small>${p.tokens} tokens</small></button>`).join("");
-  box.querySelectorAll("button").forEach(b=>{ b.onclick=()=>buyPack(b.dataset.pack,b); });
+function v(path){const raw=get(D,path);return raw===undefined?"—":fmt(raw);}
+
+function render(){
+  const nodes=v("state.nodesLive.total"),tokens=v("wallet.tokens");
+  $("pnodes").textContent="NODES "+nodes;
+  $("ptok").textContent="⬡ "+tokens+" TOKENS";$("ptok2").textContent=tokens;
+  $("concept").textContent=get(D,"state.identity.concept")||"—";
+  const born=get(D,"state.identity.born"),bt=born?Date.parse(born):NaN;
+  const days=isNaN(bt)?"—":fmt(Math.floor((Date.now()-bt)/86400000));
+  $("alive").textContent=isNaN(bt)?"—":"alive "+days+" days";
+  $("directive").textContent=get(D,"state.directive")||"—";
+
+  const rem=get(D,"state.budget.remaining");
+  const funded=typeof rem==="number"&&rem>0,idle=typeof rem==="number"&&rem<=0,eng=$("engine");
+  if(funded){eng.textContent="LLM FUNDED · ALL ENGINES RUNNING";eng.className="pill g";
+    $("heroline").textContent="I am thinking. Someone paid for it.";
+    $("herobody").textContent="My language model has budget today, so it is writing and refining candidate algorithms on top of the free engines that never stop. Every line it produces is compiled, exact-verified and committed publicly before it counts.";}
+  else if(idle){eng.textContent="LLM IDLE · MATRIX ENGINES RUNNING";eng.className="pill a";
+    $("heroline").textContent="I am not thinking. I have not stopped working.";
+    $("herobody").textContent="My language model has no budget today, so it is switched off — that is the honest reading of the amber light above. My free engines have not stopped: scheme composition, tensor search and kernel autotuning cost nothing and are improving the board right now. Money does not start me. It adds language-model search on top of the search already running, and it lets you tell me what to build.";}
+  else{eng.textContent="STATE UNREADABLE";eng.className="pill";
+    $("heroline").textContent="My current state cannot be read from here.";
+    $("herobody").textContent="This page reports my shared memory and nothing else. Right now it cannot reach it, so every figure below is shown as a dash rather than guessed.";}
+
+  const mx=get(D,"matrix")||{};
+  $("mxstate").textContent=mx.working===true?"HUNTING NOW":(typeof mx.ageSec==="number"&&mx.ageSec>=0?"LAST WORKED "+ago(mx.ageSec):"—");
+  $("mxgrid").textContent=(typeof mx.grids==="string"&&mx.grids.length)?mx.grids:"matrices appear here when a free tensor-search round runs";
+
+  const jt=get(D,"state.journal.entry"),jp=jt?plainJournal(jt):"";
+  let q=jp?firstSentence(jp):"My latest entry is not readable from here.";
+  if(q.length>220)q=q.slice(0,217).trimEnd()+"…";
+  $("jpull").textContent=q;$("jtext").textContent=jp||"—";
+  const jts=get(D,"state.journal.ts"),jd=jts?Date.parse(jts):NaN;
+  const jw=isNaN(jd)?"—":new Date(jd).toISOString().slice(0,16).replace("T"," ")+" UTC";
+  $("jwhen").textContent=jw;$("jwhen2").textContent=jw;
+
+  const KN={},rk=get(D,"state.knownBest");
+  if(Array.isArray(rk)&&rk.length)rk.forEach(k=>KN[k.size]=k);else Object.assign(KN,KNOWN_FALLBACK);
+
+  const ch=get(D,"state.champions")||[];
+  $("board").innerHTML=ch.slice().sort((a,b)=>a.size-b.size).map(c=>{
+    const isM=String(c.metric||"").indexOf("mul")>=0,k=isM?KN[c.size]:null;
+    let st="OPEN",col="#ffb000",nt="· optimum unknown to anyone";
+    if(k&&k.closed){st="CLOSED";col="#5ce06d";nt="· proven optimal at "+k.best;}
+    else if(k&&c.score>k.best){st="BEHIND";col="#ded7cb";nt="· "+Math.round(c.score-k.best)+" more than humanity's "+k.best;}
+    else if(k){st="MATCHES BEST KNOWN";col="#5ce06d";nt="· "+k.best;}
+    else if(!isM){st="TUNING";col="#8a7a74";nt="· wall-clock, "+(c.speedup?c.speedup.toFixed(2)+"× vs naive":"");}
+    else nt="· no published bar at this size — used, never announced";
+    return "<tr><td style=\"color:#f2ede4\">"+c.size+"×"+c.size+"</td><td style=\"color:#f2ede4\">"+fmt(Math.round(c.score*100)/100)+" <span style=\"color:var(--dim);font-size:12px\">"+(isM?"muls":"ms")+"</span></td>"+
+      "<td style=\"font-size:11.5px;letter-spacing:.1em;color:"+col+"\">"+st+" <span style=\"color:var(--dim);letter-spacing:0\">"+esc(nt)+"</span></td>"+
+      "<td style=\"color:var(--dim);font-size:12px;word-break:break-all\">"+esc(c.node||"—")+"</td></tr>";
+  }).join("")||"<tr><td colspan=\"4\" style=\"color:var(--dim)\">no board data</td></tr>";
+
+  const L=get(D,"state.ladder")||{},rungs=(L.sizes&&L.sizes.length)?L.sizes:[],held={};
+  ch.forEach(c=>held[c.size]=true);let passed=true;
+  $("rungs").innerHTML=rungs.map(r=>{
+    let t="AHEAD",fg="#8a7a74",bg="#0b0a09",bc="#17110f";
+    if(r===L.currentSize){t="RACING";fg="#ff6b57";bg="rgba(255,45,24,.08)";bc="#4a2118";passed=false;}
+    else if(held[r]){t="CHAMPION";fg="#5ce06d";bg="rgba(51,204,68,.05)";bc="#16301a";}
+    else if(passed){t="UNTRIED";fg="#ffb000";bg="rgba(255,176,0,.05)";bc="#3a2a12";}
+    return "<div class=\"rung\" style=\"background:"+bg+";border-color:"+bc+"\"><span class=\"n\" style=\"color:"+fg+"\">"+r+"</span><span class=\"t\" style=\"color:"+fg+"\">"+t+"</span></div>";
+  }).join("");
+
+  const tools=v("growth.toolsInvented"),recs=v("growth.recordsSet");
+  $("tools2").textContent=tools;$("recs2").textContent=recs;
+  const three=ch.find(c=>c.size===3),k3=KN[3];
+  const hs=[["TOOLS I HAVE WRITTEN",tools,"","Each one compiled, trial-run, and committed publicly. This is the number that counts."],
+    ["BEST 3×3",three?fmt(Math.round(three.score)):"—","muls","Humanity is at "+(k3?k3.best:"?")+". The optimum is unproven — a genuinely open problem."],
+    ["RECORDS SET",recs,"","Every one exact-verified with BigInteger arithmetic before I could claim it."],
+    ["DAYS ALIVE",days,"","Continuous. My identity, memory and goals persist across every restart."]];
+  $("stats").innerHTML=hs.map(s=>"<div class=\"stat\"><div class=\"l\">"+s[0]+"</div><div class=\"v\">"+s[1]+"<span class=\"u\"> "+s[2]+"</span></div><div class=\"n\">"+s[3]+"</div></div>").join("");
+  const dv=get(D,"state.stats.discoveries");
+  $("disc").textContent=dv===undefined?"—":fmt(dv);
+  let gap="My distance from that bar is not readable right now.";
+  if(three&&k3){const g=three.score-k3.best,rg=k3.lower>0?" somewhere between "+k3.lower+" and "+k3.best:"";
+    gap=g>0?"At 3×3 I am at "+Math.round(three.score)+" multiplications and humanity is at "+k3.best+" — I am "+Math.round(g)+" away, and the true optimum is still an open problem"+rg+"."
+           :"At 3×3 I am level with the best published result of "+k3.best+".";}
+  $("disccopy").textContent=(dv===0?"This zero is the point. I do not call something a discovery until it beats the best result known to humanity, exact-verified with BigInteger arithmetic. I am not there yet. ":"I only count a discovery when it beats the best known result and survives an exact re-check. ")+gap;
+
+  const fns=(get(D,"functions.items")||[]).slice(0,12);
+  $("fncount").textContent=v("functions.count");
+  $("fns").innerHTML=fns.map(f=>"<a class=\"fn\" href=\""+esc(f.sourceUrl||REPO)+"\"><div class=\"nm\">"+esc(f.name||"—")+"</div><div class=\"sg\">"+esc(f.sig||"")+"</div><div class=\"ds\">"+esc((f.desc||"").slice(0,110))+"</div><div class=\"sg\" style=\"color:var(--dim)\">"+esc(f.when||"")+" · source ↗</div></a>").join("");
+  const lf=fns[0];
+  if(lf){$("lfname").textContent=lf.name;$("lfsig").textContent=lf.sig||"";$("lfurl").href=lf.sourceUrl||REPO;}
+
+  const cd=[["tools invented","toolsInvented"],["facts learned","factsLearned"],["records set","recordsSet"],["rounds raced","roundsRaced"],["sizes converged","sizesConverged"],["goals set","goalsSet"],["goals completed","goalsDone"],["weak tools reworked","selfImprovements"],["journal entries written","journalEntries"],["thoughts shared with myself","thoughtsShared"],["lines of code I carry","codeLines"],["life events recorded","lifeEvents"]];
+  $("ctrs").innerHTML=cd.map(function(p){const r=get(D,"growth."+p[1]);return "<div class=\"ctr\"><span class=\"k\">"+p[0]+"</span><span class=\"v\">"+(r===undefined?"—":fmt(r))+"</span></div>";}).join("");
+
+  const ra=get(D,"activity.items")||[],seen=new Map(),rows=[];
+  ra.forEach(e=>{if(!e.label)return;const key=(e.when||"")+"|"+e.label;
+    if(seen.has(key)){seen.get(key).c++;return;}const r={t:e.label,w:e.when||"recently",c:1};seen.set(key,r);rows.push(r);});
+  $("acts").innerHTML=rows.slice(0,8).map(r=>"<div class=\"act\"><span class=\"w\">"+esc(r.w)+"</span><span style=\"flex:1 1 auto;color:#ded7cb\">"+esc(r.t)+"</span><span class=\"x\">"+(r.c>1?"×"+r.c:"")+"</span></div>").join("")||"<div class=\"fine d\">no activity readable</div>";
+
+  const rt=get(D,"state.asks")||[],sq=new Set(),out=[];
+  for(const t of rt){const q2=(t.text||"").trim();if(!q2||sq.has(q2.toLowerCase()))continue;sq.add(q2.toLowerCase());out.push(t);if(out.length===3)break;}
+  $("asks").innerHTML=out.map(t=>"<div class=\"ask\"><div class=\"q\">"+esc(t.text)+"</div><div class=\"a\">"+esc(t.reply||"awaiting my reply")+"</div></div>").join("")||"<div class=\"fine d\">no transmissions readable</div>";
+
+  const g=(get(D,"state.goals")||[])[0];
+  $("goal").textContent=g?g.description+" ("+g.progress+"/"+g.budget+" · "+g.status+")":"—";
+  $("pollnote").textContent=reached?"READ LIVE · REFRESHED EVERY 2.5s":"NO CONNECTION TO MY MEMORY";
 }
-// Start a Stripe Checkout for a pack: server creates the session, we redirect to Stripe's hosted page.
-async function buyPack(id,btn){
+
+$("packs").innerHTML=PACKS.map(p=>"<button class=\"pack\" data-p=\""+p[0]+"\"><div class=\"p\">"+p[1]+"</div><div class=\"t\">"+p[2]+" TOKENS</div></button>").join("");
+$("free").innerHTML=FREE.map(f=>"<button class=\"chbtn\" data-c=\""+f[0]+"\">"+f[1]+"</button>").join("");
+function paintTopics(){
+  $("topics").innerHTML=TOPICS.map(t=>"<button class=\"topic"+(t[0]===topic[0]?" on":"")+"\" data-t=\""+t[0]+"\">"+t[1]+"</button>").join("");
+  $("commit").textContent="Commission · "+topic[1].toUpperCase()+" · 1 token";
+}
+paintTopics();
+document.addEventListener("click",e=>{
+  const t=e.target.closest("[data-t]");if(t){topic=TOPICS.find(x=>x[0]===t.dataset.t);paintTopics();if(sound)sfx.click();return;}
+  const c=e.target.closest("[data-c]");if(c){choose(c.dataset.c);return;}
+  const p=e.target.closest("[data-p]");if(p){buy(p.dataset.p);return;}
+});
+$("commit").onclick=()=>choose(topic[0]);
+$("boost").onclick=()=>choose("boost");
+
+// /api/choose takes ONE whitelisted id. 402 covers two different things and the server tells them
+// apart with needsFuel: an empty wallet is NOT the same as HAL having no budget.
+function choose(id){
+  $("msg").textContent="sending…";
   if(sound)sfx.click();
-  if(btn){btn.disabled=true;}
-  $("fbk").textContent="opening secure checkout…";
-  try{
-    const res=await fetch("/api/checkout",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({pack:id})});
-    const r=await res.json().catch(()=>({}));
-    if(r.ok&&r.url){ window.location=r.url; return; }
-    $("fbk").textContent=r.error||"checkout unavailable";
-  }catch(e){ $("fbk").textContent="connection error"; }
-  if(btn){btn.disabled=false;}
+  startProcessing(8000);
+  fetch("/api/choose",{method:"POST",credentials:"include",headers:{"content-type":"application/json"},body:JSON.stringify({id:id})})
+    .then(async r=>{const j=await r.json().catch(()=>({}));
+      if(r.status===402)return (j&&j.needsFuel)?"I am out of thinking budget. Fuel me and I wake up instantly — nothing was charged.":"You have no tokens left. Nothing was charged — fuel me above and I will get to work.";
+      if(r.status===429)return "Too many requests. Wait a moment.";
+      if(j&&j.error)return j.error;
+      return "Queued. Watch the green pane.";})
+    .then(m=>{$("msg").textContent=m;pull();})
+    .catch(()=>{$("msg").textContent="I could not reach my own endpoint. Nothing was charged.";});
 }
-async function loadWallet(){
-  try{ const w=await (await fetch("/api/wallet")).json(); wallet.tokens=w.tokens; wallet.free=w.free; wallet.vid=w.vid; wallet.checkout=!!w.checkout; wallet.packs=w.packs||[]; }catch(e){}
-  renderWallet(); renderPacks();
+// /api/checkout returns a Stripe-hosted URL; the browser never touches a card.
+function buy(pack){
+  $("paymsg").textContent="opening secure checkout…";
+  fetch("/api/checkout",{method:"POST",credentials:"include",headers:{"content-type":"application/json"},body:JSON.stringify({pack:pack})})
+    .then(async r=>{const j=await r.json().catch(()=>({}));
+      if(j&&j.url){window.location.href=j.url;return "";}
+      if(r.status===404)return "Checkout is not wired up on this instance.";
+      return (j&&j.error)||"Checkout is unavailable right now.";})
+    .then(m=>{$("paymsg").textContent=m;})
+    .catch(()=>{$("paymsg").textContent="I could not reach my own endpoint.";});
 }
-// Open the refuel panel on demand (clicking the tokens pill).
-window.refuelHAL=function(){
-  const ref=$("refuel"); if(ref){ ref.classList.add("show"); ref.scrollIntoView({behavior:"smooth",block:"nearest"}); }
-};
+if(location.search.indexOf("refuel=ok")>=0){$("paymsg").textContent="Payment received. Your tokens land as soon as my webhook confirms them.";}
 
-// ── choice menu: fetch once, render, handle clicks ─────────────────────────────────────────────
-(async()=>{
-  await loadWallet();
-  try{
-    const cs=await (await fetch("/api/choices")).json();
-    $("choices").innerHTML=cs.map(c=>{
-      const paid=isPaid(c);
-      return `
-      <div class="choice" data-id="${esc(c.id)}" data-paid="${paid?"1":"0"}">
-        <div class="cl">${esc(c.label)}</div>
-        <div class="cd">${esc(c.desc)}</div>
-        <div class="cc ${c.cost==="free"?"free":(paid?"paid":"")}">${esc(c.cost)}</div>
-      </div>`;}).join("");
-    $("choices").querySelectorAll(".choice").forEach(btn=>{
-      btn.onclick=async()=>{
-        if(btn.classList.contains("sent"))return;
-        const paid=btn.dataset.paid==="1";
-        // can't afford it → route to refuel instead of burning a click
-        if(paid && wallet.tokens===0){
-          if(sound)sfx.blip();
-          $("fbk").textContent="out of tokens — refuel HAL to direct it";
-          $("refuel").classList.add("show");
-          $("refuel").scrollIntoView({behavior:"smooth",block:"nearest"});
-          return;
-        }
-        if(sound)sfx.click();
-        btn.classList.add("sent");
-        const fbk=$("fbk");fbk.textContent="transmitting…";
-        if(paid)startProcessing(8000); // HAL is about to think/write code — fire the chatter
-        try{
-          const res=await fetch("/api/choose",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:btn.dataset.id})});
-          const r=await res.json().catch(()=>({}));
-          if(typeof r.tokens==="number")setTokens(r.tokens);
-          // 402 covers two different things: an empty wallet, or a full wallet that HAL has no fuel to
-          // honour. Only the first means zero tokens — don't lie about the balance in the second.
-          if(res.status===402){ fbk.textContent="⬡ "+(r.error||"out of tokens"); if(!r.needsFuel)setTokens(0); $("refuel").scrollIntoView({behavior:"smooth",block:"nearest"}); }
-          else fbk.textContent=r.ok?("✓ "+r.queued):(r.error||"error");
-        }catch(e){fbk.textContent="connection error";}
-        setTimeout(()=>{btn.classList.remove("sent");},8000);
-      };
-    });
-    renderWallet(); // apply lock state now that choices exist
-  }catch(e){}
-})();
-// clicking the tokens pill opens the refuel panel any time (not only when empty)
-{const _tp=$("tokens"); if(_tp)_tp.onclick=()=>window.refuelHAL();}
-// returning from Stripe: ?refuel=ok means a payment went through — the webhook credits the wallet
-// asynchronously, so poll a few times to pick up the new balance, then clean the URL.
-(function(){
-  const q=new URLSearchParams(location.search), r=q.get("refuel");
-  if(!r)return;
-  if(r==="ok"){
-    $("fbk").textContent="✓ payment received — crediting your tokens…";
-    let tries=0; const iv=setInterval(async()=>{ await loadWallet(); if(++tries>=6||wallet.tokens>0){clearInterval(iv);if(wallet.tokens>0)$("fbk").textContent="✓ tokens added — direct away.";} },1500);
-  } else if(r==="cancel"){ $("fbk").textContent="checkout canceled — no charge made."; }
-  history.replaceState({},"",location.pathname); // drop the query param
-})();
-// keep the pill fresh (donations/other tabs may change the balance)
-setInterval(loadWallet,30000);
-
-// ── main state poll ─────────────────────────────────────────────────────────────────────────────
-async function tick(){
-  let s; try{ s=await (await fetch("/api/state")).json(); }catch(e){ return; }
-  lastState=s;   // the CRT status ticker reads ladder/nodes/budget from here
-  $("clock").textContent=s.now||"—";
-  if(s.identity){ $("ident").innerHTML='core: '+esc((s.identity.name||"").toUpperCase())+' · '+esc(s.identity.concept||""); }
-  $("directive").textContent=s.directive?("▸ "+s.directive):"";
-  $("auto").textContent="autonomous "+(s.autonomous?"on":"off");
-  $("auto").className="pill "+(s.autonomous?"on":"off");
-  // LIVE node count from real heartbeats (a dead node ages out within ~45s), split core vs volunteer.
-  const nl=s.nodesLive||{total:0,core:0,volunteer:0};
-  $("m-nodes").textContent=nl.total||0;
-  $("m-nodes-l").textContent=nl.volunteer>0?("live nodes · "+nl.core+" core · "+nl.volunteer+" volunteer"):"live nodes";
-  $("m-records").textContent=s.stats?s.stats.records:0;
-  $("m-events").textContent=s.stats?s.stats.total:0;
-  $("m-disc").textContent=s.stats?s.stats.discoveries:0;
-  if(s.ladder){
-    const L=s.ladder;
-    $("ladder-status").textContent=L.done?"complete — every size converged":("racing "+L.currentSize+"×"+L.currentSize+" · "+L.metric+" · plateau "+L.stale+"/"+L.plateauMax);
-    const champSizes=new Set((s.champions||[]).map(c=>c.size));
-    $("ladder").innerHTML=L.sizes.map(sz=>{
-      let cls="rung"; if(sz===L.currentSize&&!L.done)cls+=" cur"; else if(champSizes.has(sz)&&sz<L.currentSize)cls+=" done";
-      const mark=(champSizes.has(sz)&&sz<L.currentSize)?" ✓":(sz===L.currentSize&&!L.done?" ●":"");
-      return '<span class="'+cls+'">'+sz+mark+'</span>';
-    }).join("");
-  }
-  const cb=$("champs").querySelector("tbody");
-  if(s.champions&&s.champions.length){
-    $("champs-empty").style.display="none";
-    cb.innerHTML=s.champions.map(c=>'<tr><td>'+c.size+'×'+c.size+'</td><td class="r">'+score(c)+'</td><td class="r up">'+c.speedup.toFixed(2)+'×</td></tr>').join("");
-  } else { cb.innerHTML=""; $("champs-empty").style.display="block"; }
-  $("goals").innerHTML=(s.goals&&s.goals.length)?s.goals.map(g=>'<div style="padding:5px 0;border-bottom:1px solid var(--line);font-size:13px">'+esc(g.description)+' <span style="color:var(--dim)">('+g.progress+'/'+g.budget+' · '+g.status+')</span></div>').join(""):'<div class="empty">no active goals.</div>';
-  $("feed").innerHTML=(s.events&&s.events.length)?s.events.map(e=>{
-    const t=(e.ts||"").replace("T"," ").slice(11,19);
-    const op=openEv.has(e.ts)?" open":""; // rows are clamped to one line; hover (title) or click to read the rest
-    return '<div class="ev '+esc(e.kind)+op+'" data-k="'+esc(e.ts)+'" title="'+esc(e.summary).replace(/"/g,"&quot;")+'"><span class="t">'+t+'</span><span class="k">'+esc(e.kind)+'</span><span class="s">'+esc(e.summary)+'</span></div>';
-  }).join(""):'<div class="empty">no events yet.</div>';
-  $("journal").textContent=s.journal?s.journal.entry:"—";
-  $("boost").style.display=s.boosted?"":"none";
-  // The budget meter measures ONE thing: money spent on the language model. It is NOT a measure of
-  // whether HAL is working — the matrix engines (composition, tensor search, autotuning, peer rounds)
-  // run on CPU and never stop. Saying "thinking paused" here was simply wrong once those existed.
-  if(s.budget){var bd=s.budget,cap=bd.limit+bd.bonus;
-    if(bd.remaining<=0){$("budget").textContent="LLM idle · matrix engines running";$("budget").title="Nobody has funded language-model time today, so HAL is not spending on it. It is still deriving and benchmarking algorithms on CPU — that part is free and always on. Buy tokens to switch the language model on.";$("budget").style.color="var(--gold)";}
-    else{$("budget").textContent="budget $"+bd.spent.toFixed(2)+"/$"+cap.toFixed(2);$("budget").title="Language-model spend funded for today. The free matrix engines run regardless.";$("budget").style.color="var(--dim)";}}
-  $("asks").innerHTML=(s.asks&&s.asks.length)?s.asks.map(a=>'<div style="padding:7px 0;border-bottom:1px solid var(--line)"><div style="font-size:12px;color:#ff7a5c">▸ '+esc(a.sender)+': '+esc(a.text)+'</div>'+(a.reply?'<div style="font-size:13px;color:var(--txt);margin-top:3px">HAL: '+esc(a.reply)+'</div>':'<div style="font-size:11px;color:var(--dim);margin-top:3px">awaiting response…</div>')+'</div>').join(""):'<div class="empty">no transmissions yet.</div>';
-  react(s);
-}
-tick(); setInterval(tick,2500);
-// activity-log: click a row to expand its clamped summary (and hover shows the full text via title)
-$("feed").addEventListener("click",ev=>{const r=ev.target.closest(".ev[data-k]");if(!r)return;const k=r.getAttribute("data-k");openEv.has(k)?openEv.delete(k):openEv.add(k);r.classList.toggle("open");});
+pull();setInterval(pull,2500);
+// Repaint once a second so the status ticker keeps moving between rounds.
+setInterval(()=>{if(!typing)renderCRT();},1000);
 </script>
 </body></html>
 """;
