@@ -14,9 +14,11 @@ name: Deploy HAL9001
 
 on:
   workflow_dispatch:        # manual: Actions tab → "Deploy HAL9001" → Run workflow
-  # Uncomment to also deploy automatically on every push to main once you trust it:
-  # push:
-  #   branches: [ main ]
+  push:                     # and automatically on every push to main
+    branches: [ main ]
+    paths-ignore:           # docs-only commits don't need a production restart
+      - '**.md'
+      - 'LICENSE'
 
 jobs:
   deploy:
@@ -46,6 +48,18 @@ jobs:
         run: |
           scp -i ~/.ssh/deploy_key ./publish-linux/HAL9001.dll \
             "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/hal9001/HAL9001.dll"
+
+      # ── ONE-TIME (remove after it has run once) ────────────────────────────────────────────────
+      # Set the owner's free daily LLM allowance to 0 on the box. The code default is already 0,
+      # but /etc/hal9001/hal.env still says 1.0 and the env wins, so HAL kept spending ~$1/day of
+      # the owner's Anthropic key with nobody paying. Idempotent, keeps a .bak, and touches only
+      # this one key — every other secret in the file is left byte-for-byte alone.
+      - name: One-time — zero the free LLM allowance
+        run: |
+          ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "sed -i.bak 's/^[[:space:]]*HAL_DAILY_USD[[:space:]]*=.*/HAL_DAILY_USD=0/' /etc/hal9001/hal.env; \
+             grep -q '^HAL_DAILY_USD=' /etc/hal9001/hal.env || echo 'HAL_DAILY_USD=0' >> /etc/hal9001/hal.env; \
+             echo 'allowance now:' \$(grep '^HAL_DAILY_USD=' /etc/hal9001/hal.env)"
 
       - name: Fix ownership and restart services
         run: |
