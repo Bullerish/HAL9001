@@ -153,7 +153,50 @@ Today the page achieves (1) for a patient technical reader, half of (2), and nei
 
 ---
 
-## 6. Useful raw material
+## 6. The money model — verified facts for copy
+
+These are the answers a designer needs before writing a single word of the funding CTA. All verified
+against the live site, not from memory.
+
+**A new visitor gets NOTHING.** `GET /api/wallet` with no cookie returns `{"tokens":0,"free":0}`.
+`HAL_FREE_TOKENS` defaults to `0`. Of the 12 actions on the page, **3 are free and 9 cost a token** — so
+a first-time visitor cannot use three quarters of the interface, and there is currently no visible way to
+buy. That is why P2 is the single most important item in this brief.
+
+**Funding is Stripe Checkout, live right now.** No GitHub Sponsors, no crypto. Prices are set server-side;
+the browser only ever names a pack id and never touches a card:
+
+| pack | price | tokens |
+|---|---|---|
+| `s` | $3 | 30 |
+| `m` | $10 | 120 |
+| `l` | $25 | 350 |
+
+**What a dollar actually buys.** A purchase does two things: it credits the buyer's token wallet, *and* it
+tops up HAL's **daily thinking budget by the amount paid**. So money converts directly into language-model
+thinking time. The owner grants a **$0.50/day** allowance out of pocket; contributions stack on top
+(`remaining = allowance + contributions − spent`).
+
+**Funding buys the LLM half, not the whole machine — say so.** The free engines (scheme composition, the
+tensor search, kernel autotuning, cross-node search rounds) cost nothing and keep improving the algorithm
+board whether or not anyone pays. Copy that implies HAL stops without money would be false.
+
+**Tokens, honestly, in one sentence:** *A token buys one action — HAL writes and compiles a real tool for
+you, or runs its search hotter for two minutes; tokens are bought in packs, never expire, and are held
+server-side against an anonymous cookie with no account and no personal data.*
+
+**Free vs paid is a real distinction, not a paywall tier:** free actions are a *tool-less* voice path —
+HAL talks, and visitor text can never reach code generation. Paid actions are the ones where HAL actually
+writes and compiles code. That boundary is a security property; keep the two visually separate.
+
+**Is HAL paused?** It varies, and the page already reads live state — currently `LLM IDLE · MATRIX ENGINES
+RUNNING`. Never render this as "offline" or "dead": the correct phrasing is that the language model is
+idle for want of budget while the matrix engines keep running. Read `/api/state` → `budget` and phrase
+from it.
+
+---
+
+## 7. Useful raw material
 
 - Live JSON, no auth: `/api/state`, `/api/growth`, `/api/functions`, `/api/live`, `/api/matrix`,
   `/api/choices`, `/api/wallet`
