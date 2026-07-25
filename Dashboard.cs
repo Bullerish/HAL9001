@@ -61,9 +61,30 @@ public static class Dashboard
         Console.WriteLine("Dashboard stopped.");
     }
 
+    /// <summary>
+    /// The key every rate limit is counted against. The listener binds loopback only, so in production
+    /// EVERY request arrives from Caddy at 127.0.0.1 — meaning the raw peer address is the SAME string for
+    /// the entire internet, and all callers shared ONE bucket that any single visitor could exhaust
+    /// (including the headroom Stripe's webhook retries depend on).
+    ///
+    /// Caddy appends the real client to X-Forwarded-For, so its LAST hop is the one Caddy itself added and
+    /// is the only entry a client cannot forge. We consult it ONLY when the direct peer is genuinely
+    /// loopback; exposed directly, with no proxy in front, the header is ignored and the peer address wins.
+    /// </summary>
+    private static string ClientIp(HttpListenerContext ctx)
+    {
+        string peer = ctx.Request.RemoteEndPoint?.Address?.ToString() ?? "anon";
+        if (!System.Net.IPAddress.TryParse(peer, out var addr) || !System.Net.IPAddress.IsLoopback(addr))
+            return peer;
+        string? xff = ctx.Request.Headers["X-Forwarded-For"];
+        if (string.IsNullOrWhiteSpace(xff)) return peer;
+        string last = xff.Split(',')[^1].Trim();
+        return last.Length > 0 && last.Length <= 64 ? last : peer;
+    }
+
     private static async Task HandleAsync(HttpListenerContext ctx, AgentCore core)
     {
-        string ip = ctx.Request.RemoteEndPoint?.Address?.ToString() ?? "anon";
+        string ip = ClientIp(ctx);
         try
         {
             string path = ctx.Request.Url?.AbsolutePath ?? "/";
@@ -691,14 +712,41 @@ public static class Dashboard
             // — the same one the Stripe webhook uses — makes the second attempt a no-op. Without a ref we
             // cannot dedupe, so the request is refused rather than silently risking a double credit.
             if (string.IsNullOrWhiteSpace(p.Ref)) { ctx.Response.StatusCode = 400; return Err("missing ref (idempotency key)"); }
-            if (!await core.ClaimStripeEventAsync("donate:" + p.Ref))
+            string dref = "donate:" + p.Ref;
+            AgentCore.StripeClaim dclaim = await core.ClaimStripeEventAsync(dref);
+            // "Couldn't read the ledger" is not "already credited" — reporting the former as the latter
+            // told the caller the payment was fulfilled when nothing had happened. Say retry instead.
+            if (dclaim == AgentCore.StripeClaim.Error)
+            { ctx.Response.StatusCode = 503; return Err("could not record this credit — retry with the same ref"); }
+            if (dclaim == AgentCore.StripeClaim.AlreadyDone)
                 return JsonSerializer.Serialize(new { ok = true, duplicate = true, tokens = await core.WalletBalanceAsync(p.Vid!) }, JsonOpts);
-            int bal = await core.WalletCreditAsync(p.Vid!, n);
-            // Also fund today's thinking budget so the buyer's steers can actually run (HAL_DAILY_USD=0 ⇒
-            // nothing thinks unless paid). Price it from the matching pack; an allowance/cap, not a transfer.
+
+            var (dOutcome, bal) = await core.WalletCreditCheckedAsync(p.Vid!, n);
+            if (dOutcome == AgentCore.CreditOutcome.NotApplied)
+            {
+                // Provably nothing delivered, so release the claim — otherwise the ref is burned and the
+                // caller's retry would be swallowed as a duplicate forever. Only safe because the credit
+                // is known NOT to have landed; "couldn't confirm" is handled separately below.
+                await core.ReleaseStripeEventAsync(dref);
+                ctx.Response.StatusCode = 503;
+                return Err("credit failed — retry with the same ref");
+            }
+            if (dOutcome == AgentCore.CreditOutcome.Unknown)
+            {
+                // Keep the ref claimed: re-crediting is worse than a delayed manual fix.
+                Console.WriteLine($"[donate] AMBIGUOUS credit for {dref} ({n} tokens) — claim KEPT to avoid double-crediting; RECONCILE MANUALLY");
+                await Log(core, "payment-needs-reconcile", $"{dref}: {n} tokens — could not confirm the credit landed");
+                ctx.Response.StatusCode = 202;
+                return JsonSerializer.Serialize(new { ok = true, reconcile = true }, JsonOpts);
+            }
+            // Also fund today's thinking budget so the buyer's steers can actually run. Price it from the
+            // matching pack; an allowance/cap, not a transfer. Best-effort: tokens are already delivered,
+            // so a failure here must NOT release the claim (that would re-credit them).
             var pk = Packs.FirstOrDefault(x => x.Tokens == n);
-            if (pk is not null) await core.AddBudgetBonusAsync(pk.Cents / 100.0);
-            return bal > 0 ? JsonSerializer.Serialize(new { ok = true, tokens = bal }, JsonOpts) : Err("credit failed");
+            double dfunded = pk is not null ? await core.AddBudgetBonusAsync(pk.Cents / 100.0) : 0;
+            if (pk is not null && dfunded <= 0)
+                Console.WriteLine($"[donate] tokens delivered for {dref} but the budget top-up FAILED — top up manually");
+            return JsonSerializer.Serialize(new { ok = true, tokens = bal, funded = dfunded }, JsonOpts);
         }
         ctx.Response.StatusCode = 400; return Err("unknown action");
     }
@@ -805,23 +853,68 @@ public static class Dashboard
                 }
                 if (payStatus == "paid" && vid.Length > 0 && sessionId.Length > 0 && int.TryParse(tokensStr, out int tokens) && tokens > 0)
                 {
-                    if (await core.ClaimStripeEventAsync(sessionId)) // credit once per paid session
+                    AgentCore.StripeClaim claim = await core.ClaimStripeEventAsync(sessionId);
+
+                    // Couldn't even read the ledger — do NOT ack, or Stripe stops retrying a paid order
+                    // we never fulfilled. A non-2xx is the only way to get the event sent again.
+                    if (claim == AgentCore.StripeClaim.Error)
                     {
-                        int bal = await core.WalletCreditAsync(vid, tokens);
-                        // A purchase also funds today's THINKING budget so the buyer's steers actually run —
-                        // with HAL_DAILY_USD=0 nothing thinks unless paid. This is an allowance/CAP, not a
-                        // transfer: HAL only spends the few cents each steer truly costs, so the pack keeps its
-                        // margin. Inside the same idempotent claim, so a replayed event can't double-fund.
+                        Console.WriteLine($"[stripe] claim failed for {sessionId} — asking Stripe to retry");
+                        ctx.Response.StatusCode = 503;
+                        return Err("could not record payment — please retry");
+                    }
+
+                    if (claim == AgentCore.StripeClaim.Claimed)
+                    {
+                        // Credit the WALLET first — it is what the customer actually bought. Release the
+                        // claim ONLY when the credit provably did not land: "couldn't confirm" must never
+                        // be treated as "didn't happen", or Stripe's retry would credit a second time.
+                        var (outcome, bal) = await core.WalletCreditCheckedAsync(vid, tokens);
+
+                        if (outcome == AgentCore.CreditOutcome.NotApplied)
+                        {
+                            await core.ReleaseStripeEventAsync(sessionId);   // safe: nothing was delivered
+                            Console.WriteLine($"[stripe] wallet credit did not land for {sessionId} — released the claim, asking Stripe to retry");
+                            ctx.Response.StatusCode = 503;
+                            return Err("could not credit tokens — please retry");
+                        }
+
+                        if (outcome == AgentCore.CreditOutcome.Unknown)
+                        {
+                            // Genuinely undecidable. Keep the claim (releasing it risks a double credit)
+                            // and ACK, since a retry would only be de-duped anyway — but make the order
+                            // impossible to miss so it can be settled by hand.
+                            Console.WriteLine($"[stripe] AMBIGUOUS credit for {sessionId} ({tokens} tokens) — claim KEPT to avoid double-crediting; RECONCILE MANUALLY");
+                            await Log(core, "payment-needs-reconcile", $"session {sessionId}: {tokens} tokens — could not confirm the credit landed");
+                            return JsonSerializer.Serialize(new { received = true, reconcile = true }, JsonOpts);
+                        }
+
+                        // A purchase also funds today's THINKING budget so the buyer's steers actually run.
+                        // This is an allowance/CAP, not a transfer: HAL only spends the few cents each steer
+                        // truly costs, so the pack keeps its margin. Best-effort ON PURPOSE — the tokens are
+                        // already delivered, so we must not release the claim (that would re-credit them);
+                        // a failure here is logged loudly instead.
                         double usd = obj.TryGetProperty("amount_total", out var at) && at.ValueKind == JsonValueKind.Number
                             ? at.GetInt64() / 100.0 : 0;
-                        if (usd > 0) await core.AddBudgetBonusAsync(usd);
-                        await Log(core, "tokens-purchased", $"{vid[..Math.Min(8, vid.Length)]}… bought {tokens} tokens (balance {bal}), +${usd:F2} budget");
+                        double funded = usd > 0 ? await core.AddBudgetBonusAsync(usd) : 0;
+                        if (usd > 0 && funded <= 0)
+                            Console.WriteLine($"[stripe] tokens delivered for {sessionId} but the ${usd:F2} budget top-up FAILED — top up manually");
+
+                        await Log(core, "tokens-purchased", $"{vid[..Math.Min(8, vid.Length)]}… bought {tokens} tokens (balance {bal}), +${funded:F2} budget");
                     }
                 }
             }
         }
-        catch (Exception ex) { Console.WriteLine($"[stripe] webhook handle error: {ex.Message}"); }
-        // Once the signature is valid we always ACK 200, so Stripe won't retry an event we've accepted.
+        catch (Exception ex)
+        {
+            // Ack-on-error was silently dropping paid orders: Stripe only retries a non-2xx, so any
+            // hiccup in here used to end delivery permanently. Retrying is safe — a redelivery finds the
+            // claim row and returns AlreadyDone, so nothing can be credited twice.
+            Console.WriteLine($"[stripe] webhook handle error: {ex.Message} — asking Stripe to retry");
+            ctx.Response.StatusCode = 500;
+            return Err("webhook processing failed — please retry");
+        }
+        // Signature valid and fulfilment complete (or already done): ACK so Stripe stops retrying.
         return JsonSerializer.Serialize(new { received = true }, JsonOpts);
     }
 

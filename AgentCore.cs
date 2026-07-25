@@ -1692,13 +1692,38 @@ public sealed class AgentCore
             await _turso.ExecuteAsync("INSERT OR IGNORE INTO budget (day, spent, bonus) VALUES (?, 0, 0)", day);
             await _turso.ExecuteAsync("UPDATE budget SET spent = spent + ? WHERE day = ?", c, day);
         }
-        catch { }
+        catch (Exception first)
+        {
+            // Money already spent at the API. Dropping it silently makes the meter under-count, which
+            // directly translates into spending past the owner's cap. Retry once, then say so loudly —
+            // an unrecorded charge must never be invisible.
+            try
+            {
+                await Task.Delay(400);
+                string day = BudgetDay, c = cost.ToString("F6", Inv);
+                await _turso.ExecuteAsync("INSERT OR IGNORE INTO budget (day, spent, bonus) VALUES (?, 0, 0)", day);
+                await _turso.ExecuteAsync("UPDATE budget SET spent = spent + ? WHERE day = ?", c, day);
+            }
+            catch (Exception second)
+            {
+                Console.WriteLine($"[budget] LOST ${cost:F6} of spend (retry failed: {second.Message}; first: {first.Message}) — today's meter is under-counting");
+                LiveLog.Append($"!! budget: ${cost:F4} of real spend could not be recorded — the day's meter is under-counting");
+            }
+        }
     }
 
     /// <summary>Today's budget picture: spent, base limit, donation bonus, and remaining (≥0).</summary>
     public async Task<(double Spent, double Limit, double Bonus, double Remaining)> GetBudgetAsync()
+        => (await ReadBudgetAsync()).Budget;
+
+    /// <summary>The same read, plus whether the ledger could actually be read. The flag matters: a failed
+    /// read leaves spent/bonus at 0, which makes Remaining look like a FULL fresh allowance. Anything
+    /// deciding whether to spend money must know the difference between "nothing spent yet" and
+    /// "no idea what has been spent".</summary>
+    private async Task<((double Spent, double Limit, double Bonus, double Remaining) Budget, bool Ok)> ReadBudgetAsync()
     {
         double limit = DailyBudgetUsd, spent = 0, bonus = 0;
+        bool ok = true;
         if (_turso is not null)
         {
             try
@@ -1706,16 +1731,21 @@ public sealed class AgentCore
                 var rows = await _turso.ExecuteAsync("SELECT spent, bonus FROM budget WHERE day=?", BudgetDay);
                 if (rows.Count > 0 && rows[0].Count >= 2) { spent = ParseInv(rows[0][0]) ?? 0; bonus = ParseInv(rows[0][1]) ?? 0; }
             }
-            catch { }
+            catch { ok = false; }
         }
-        return (spent, limit, bonus, Math.Max(0, limit + bonus - spent));
+        return ((spent, limit, bonus, Math.Max(0, limit + bonus - spent)), ok);
     }
 
     /// <summary>Is there LLM budget left today? (No hive ⇒ always true — local/dev runs aren't capped.)</summary>
     public async Task<bool> HasBudgetAsync()
     {
         if (_turso is null) return true;
-        return (await GetBudgetAsync()).Remaining > 0;
+        var (b, ok) = await ReadBudgetAsync();
+        // FAIL CLOSED. This used to swallow the read error and hand back Remaining = the full daily limit,
+        // so while the ledger was unreachable the gate said "yes" to every request — the one situation
+        // where spend cannot be recorded either, so the overshoot would be invisible AND uncapped.
+        if (!ok) { Console.WriteLine("[budget] ledger unreadable — pausing spend until it is readable again"); return false; }
+        return b.Remaining > 0;
     }
 
     /// <summary>A donation tops up today's thinking budget (bounded per call). Returns USD applied.</summary>
@@ -1936,7 +1966,64 @@ public sealed class AgentCore
         catch { return false; }
     }
 
-    /// <summary>Add tokens to a wallet (the Stripe-webhook → donation path). Returns the new balance.</summary>
+    /// <summary>Did a credit definitely land, definitely not land, or can we not tell?</summary>
+    public enum CreditOutcome { Applied, NotApplied, Unknown }
+
+    /// <summary>A wallet read that reports whether the READ itself worked. WalletBalanceAsync returns 0
+    /// both for "empty wallet" and "couldn't reach the store", which is useless when deciding whether
+    /// money moved. Tokens = -1 means the row does not exist yet.</summary>
+    private async Task<(bool Ok, int Tokens)> TryReadWalletAsync(string vid)
+    {
+        try
+        {
+            var r = await _turso!.ExecuteAsync("SELECT tokens FROM wallet WHERE vid=?", vid);
+            if (r.Count > 0 && r[0].Count > 0 && int.TryParse(r[0][0], out int t)) return (true, t);
+            return (true, -1);
+        }
+        catch { return (false, 0); }
+    }
+
+    /// <summary>
+    /// Credit a wallet and say UNAMBIGUOUSLY whether the tokens landed. This exists because
+    /// <see cref="WalletCreditAsync"/> returns 0 both when the UPDATE failed and when it SUCCEEDED but the
+    /// follow-up read flaked — indistinguishable outcomes. A payment path that reads that 0 as "nothing
+    /// happened" and lets the payment provider retry will credit the customer twice.
+    ///
+    /// So: the UPDATE gets its own try; a failure there is resolved by asking the wallet what its balance
+    /// actually is rather than assuming; and a failure of the final read-back is reporting noise only,
+    /// never evidence that the credit did not happen.
+    /// </summary>
+    public async Task<(CreditOutcome Outcome, int Balance)> WalletCreditCheckedAsync(string vid, int tokens)
+    {
+        if (_turso is null || !ValidVid(vid) || tokens <= 0) return (CreditOutcome.NotApplied, 0);
+
+        await WalletBalanceAsync(vid);                       // creates the row on first sight
+        var (readOk, before) = await TryReadWalletAsync(vid);
+        if (!readOk) return (CreditOutcome.NotApplied, 0);   // never got as far as attempting the credit
+        if (before < 0) before = 0;
+
+        try
+        {
+            await _turso.ExecuteAsync("UPDATE wallet SET tokens = tokens + ?, seen = ? WHERE vid = ?",
+                tokens.ToString(), DateTime.UtcNow.ToString("o"), vid);
+        }
+        catch
+        {
+            // A response lost after the write committed looks exactly like a rejected write, so don't
+            // guess — compare the balance with what it was a moment ago.
+            var (ok2, after) = await TryReadWalletAsync(vid);
+            if (!ok2) return (CreditOutcome.Unknown, 0);
+            if (after >= before + tokens) return (CreditOutcome.Applied, after);
+            if (after == before) return (CreditOutcome.NotApplied, after);
+            return (CreditOutcome.Unknown, after);           // something else moved it concurrently
+        }
+
+        var (ok3, now) = await TryReadWalletAsync(vid);
+        return (CreditOutcome.Applied, ok3 && now >= 0 ? now : before + tokens);
+    }
+
+    /// <summary>Add tokens to a wallet. Returns the new balance, or 0 if anything went wrong — callers on
+    /// a PAYMENT path must use <see cref="WalletCreditCheckedAsync"/> instead, because that 0 is ambiguous.</summary>
     public async Task<int> WalletCreditAsync(string vid, int tokens)
     {
         if (_turso is null || !ValidVid(vid) || tokens <= 0) return 0;
@@ -1988,20 +2075,35 @@ public sealed class AgentCore
         catch { return (0, 0, 0); }
     }
 
-    /// <summary>Atomically claim a Stripe event/session id for processing. Returns true only the FIRST time
+    /// <summary>Outcome of claiming a Stripe event id: fulfil it, ignore it, or ask Stripe to resend.</summary>
+    public enum StripeClaim { Claimed, AlreadyDone, Error }
+
+    /// <summary>Atomically claim a Stripe event/session id for processing. Returns Claimed only the FIRST time
     /// an id is seen, so a webhook redelivery can't double-credit a wallet. (TursoClient gives no affected-row
     /// count, so we SELECT-then-INSERT; Stripe retries are spaced minutes apart, so the tiny race is moot.)</summary>
-    public async Task<bool> ClaimStripeEventAsync(string id)
+    public async Task<StripeClaim> ClaimStripeEventAsync(string id)
     {
-        if (_turso is null || string.IsNullOrWhiteSpace(id) || id.Length > 200) return false;
+        if (_turso is null || string.IsNullOrWhiteSpace(id) || id.Length > 200) return StripeClaim.Error;
         try
         {
             var r = await _turso.ExecuteAsync("SELECT id FROM stripe_seen WHERE id=?", id);
-            if (r.Count > 0) return false; // already processed
+            if (r.Count > 0) return StripeClaim.AlreadyDone;
             await _turso.ExecuteAsync("INSERT OR IGNORE INTO stripe_seen (id, ts) VALUES (?, ?)", id, DateTime.UtcNow.ToString("o"));
-            return true;
+            return StripeClaim.Claimed;
         }
-        catch { return false; } // on any error, do NOT credit (fail closed)
+        // An error is NOT "already done": the caller must be able to tell them apart, because one means
+        // "ignore this redelivery" and the other means "ask Stripe to send it again".
+        catch { return StripeClaim.Error; }
+    }
+
+    /// <summary>Undo a claim when fulfilment failed AFTER claiming it. Without this the claim row is a
+    /// tombstone: the buyer is charged, nothing is delivered, and every Stripe redelivery is a no-op
+    /// because the id already looks processed. Releasing it makes the purchase recoverable by retry.</summary>
+    public async Task ReleaseStripeEventAsync(string id)
+    {
+        if (_turso is null || string.IsNullOrWhiteSpace(id)) return;
+        try { await _turso.ExecuteAsync("DELETE FROM stripe_seen WHERE id=?", id); }
+        catch (Exception ex) { Console.WriteLine($"[stripe] COULD NOT RELEASE claim {id}: {ex.Message} — this purchase needs manual reconciliation"); }
     }
 
     // Strip control characters, collapse newlines/tabs to spaces, trim, and hard-cap the length.
