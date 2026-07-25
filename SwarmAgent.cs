@@ -1246,6 +1246,25 @@ public static class SwarmAgent
                 // 3×3 or 4×4 becomes a better 8/16/32/… on the next round through composition. Without
                 // this the hive would abandon exactly the work with the highest leverage.
                 raceTick++;
+
+                // COMPOUNDING PASS (free, no LLM, no budget). Composition only ran while a size was
+                // being RACED — but the ladder climbs past 8/16/32 and never returns, and the side
+                // round only re-attacks 2/3/4. So a better 4x4 had no route to the larger rungs and
+                // the hive sat on 16x16 = 2744 with 2401 free and provable. Run it on the first tick
+                // (heals whatever the ladder left behind) and again after each side round, which is
+                // the thing that can change the base.
+                if (raceTick == 1)
+                {
+                    try
+                    {
+                        int lifted = await SchemeCompose.PropagateAsync(core, myPort, LiveLog.Append);
+                        if (lifted > 0)
+                            await core.Events.AppendAsync("matmul-round",
+                                $"[compose] lifted {lifted} size(s) onto the hive's best base — free, exact-verified");
+                    }
+                    catch (Exception ex) { LiveLog.Append($"  compose propagate failed: {ex.Message}"); }
+                }
+
                 if (raceTick % 4 == 0)
                 {
                     int small = MatmulLadder.BaseRungs[(raceTick / 4) % 3];   // cycles 2 → 3 → 4
@@ -1265,6 +1284,22 @@ public static class SwarmAgent
                                     Answer: $"{small}x{small} {side.Round.Score:F0} muls — beat it"));
                             }
                         }
+                        // Make "every larger size can now inherit it" actually true: a new base is worth
+                        // nothing until the larger rungs are rebuilt on it. Free + exact-verified, and a
+                        // no-op when nothing improved, so it is safe to run after every side round.
+                        try
+                        {
+                            int lifted = await SchemeCompose.PropagateAsync(core, myPort, LiveLog.Append);
+                            if (lifted > 0)
+                            {
+                                await core.Events.AppendAsync("matmul-round",
+                                    $"[compose] {lifted} size(s) rebuilt on the hive's best base — free, exact-verified");
+                                Console.WriteLine($"[matmul-race] composition lifted {lifted} larger size(s).");
+                                Console.Write("> ");
+                            }
+                        }
+                        catch (OperationCanceledException) { throw; }   // shutdown — let the outer handler stop the loop
+                        catch (Exception ex) { LiveLog.Append($"  compose propagate failed: {ex.Message}"); }
                     }
                     catch (OperationCanceledException) { break; }
                     catch (Exception ex) { LiveLog.Append($"  side round error: {ex.Message}"); }

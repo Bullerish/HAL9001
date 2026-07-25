@@ -345,6 +345,13 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 
 > Newest first. Each rung was verified before the next was built. Commit hashes are on `main`.
 
+### Composition now actually compounds — a better small scheme lifts every larger size
+Composition shipped as "the growth mechanism": improve 2×2/3×3/4×4 and every larger size inherits it. In production it didn't — because `TryImproveAsync` only ran while a size was being **raced**, and the ladder climbs past 8/16/32 and never returns (the side round only re-attacks 2/3/4). The board showed it plainly: **4×4 = 49** (composition had landed there) while **16×16 sat at 2744** with **2401** free and provable, and **8×8 / 32×32 had no champion at all** despite 343 and 16807 being one verified compile away.
+- **`SchemeCompose.PropagateAsync`** walks the multiplication-scored rungs (everything below `MsThreshold`), rebuilds each on the hive's current best base, and adopts the result wherever it genuinely beats the record. Wall-clock rungs are left alone — a mul count is not their record.
+- **When it runs:** on the first race tick (heals whatever the ladder left behind) and after every side round (the thing that can change the base). Free — no LLM, no budget, no key.
+- **Nothing is trusted:** every adoption is compiled, multiplication-counted and BigInteger exact-verified, and gated on beating the current champion — so several nodes running it converge instead of fighting, and a no-op costs nothing.
+- Expected effect on the live board: **8×8 → 343 (1.49×)**, **16×16 → 2401 (1.71×)**, **32×32 → 16807 (1.95×)**.
+
 ### Cost guard: HAL never spends the owner's Anthropic key unless someone pays
 The daily budget meter's base allowance (`HAL_DAILY_USD`) now **defaults to 0**. With it at 0, HAL does **no** LLM work on the owner's key for free — no autonomous self-driving (matmul LLM candidates, goals, journaling, gap-fill) **and no free visitor asks** (those were previously answered *above* the budget gate, a free-spend/abuse leak — now budget-gated too). HAL only "thinks" once a payment/donation tops up today's budget (`AddBudgetBonusAsync`, the `fund` action). The zero-cost CPU work keeps running regardless, since it spends no Anthropic tokens — see the release above for how much of the hive that now covers. Set `HAL_DAILY_USD` above 0 only to deliberately grant a free daily self-improvement allowance out of pocket. **Payments fund thinking:** a token purchase (Stripe webhook) and the `fund`/donate action both top up today's budget — so "someone pays → HAL works for them" holds end-to-end. The top-up is a spending *cap*, not a transfer (HAL only spends the few cents each request actually costs), so the token packs keep their margin.
 

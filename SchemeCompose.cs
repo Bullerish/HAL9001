@@ -217,6 +217,58 @@ public static class SchemeCompose
         return (built.Value.Source, built.Value.Muls, plan.Recipe);
     }
 
+    /// <summary>
+    /// Push the hive's best small scheme UP into every composable size that a plain race round would
+    /// never revisit — the step that actually makes composition compound.
+    ///
+    /// WHY THIS EXISTS. <see cref="TryImproveAsync"/> only runs while a size is being RACED, but the
+    /// ladder climbs away from the small rungs and never returns to them, and the side round only
+    /// re-attacks 2/3/4. So a better 4×4 had no path to 8/16/32: the hive sat on 16×16 = 2744 while
+    /// 2401 was free and already provable. This walks the muls-scored rungs and adopts a composed
+    /// champion wherever one genuinely beats the record.
+    ///
+    /// Only the multiplication-counted rungs are touched (below <see cref="MatmulLadder.MsThreshold"/>) —
+    /// above that the ladder scores by wall-clock, where a mul count is not the record. Every adoption
+    /// still goes through compile + BigInteger exact verification, and is gated on beating the current
+    /// champion, so running this on several nodes at once converges instead of fighting.
+    /// </summary>
+    public static async Task<int> PropagateAsync(AgentCore core, int myPort, Action<string>? log = null)
+    {
+        var (b, origin) = await BestBaseAsync(core);
+        int lifted = 0;
+
+        foreach (int size in MatmulLadder.BaseRungs)
+        {
+            if (size >= MatmulLadder.MsThreshold) break;   // wall-clock territory — not ours to claim
+            if (size <= b.N) continue;                     // the base itself is not a composition
+
+            long? mustBeat = null;
+            try
+            {
+                MatmulRace.Champion? champ = await core.GetMatmulChampionAsync(size);
+                // Only compare against a mul-count record; a stale wall-clock row is not comparable.
+                if (champ is not null && champ.Metric == MatmulRace.Metric.Muls) mustBeat = (long)champ.Score;
+            }
+            catch { }
+
+            // Declines when the size is not a power of the base dimension, or the champion already wins.
+            Plan? plan = PlanFor(size, b, origin, mustBeat);
+            if (plan is null) continue;
+
+            log?.Invoke($"compose: {size}x{size} — {plan.Recipe} (verifying)");
+            var built = Realize(plan, log);
+            if (built is null) continue;                   // compile or exact-verify rejected it
+
+            double speedup = (double)size * size * size / built.Value.Muls;
+            await core.SetMatmulChampionAsync($"127.0.0.1:{myPort}", size,
+                "composition (LLM-free): " + plan.Recipe, MatmulRace.Metric.Muls,
+                built.Value.Muls, speedup, built.Value.Source);
+            log?.Invoke($"OK compose: NEW {size}x{size} champion — {built.Value.Muls} muls ({speedup:F2}x)");
+            lifted++;
+        }
+        return lifted;
+    }
+
     // ── scheme JSON (same {n,rank,u,v,w} shape the dashboard + volunteers use) ─────────────────
     private sealed record SchemeDto(int n, int rank, int[][]? u, int[][]? v, int[][]? w);
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
