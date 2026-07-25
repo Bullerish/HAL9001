@@ -340,7 +340,20 @@ public static class Dashboard
     private static string LiveJson()
     {
         string[] lines = LiveLog.Tail(80);
-        return JsonSerializer.Serialize(new { lines }, JsonOpts);
+        // Age of the newest line, computed HERE so the CRT's status ticker doesn't have to parse the
+        // "[HH:mm:ss]" stamp and guess at timezones or midnight rollover. -1 = nothing logged yet.
+        int ageSec = -1;
+        for (int i = lines.Length - 1; i >= 0; i--)
+        {
+            string s = lines[i];
+            if (s.Length < 10 || s[0] != '[') continue;
+            if (!TimeSpan.TryParse(s[1..9], System.Globalization.CultureInfo.InvariantCulture, out TimeSpan t)) continue;
+            double d = (DateTime.UtcNow.TimeOfDay - t).TotalSeconds;
+            if (d < 0) d += 86400;                      // stamp was just before midnight UTC
+            ageSec = (int)Math.Max(0, Math.Min(d, 86400));
+            break;
+        }
+        return JsonSerializer.Serialize(new { lines, ageSec }, JsonOpts);
     }
 
     // The U/V/W grids the tensor-search is working RIGHT NOW (published by the swarm via LiveMatrix as
@@ -876,6 +889,24 @@ public static class Dashboard
         // TOKEN GATE (bite 23): paid choices cost a token from the visitor's wallet so they can't be
         // triggered endlessly. Free choices (the tool-less voice asks) skip this.
         string vid = EnsureVid(ctx);
+
+        // FUEL GATE. Everything except "boost" ends up needing the language model (a topic steer writes
+        // code; an ask goes through the tool-less voice), and the swarm only acts on those when there is
+        // thinking budget left. Without this check the steer was queued and the token was SPENT while
+        // nothing could ever run it — the button looked dead and the visitor silently lost a token.
+        // Now we refuse up front, charge nothing, and say exactly why.
+        if (c.Kind is "topic" or "ask" && !await core.HasBudgetAsync())
+        {
+            ctx.Response.StatusCode = 402; // Payment Required
+            return JsonSerializer.Serialize(new
+            {
+                ok = false,
+                error = "HAL is out of thinking budget — fuel the hive and it wakes up instantly",
+                needsFuel = true,
+                tokens = await core.WalletBalanceAsync(vid),
+            }, JsonOpts);
+        }
+
         bool paid = c.Cost.Contains("token", StringComparison.OrdinalIgnoreCase);
         if (paid)
         {
@@ -1437,13 +1468,38 @@ $("snd").onclick=()=>{
 // "happy medium" — readable, length-scaled so even a big kernel finishes in ~12s, and skippable by
 // clicking the console. One renderCRT() composes feed + code so the two never fight over the pane.
 let liveLast="",feedText="",liveCode="",liveCodeKey="",typePos=0,typing=false,typeRAF=0,lastTypeT=0;
+let lastState=null,liveAge=-1,liveAgeAt=0;
 const reduceMotion=window.matchMedia&&window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// The one line that is ALWAYS moving. Everything in it is real: what the ladder is racing right now,
+// how many nodes are alive, whether thinking is fuelled, and how long since HAL last did something
+// (that number ticks every second, so a quiet pace still reads as alive rather than frozen).
+function statusLine(){
+  const s=lastState;const bits=[];
+  if(s){
+    const L=s.ladder||{};
+    if(L.currentSize)bits.push("racing "+L.currentSize+"×"+L.currentSize+(L.metric?" ["+L.metric+"]":"")+(L.stale!=null?" · plateau "+L.stale+"/"+(L.plateauMax||8):""));
+    const nl=s.nodesLive||{};if(nl.total)bits.push(nl.total+" node"+(nl.total==1?"":"s")+" alive");
+    const b=s.budget||{};
+    bits.push((b.remaining>0)?("thinking fuelled · $"+(+b.remaining).toFixed(2)+" left today"):"thinking paused · needs fuel");
+  }
+  if(liveAge>=0){
+    const age=liveAge+Math.floor((Date.now()-liveAgeAt)/1000);
+    bits.push(age<2?"working now":("last activity "+(age<60?age+"s":Math.floor(age/60)+"m")+" ago"));
+  }
+  const spin="|/-\\\\"[Math.floor(Date.now()/250)%4];
+  return spin+" "+(bits.length?bits.join("  ·  "):"listening…");
+}
 function renderCRT(){
   const el=$("crt-lines");if(!el)return;
-  const code=typing?liveCode.slice(0,typePos):liveCode;
+  // Cap the code block: a 40-line artifact used to fill the whole pane and push the live feed out of
+  // view, so the panel looked frozen between tools. While it types we follow the cursor; once typed we
+  // keep only its tail, so the moving parts — feed, then the status ticker — stay on screen.
+  let code=typing?liveCode.slice(0,typePos):liveCode;
+  if(code){const ls=code.split("\n");if(ls.length>14)code=(typing?ls.slice(-14):ls.slice(0,14)).join("\n")+(typing?"":"\n…");}
   let txt=feedText;
   if(code)txt+="\n\n"+code+(typing?" ▍":"");
-  el.textContent=txt;
+  el.textContent=txt+"\n\n"+statusLine();
   el.scrollTop=el.scrollHeight;
 }
 function stepType(now){
@@ -1470,6 +1526,7 @@ async function refreshLive(){
     const lines=d.lines||[];
     const last=lines.length?lines[lines.length-1]:"";
     feedText=lines.slice(-40).join("\n");
+    if(typeof d.ageSec==="number"){liveAge=d.ageSec;liveAgeAt=Date.now();}
     renderCRT();
     if(last!==liveLast&&liveLast){ if(sound){sfx.blip();startProcessing(2000);} flareEye(false); }
     liveLast=last;
@@ -1491,6 +1548,9 @@ async function refreshConsole(){
 (function(){const el=$("crt-lines");if(el)el.addEventListener("click",()=>{if(typing){typing=false;typePos=liveCode.length;renderCRT();}});})();
 refreshLive();setInterval(refreshLive,1500);
 refreshConsole();setInterval(refreshConsole,15000);
+// Repaint once a second so the status ticker (spinner + "last activity Xs ago") keeps moving even
+// when HAL is between rounds. Skipped while the typewriter owns the frame, and under reduced-motion.
+setInterval(()=>{if(!typing)renderCRT();},1000);
 
 // ── matrices being worked: live U/V/W grids the tensor-search is mutating ────────────────────────
 async function refreshMatrix(){
@@ -1657,7 +1717,9 @@ window.refuelHAL=function(){
           const res=await fetch("/api/choose",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:btn.dataset.id})});
           const r=await res.json().catch(()=>({}));
           if(typeof r.tokens==="number")setTokens(r.tokens);
-          if(res.status===402){ fbk.textContent="⬡ "+(r.error||"out of tokens"); setTokens(0); $("refuel").scrollIntoView({behavior:"smooth",block:"nearest"}); }
+          // 402 covers two different things: an empty wallet, or a full wallet that HAL has no fuel to
+          // honour. Only the first means zero tokens — don't lie about the balance in the second.
+          if(res.status===402){ fbk.textContent="⬡ "+(r.error||"out of tokens"); if(!r.needsFuel)setTokens(0); $("refuel").scrollIntoView({behavior:"smooth",block:"nearest"}); }
           else fbk.textContent=r.ok?("✓ "+r.queued):(r.error||"error");
         }catch(e){fbk.textContent="connection error";}
         setTimeout(()=>{btn.classList.remove("sent");},8000);
@@ -1685,6 +1747,7 @@ setInterval(loadWallet,30000);
 // ── main state poll ─────────────────────────────────────────────────────────────────────────────
 async function tick(){
   let s; try{ s=await (await fetch("/api/state")).json(); }catch(e){ return; }
+  lastState=s;   // the CRT status ticker reads ladder/nodes/budget from here
   $("clock").textContent=s.now||"—";
   if(s.identity){ $("ident").innerHTML='core: '+esc((s.identity.name||"").toUpperCase())+' · '+esc(s.identity.concept||""); }
   $("directive").textContent=s.directive?("▸ "+s.directive):"";
