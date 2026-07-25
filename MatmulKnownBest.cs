@@ -42,6 +42,13 @@ public static class MatmulKnownBest
     /// treadmill. A size whose champion already equals its proven bound is SOLVED — move on.</summary>
     public static int ProvenLower(int size) => Table.TryGetValue(size, out var e) ? e.Lower : 0;
 
+    /// <summary>Every size where humanity's best is on record here. Exposed so the dashboard can label a
+    /// champion "closed / behind / matches" from the SAME table the race judges against, instead of
+    /// hardcoding the mathematics in client JavaScript where it would silently drift out of date.</summary>
+    public static IEnumerable<(int Size, int Best, int Lower, bool Closed)> All =>
+        Table.OrderBy(e => e.Key)
+             .Select(e => (e.Key, e.Value.Best, e.Value.Lower, IsClosed(e.Key)));
+
     /// <summary>True when humanity's best result for this size EQUALS a proven lower bound — the size is
     /// mathematically closed and no better algorithm can exist (2×2 at 7). Searching a closed size can
     /// never succeed, so the free search should spend its rounds somewhere a result is still possible.

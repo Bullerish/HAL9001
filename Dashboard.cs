@@ -309,6 +309,12 @@ public static class Dashboard
             events,
             nodes,
             nodesLive = new { total = live.Total, core = live.Core, volunteer = live.Volunteer },
+            // Humanity's published bars, straight from the table the novelty gate itself judges against —
+            // so the page can say "closed / behind / matches best known" without a second copy of the
+            // mathematics living in client JavaScript, where it would drift the moment this table changes.
+            knownBest = MatmulKnownBest.All
+                .Select(k => new { size = k.Size, best = k.Best, lower = k.Lower, closed = k.Closed })
+                .ToList(),
             stats = new { total, discoveries, records, capabilities = core.Registry.Count },
             now = DateTime.UtcNow.ToString("HH:mm:ss"),
         };
