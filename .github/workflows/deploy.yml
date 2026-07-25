@@ -49,17 +49,9 @@ jobs:
           scp -i ~/.ssh/deploy_key ./publish-linux/HAL9001.dll \
             "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/hal9001/HAL9001.dll"
 
-      # ── ONE-TIME (remove after it has run once) ────────────────────────────────────────────────
-      # Set the owner's free daily LLM allowance to 0 on the box. The code default is already 0,
-      # but /etc/hal9001/hal.env still says 1.0 and the env wins, so HAL kept spending ~$1/day of
-      # the owner's Anthropic key with nobody paying. Idempotent, keeps a .bak, and touches only
-      # this one key — every other secret in the file is left byte-for-byte alone.
-      - name: One-time — zero the free LLM allowance
-        run: |
-          ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
-            "sed -i.bak 's/^[[:space:]]*HAL_DAILY_USD[[:space:]]*=.*/HAL_DAILY_USD=0/' /etc/hal9001/hal.env; \
-             grep -q '^HAL_DAILY_USD=' /etc/hal9001/hal.env || echo 'HAL_DAILY_USD=0' >> /etc/hal9001/hal.env; \
-             echo 'allowance now:' \$(grep '^HAL_DAILY_USD=' /etc/hal9001/hal.env)"
+      # NOTE: CI deliberately does NOT write to /etc/hal9001/hal.env. A one-time step lived here to
+      # set HAL_DAILY_USD=0 (done — the box now reports limit:0); it was removed so the env file
+      # stays under human control and this pipeline keeps shipping nothing but the DLL.
 
       - name: Fix ownership and restart services
         run: |
