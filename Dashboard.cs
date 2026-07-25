@@ -467,7 +467,14 @@ public static class Dashboard
             foreach (var e in events.OrderByDescending(ev => ev.Timestamp, StringComparer.Ordinal))
             {
                 string s = e.Summary ?? "";
-                string name = Between(s, "'", "'");                 // both formats single-quote the name
+                // The name is the quoted token immediately before the "[Type→Type, Stability]" bracket.
+                // Taking the FIRST pair of single quotes instead was wrong: the curiosity-resolved summary
+                // opens with "I couldn't answer …", so the apostrophe in "couldn't" became the opening
+                // quote and every such tool was catalogued under a garbled name like
+                //   t answer "Input: 360 → Output: …", so I learned
+                // which also poisoned its GitHub "source" link and broke de-duplication.
+                var nm = System.Text.RegularExpressions.Regex.Match(s, @"'([^']*)'\s*\[");
+                string name = nm.Success ? nm.Groups[1].Value.Trim() : "";
                 if (string.IsNullOrEmpty(name) || !seen.Add(name)) continue; // newest occurrence wins
                 string bracket = Between(s, "[", "]");              // "Int→String, Stable" — same in both
                 string sig = bracket, stability = "";
@@ -1267,7 +1274,11 @@ public static class Dashboard
   .crttop .cblink{width:8px;height:8px;border-radius:50%;background:#33cc44;animation:cblink 1.1s steps(1) infinite;box-shadow:0 0 6px #33cc44}
   @keyframes cblink{0%,49%{opacity:1}50%,100%{opacity:0}}
   .crtbody{padding:14px 16px;height:380px;overflow:hidden;position:relative;z-index:1}
-  .crtlines{font:13px/1.6 "Courier New",Courier,monospace;color:#33cc44;text-shadow:0 0 6px rgba(51,204,68,.6);white-space:pre;word-break:break-all;height:100%;overflow:hidden}
+  .crtlines{font:13px/1.6 "Courier New",Courier,monospace;color:#33cc44;text-shadow:0 0 6px rgba(51,204,68,.6);white-space:pre;word-break:break-all;height:calc(100% - 34px);overflow:hidden}
+  /* The status ticker gets its own bar: the feed above is white-space:pre in a clipped pane, so a long
+     status line was simply cut off mid-word at the right edge ("… · last act:"). Here it wraps. */
+  .crtstatus{font:12px/1.5 "Courier New",Courier,monospace;color:#33cc44;opacity:.85;white-space:pre-wrap;
+    word-break:break-word;border-top:1px solid rgba(51,204,68,.22);margin-top:8px;padding-top:6px;max-height:26px;overflow:hidden}
   /* matrices-being-worked panel: same green-phosphor CRT skin, sits under the hero row */
   .mxbox{max-width:1200px;margin:0 auto 22px;background:#010e03;border:2px solid #1a4a1c;border-radius:6px;box-shadow:0 0 28px rgba(0,255,40,.12),inset 0 0 60px rgba(0,0,0,.7);position:relative;overflow:hidden}
   .mxbox::before{content:"";position:absolute;inset:0;background:repeating-linear-gradient(to bottom,transparent 0,transparent 2px,rgba(0,0,0,.25) 3px,transparent 4px);pointer-events:none;z-index:2}
@@ -1340,7 +1351,7 @@ public static class Dashboard
       <span class="ctitle" id="crt-title">HAL 9001 · matrix kernel</span>
       <span class="cblink"></span>
     </div>
-    <div class="crtbody"><div class="crtlines" id="crt-lines"></div></div>
+    <div class="crtbody"><div class="crtlines" id="crt-lines"></div><div class="crtstatus" id="crt-status"></div></div>
   </div>
 </div>
 
@@ -1592,8 +1603,9 @@ function renderCRT(){
   if(code){const ls=code.split("\n");if(ls.length>14)code=(typing?ls.slice(-14):ls.slice(0,14)).join("\n")+(typing?"":"\n…");}
   let txt=feedText;
   if(code)txt+="\n\n"+code+(typing?" ▍":"");
-  el.textContent=txt+"\n\n"+statusLine();
+  el.textContent=txt;
   el.scrollTop=el.scrollHeight;
+  const st=$("crt-status");if(st)st.textContent=statusLine();   // own bar, so it can wrap instead of clipping
 }
 function stepType(now){
   if(!typing)return;
