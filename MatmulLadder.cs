@@ -27,7 +27,26 @@ public static class MatmulLadder
     /// <summary>The hand-picked low rungs, smallest first — denser where the mult-count metric is
     /// interesting. ABOVE these the ladder keeps going by DOUBLING, without end: see <see cref="SizeAt"/>.
     /// 256×256 is not a ceiling, it is just the last rung anybody wrote down.</summary>
-    public static readonly int[] BaseRungs = { 2, 3, 4, 8, 16, 32, 64, 128, 256 };
+    public static readonly int[] BaseRungs = { 2, 3, 4, 5, 6, 7, 8, 16, 32, 64, 128, 256 };
+
+    /// <summary>
+    /// The sizes the SIDE ROUND re-attacks — the only place a better ALGORITHM (rather than a better
+    /// wall-clock kernel) can still be found, so this is where the free search should spend its time.
+    ///
+    /// Three filters, each earning its place:
+    ///   • below <see cref="MsThreshold"/> — above it a round is scored by wall-clock, which is
+    ///     autotuning, not an algorithmic result;
+    ///   • not CLOSED — 2×2 is proven optimal at 7 (<see cref="MatmulKnownBest.IsClosed"/>), so hunting
+    ///     it is a treadmill; it used to take a third of every side-round rotation;
+    ///   • the direct search can actually fit in memory at that size — 16×16 and up need ~1 GB, so their
+    ///     improvements come from composition instead and racing them here would just decline.
+    /// Probed at the naive rank n³, the largest target a round would ever ask for.
+    /// </summary>
+    public static int[] SideRungs => BaseRungs
+        .Where(s => s < MsThreshold
+                 && !MatmulKnownBest.IsClosed(s)
+                 && TensorSearch.Feasible(s, s * s * s))
+        .ToArray();
 
     /// <summary>
     /// The largest size this machine will attempt (env <c>HAL_MAX_SIZE</c>, default 2048). This is a

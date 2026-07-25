@@ -42,6 +42,13 @@ public static class MatmulKnownBest
     /// treadmill. A size whose champion already equals its proven bound is SOLVED — move on.</summary>
     public static int ProvenLower(int size) => Table.TryGetValue(size, out var e) ? e.Lower : 0;
 
+    /// <summary>True when humanity's best result for this size EQUALS a proven lower bound — the size is
+    /// mathematically closed and no better algorithm can exist (2×2 at 7). Searching a closed size can
+    /// never succeed, so the free search should spend its rounds somewhere a result is still possible.
+    /// Sizes with no entry are NOT closed: unknown is not the same as finished.</summary>
+    public static bool IsClosed(int size) =>
+        Table.TryGetValue(size, out var e) && e.Lower > 0 && e.Best <= e.Lower;
+
     /// <summary>True if a search for exactly this rank is worth starting at all.</summary>
     public static bool WorthAttempting(int size, long rank)
     {

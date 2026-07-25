@@ -1267,7 +1267,11 @@ public static class SwarmAgent
 
                 if (raceTick % 4 == 0)
                 {
-                    int small = MatmulLadder.BaseRungs[(raceTick / 4) % 3];   // cycles 2 → 3 → 4
+                    // Rotate over every size where a better ALGORITHM can still exist (3,4,5,6,7,8 today).
+                    // This used to be hardcoded to the first three rungs, which spent a third of its turns
+                    // on 2×2 — proven optimal at 7, so those rounds could never find anything.
+                    int[] open = MatmulLadder.SideRungs;
+                    int small = open.Length > 0 ? open[(raceTick / 4) % open.Length] : 3;
                     try
                     {
                         LiveLog.Append($"> side round: re-attacking {small}x{small} (small schemes lift every larger size)");

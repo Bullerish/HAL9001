@@ -185,6 +185,16 @@ switch (args[0].ToLowerInvariant())
             Console.WriteLine($"   {s,6}x{s,-6} [{metric,-4}] ~{mem,7:F1} MB of matrices per round");
         }
         Console.WriteLine("   ...and it keeps doubling from there — raise HAL_MAX_SIZE to add rungs.");
+        // The cursor climbs and never comes back, so these are the sizes that actually keep getting
+        // re-attacked — i.e. the only ones where a better ALGORITHM can still turn up.
+        Console.WriteLine($"\n   side round re-attacks: {string.Join(", ", MatmulLadder.SideRungs.Select(s => $"{s}x{s}"))}");
+        foreach (int s in MatmulLadder.BaseRungs.Where(s => s < MatmulLadder.MsThreshold))
+        {
+            string why = MatmulKnownBest.IsClosed(s) ? "closed — proven optimal, nothing to find"
+                       : !TensorSearch.Feasible(s, s * s * s) ? $"direct search needs ~{TensorSearch.EstimatedBytes(s, s * s * s) / (1024 * 1024)} MB — composition covers it"
+                       : "open";
+            if (why != "open") Console.WriteLine($"     {s}x{s} skipped: {why}");
+        }
         break;
     }
 
