@@ -30,35 +30,75 @@ public sealed class TensorSearch
     /// <summary>A rank-R decomposition: U/V/W are R×n² coefficient matrices over {-1,0,1}.</summary>
     public sealed record Decomposition(int N, int Rank, int[,] U, int[,] V, int[,] W);
 
+    /// <summary>Returned in <c>bestError</c> when the search never ran (too large to attempt), as
+    /// opposed to running and finding a residual. Callers print "n/a" rather than a bogus number.</summary>
+    public const int NotAttempted = int.MaxValue;
+
+    /// <summary>Memory the direct search may claim for one attempt, in MEGABYTES (env
+    /// <c>HAL_SEARCH_MEM_MB</c>, default 256). Sized for a small VPS: the box must keep serving the
+    /// dashboard while it searches, so the search gets a slice, not the machine.</summary>
+    public static int MemBudgetMb
+    {
+        get
+        {
+            string? v = Environment.GetEnvironmentVariable("HAL_SEARCH_MEM_MB");
+            return int.TryParse(v, out int mb) && mb > 0 ? mb : 256;
+        }
+    }
+
+    /// <summary>
+    /// Bytes the runner will allocate for (n, rank). Counting ALL THREE big arrays matters: the n⁶
+    /// tensor is NOT the dominant term once rank grows. At n=16 with the ladder's own first-round
+    /// target (rank 4095) the basis alone is 4095·16⁴·4 B ≈ 1.07 GB — ~16× the tensor. A cap that
+    /// only measured n⁶ passed n=16 and then allocated 1.2 GB, which is the same OOM/GC-thrash that
+    /// wedged the hive at 32×32.
+    ///   _t     : n⁶ ints                      (the matmul tensor)
+    ///   _basis : rank · n⁴ ints               (per-term basis for the slice being solved)
+    ///   _fr    : n⁶ ints, ONLY when polishing (the k-flip stage's full reconstruction)
+    /// </summary>
+    public static long EstimatedBytes(int n, int rank)
+    {
+        long n2 = (long)n * n, n4 = n2 * n2, n6 = n4 * n2;
+        long cells = n6 + (long)rank * n4;
+        if (CanPolish(rank, n2)) cells += n6;
+        return cells * sizeof(int);
+    }
+
+    /// <summary>True if the direct (LLM-free) search fits the memory budget at this size AND rank.</summary>
+    public static bool Feasible(int n, int rank) => EstimatedBytes(n, rank) <= (long)MemBudgetMb * 1024 * 1024;
+
     /// <summary>
     /// Search for an EXACT rank-<paramref name="rank"/> decomposition of the n×n matmul tensor.
     /// Returns the decomposition on success (error 0), or null if none was found within the budget;
-    /// <paramref name="bestError"/> reports the lowest residual seen (0 == exact).
+    /// <paramref name="bestError"/> reports the lowest residual seen (0 == exact,
+    /// <see cref="NotAttempted"/> == the search was declined as too large to run).
     /// </summary>
-    /// <summary>Cap on the n²×n²×n² (= n⁶) tensor the direct search materializes — ~120 MB of int.
-    /// Above this the allocation OOMs/stalls a small box and freezes the race loop (n=32 ⇒ ~1.07e9
-    /// cells ≈ 4 GB), so larger sizes decline the direct search and fall back to the LLM track.</summary>
-    public const long MaxTensorCells = 30_000_000;
-
-    /// <summary>True if the direct (LLM-free) search is feasible at this size without exhausting memory.</summary>
-    public static bool Feasible(int n) => (long)n * n * n * n * n * n <= MaxTensorCells;
-
     public static Decomposition? Search(
         int n, int rank, out int bestError,
         int maxRestarts = 100000, double maxSeconds = 25, int? seed = null,
         Action<string>? onProgress = null, Action<Decomposition, int>? onSnapshot = null)
     {
-        // Decline gracefully when the n⁶ tensor would be too large to hold — building it would OOM or
-        // GC-thrash the box and hang the whole Prime Directive race (this is what froze the hive at 32×32).
-        if (!Feasible(n))
+        // Decline gracefully when the attempt would not fit the memory budget — building those arrays
+        // would OOM or GC-thrash the box and hang the whole Prime Directive race. The free COMPOSITION
+        // track (SchemeCompose) still improves these sizes for $0, so declining costs us nothing.
+        if (!Feasible(n, rank))
         {
-            bestError = -1;
-            onProgress?.Invoke($"{n}x{n} tensor too large for direct search ({(long)n*n*n*n*n*n:N0} cells) — skipping (LLM track only)");
+            bestError = NotAttempted;
+            onProgress?.Invoke($"{n}x{n} rank-{rank} needs ~{EstimatedBytes(n, rank) / (1024 * 1024)} MB " +
+                               $"(budget {MemBudgetMb} MB) — declining the direct search");
             return null;
         }
         var runner = new Runner(n, rank, seed ?? Environment.TickCount);
         return runner.Run(maxRestarts, maxSeconds, out bestError, onProgress, onSnapshot);
     }
+
+    /// <summary>Human text for a residual, hiding the <see cref="NotAttempted"/> sentinel.</summary>
+    public static string ErrText(int err) => err == NotAttempted ? "n/a" : err.ToString();
+
+    // The k-flip polish is O(coords²)–O(coords³) over 3·rank·n² coordinates, so it is only enabled for
+    // small schemes. Deciding it from (rank, n²) alone lets the memory estimate above know whether the
+    // second n⁶ array is going to be allocated — and lets the runner skip allocating it when it isn't.
+    private static bool CanPolish(int rank, long n2) => 3L * rank * n2 <= 120;
 
     // ── the search runner: ALTERNATING optimization (ALS) ─────────────────────────────────
     // Each of U, V, W is solved EXACTLY given the other two: the error decomposes by slice (for U, by
@@ -80,8 +120,10 @@ public sealed class TensorSearch
         private readonly bool _brute;
         private const long BruteCap = 60000; // 3^R ≤ cap ⇒ exact brute force (R ≤ 10)
 
-        // Full-tensor state for the k-flip polish stage.
-        private readonly int[,,] _fr;       // recon for the full-tensor local search
+        // Full-tensor state for the k-flip polish stage. Allocated ONLY when the polish can actually
+        // run — it is a second n⁶ array (67 MB at n=16), and above a handful of coordinates the k-flip
+        // is disabled anyway, so allocating it unconditionally was pure waste.
+        private readonly int[,,]? _fr;      // recon for the full-tensor local search (null ⇒ no polish)
         private long _ferr;
         private readonly List<(int kind, int r, int idx)> _fcoords = new();
         private readonly bool _canPolish;
@@ -97,9 +139,12 @@ public sealed class TensorSearch
             _wsave = new int[rank, _n2];
             _brute = Pow3(rank) <= BruteCap;
 
-            _fr = new int[_n2, _n2, _n2];
-            for (int kind = 0; kind < 3; kind++) for (int r = 0; r < rank; r++) for (int i = 0; i < _n2; i++) _fcoords.Add((kind, r, i));
-            _canPolish = _fcoords.Count <= 120; // k-flip is O(coords²)–O(coords³): small tensors only
+            _canPolish = CanPolish(rank, _n2); // k-flip is O(coords²)–O(coords³): small tensors only
+            if (_canPolish)
+            {
+                _fr = new int[_n2, _n2, _n2];
+                for (int kind = 0; kind < 3; kind++) for (int r = 0; r < rank; r++) for (int i = 0; i < _n2; i++) _fcoords.Add((kind, r, i));
+            }
         }
 
         // Per restart: SIMULATED ANNEALING over U and V, with W SOLVED OPTIMALLY after every move
@@ -155,7 +200,11 @@ public sealed class TensorSearch
                     if (err < bestError) { bestError = err; onProgress?.Invoke($"SA err→{bestError} (restart {restart}, it {it})"); }
                     if ((it & 255) == 0) MaybeSnap(err);                       // stream the grids as they churn
                     temp *= 0.999; if (temp < 0.05) temp = 0.05;
-                    if ((it & 511) == 0 && sw.Elapsed.TotalSeconds > maxSeconds) break;
+                    // Check the CLOCK often. One iteration costs O(rank² · n⁴) — at rank ~48 that is tens
+                    // of milliseconds, so checking every 512 iterations overran an 8s budget by minutes
+                    // (measured: 145s for maxSeconds:8). The race loop hands out a time budget and needs
+                    // it honoured, or a "free" round blocks the node it is running on.
+                    if ((it & 15) == 0 && sw.Elapsed.TotalSeconds > maxSeconds) break;
                 }
 
                 // k-flip polish to close a small final gap.
@@ -289,17 +338,20 @@ public sealed class TensorSearch
         private int Sparse() { int x = _rng.Next(5); return x == 0 ? -1 : x == 1 ? 1 : 0; }
 
         // ── full-tensor k-flip intensification ────────────────────────────────────────────
+        // Everything below runs only when _canPolish (checked at the single call site), which is also
+        // the condition under which _fr was allocated — hence the null-forgiving access.
         private void LoadFull(int[,] U, int[,] V, int[,] W)
         {
+            int[,,] fr = _fr!;
             Array.Copy(U, _u, U.Length); Array.Copy(V, _v, V.Length); Array.Copy(W, _w, W.Length);
-            Array.Clear(_fr, 0, _fr.Length);
+            Array.Clear(fr, 0, fr.Length);
             for (int r = 0; r < _rank; r++)
                 for (int a = 0; a < _n2; a++) { int ua = _u[r, a]; if (ua == 0) continue;
                     for (int b = 0; b < _n2; b++) { int vb = _v[r, b]; if (vb == 0) continue;
-                        for (int g = 0; g < _n2; g++) { int wg = _w[r, g]; if (wg == 0) continue; _fr[a, b, g] += ua * vb * wg; } } }
+                        for (int g = 0; g < _n2; g++) { int wg = _w[r, g]; if (wg == 0) continue; fr[a, b, g] += ua * vb * wg; } } }
             _ferr = 0;
             for (int a = 0; a < _n2; a++) for (int b = 0; b < _n2; b++) for (int g = 0; g < _n2; g++)
-            { long e = _fr[a, b, g] - _t[a, b, g]; _ferr += e * e; }
+            { long e = fr[a, b, g] - _t[a, b, g]; _ferr += e * e; }
         }
         private int CurFull(int kind, int r, int idx) => kind == 0 ? _u[r, idx] : kind == 1 ? _v[r, idx] : _w[r, idx];
         private void ApplyFull(int kind, int r, int idx, int val)
@@ -326,7 +378,7 @@ public sealed class TensorSearch
         private void BumpFull(int a, int b, int g, int change)
         {
             if (change == 0) return;
-            int cell = _fr[a, b, g], t = _t[a, b, g], nv = cell + change;
+            int cell = _fr![a, b, g], t = _t[a, b, g], nv = cell + change;
             _ferr += (long)(nv - t) * (nv - t) - (long)(cell - t) * (cell - t);
             _fr[a, b, g] = nv;
         }
@@ -493,6 +545,34 @@ public sealed class TensorSearch
         return first ? null : sb.ToString();
     }
 
+    /// <summary>Strassen's rank-7 scheme for 2×2, in THIS file's index convention (a=i·n+k, b=k·n+j,
+    /// g=i·n+j). It is the seed of the free composition engine (<see cref="SchemeCompose"/>): every
+    /// power-of-two size is built from it with no LLM and no search. Kept as the floor, not the
+    /// ceiling — a better base the hive derives replaces it and lifts every larger size with it.</summary>
+    public static Decomposition Strassen2 => new(2, 7,
+        new[,] { {1,0,0,1}, {0,0,1,1}, {1,0,0,0}, {0,0,0,1}, {1,1,0,0}, {-1,0,1,0}, {0,1,0,-1} },
+        new[,] { {1,0,0,1}, {1,0,0,0}, {0,1,0,-1}, {-1,0,1,0}, {0,0,0,1}, {1,1,0,0}, {0,0,1,1} },
+        new[,] { {1,0,0,1}, {0,0,1,-1}, {0,1,0,1}, {1,0,1,0}, {-1,1,0,0}, {0,0,0,1}, {1,0,0,0} });
+
+    /// <summary>The exact tensor residual of a decomposition: 0 ⇔ it computes n×n matmul exactly.
+    /// Cheap for small n, and the honest gate before any scheme is trusted as a composition base.</summary>
+    public static long Residual(Decomposition d)
+    {
+        int n2 = d.N * d.N;
+        var t = BuildMatmulTensor(d.N);
+        long err = 0;
+        for (int a = 0; a < n2; a++)
+            for (int b = 0; b < n2; b++)
+                for (int g = 0; g < n2; g++)
+                {
+                    int s = 0;
+                    for (int r = 0; r < d.Rank; r++) s += d.U[r, a] * d.V[r, b] * d.W[r, g];
+                    long diff = s - t[a, b, g];
+                    err += diff * diff;
+                }
+        return err;
+    }
+
     /// <summary>
     /// Sanity check (diagnostic): plug in Strassen's KNOWN rank-7 decomposition and confirm our
     /// tensor convention + codegen represent it at error 0 / 7 muls / exact-verify true. If this
@@ -500,21 +580,9 @@ public sealed class TensorSearch
     /// </summary>
     public static void StrassenCheck()
     {
-        int[,] U = { {1,0,0,1}, {0,0,1,1}, {1,0,0,0}, {0,0,0,1}, {1,1,0,0}, {-1,0,1,0}, {0,1,0,-1} };
-        int[,] V = { {1,0,0,1}, {1,0,0,0}, {0,1,0,-1}, {-1,0,1,0}, {0,0,0,1}, {1,1,0,0}, {0,0,1,1} };
-        int[,] W = { {1,0,0,1}, {0,0,1,-1}, {0,1,0,1}, {1,0,1,0}, {-1,1,0,0}, {0,0,0,1}, {1,0,0,0} };
-        var d = new Decomposition(2, 7, U, V, W);
-
-        // Direct tensor residual against our convention.
-        var t = BuildMatmulTensor(2);
-        int err = 0;
-        for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) for (int g = 0; g < 4; g++)
-        {
-            int s = 0; for (int r = 0; r < 7; r++) s += U[r, a] * V[r, b] * W[r, g];
-            int diff = s - t[a, b, g]; err += diff * diff;
-        }
+        Decomposition d = Strassen2;
         Console.WriteLine($"== Strassen sanity check ==");
-        Console.WriteLine($"   tensor residual error = {err}  (expect 0)");
+        Console.WriteLine($"   tensor residual error = {Residual(d)}  (expect 0)");
         string src = Synthesize(d);
         var (compiled, muls, exact) = MatmulRace.EvaluateCountingSource(src, 2);
         Console.WriteLine($"   synthesized: compiled={compiled}  muls={muls} (expect 7)  exact-verify={exact} (expect True)");
@@ -535,7 +603,7 @@ public sealed class TensorSearch
 
         if (d is null)
         {
-            Console.WriteLine($"   no exact rank-{rank} decomposition found in {swatch.Elapsed.TotalSeconds:F1}s (best residual error = {bestErr}).");
+            Console.WriteLine($"   no exact rank-{rank} decomposition found in {swatch.Elapsed.TotalSeconds:F1}s (best residual error = {ErrText(bestErr)}).");
             Console.WriteLine("   (try a larger rank, or re-run — the search is randomized.)");
             return;
         }

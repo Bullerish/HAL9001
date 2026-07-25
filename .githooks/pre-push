@@ -12,8 +12,16 @@ set -u
 remote="${1:-origin}"
 
 # Real-credential SHAPES. Lengths are chosen so placeholders (sk-ant-..., sk-ant-REPLACE_ME) do NOT
-# match. The local Windows username is included as a PII canary (it leaked into README once).
-patterns='sk-ant-api03|sk-ant-[A-Za-z0-9_-]{25,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{8,}|rk_live_[A-Za-z0-9]{20,}|sk_live_[A-Za-z0-9]{20,}|whsec_[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|C:\\Users\\bjame'
+# match.
+#
+# The last pattern is a PII canary for local machine paths (a home directory leaked into the README
+# once). It matches ANY Windows user path — deliberately generic: naming the actual username here
+# would publish, in a public repo, exactly the personal data this hook exists to keep out of it.
+# Need a machine-specific canary too? Put it in git config, which is never committed:
+#     git config hal.piiCanary 'some-private-string'
+patterns='sk-ant-api03|sk-ant-[A-Za-z0-9_-]{25,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{8,}|rk_live_[A-Za-z0-9]{20,}|sk_live_[A-Za-z0-9]{20,}|whsec_[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|[Cc]:\\[Uu]sers\\[A-Za-z0-9._-]+'
+extra=$(git config --get hal.piiCanary 2>/dev/null || true)
+[ -n "$extra" ] && patterns="$patterns|$extra"
 allow='REPLACE_ME|noreply@anthropic\.com|example\.com|your-db-name'
 
 found=0
@@ -27,7 +35,7 @@ while read -r localref localsha remoteref remotesha; do
   else
     range="$remotesha..$localsha"
   fi
-  # Exclude this hook itself — it necessarily contains pattern fragments (sk-ant-..., the username
+  # Exclude this hook itself — it necessarily contains pattern fragments (sk-ant-..., the path
   # canary) that would otherwise self-trip. The hook is reviewed code, not a place secrets hide.
   hits=$(git log -p --no-color $range -- . ':(exclude).githooks/' 2>/dev/null \
           | grep -E '^\+' | grep -vE '^\+\+\+' \

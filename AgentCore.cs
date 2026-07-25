@@ -1340,7 +1340,7 @@ public sealed class AgentCore
     /// mesh. Workers run from a published Release copy in bin/workers-pub/ so dotnet build -c Debug
     /// never contends on the Debug DLL that the parent process holds open. The publish is only
     /// (re)run when the publish artifact is missing or older than the currently-running DLL.</summary>
-    public async Task<System.Diagnostics.Process?> HireNodeAsync(int parentPort, IEnumerable<int> peerPorts)
+    public async Task<HiredNode?> HireNodeAsync(int parentPort, IEnumerable<int> peerPorts)
     {
         string? dll = System.Reflection.Assembly.GetEntryAssembly()?.Location;
         if (string.IsNullOrEmpty(dll))
@@ -1421,8 +1421,13 @@ public sealed class AgentCore
 
         Console.WriteLine($"  [hire] node spawned on port {newPort} — it will join the mesh in a few seconds.");
         await Events.AppendAsync("node-hired", $"hired a new node on port {newPort}", newPort.ToString());
-        return proc;
+        // The PORT is part of the result on purpose: the caller must hand it to SwarmNode.AddKnownPeer,
+        // or the mesh never forms (the parent dials, and it can only dial peers it knows about).
+        return new HiredNode(proc, newPort);
     }
+
+    /// <summary>A worker this node spawned: the process, and the port it listens on.</summary>
+    public sealed record HiredNode(System.Diagnostics.Process Proc, int Port);
 
     private static readonly System.Globalization.CultureInfo Inv = System.Globalization.CultureInfo.InvariantCulture;
     private static double? ParseInv(string? s)
@@ -1434,8 +1439,10 @@ public sealed class AgentCore
         if (_turso is null) return null;
         try
         {
+            // `scheme` (the U/V/W triple, when a bilinear scheme won) comes back too: it is what the
+            // free composition engine builds larger sizes out of (SchemeCompose.BestBaseAsync).
             var rows = await _turso.ExecuteAsync(
-                "SELECT node, strategy, metric, score, speedup, source, median_ms FROM matmul_records WHERE size=?",
+                "SELECT node, strategy, metric, score, speedup, source, median_ms, scheme FROM matmul_records WHERE size=?",
                 size.ToString());
             if (rows.Count == 0 || rows[0].Count < 7) return null;
             string metric = string.IsNullOrWhiteSpace(rows[0][2]) ? "ms" : rows[0][2]!;
@@ -1444,7 +1451,8 @@ public sealed class AgentCore
             double? su = ParseInv(rows[0][4]);
             if (score is null || su is null) return null;
             var m = metric == "muls" ? MatmulRace.Metric.Muls : MatmulRace.Metric.Time;
-            return new MatmulRace.Champion(rows[0][0] ?? "", rows[0][1] ?? "", m, score.Value, su.Value, rows[0][5] ?? "");
+            string scheme = rows[0].Count > 7 ? rows[0][7] ?? "" : "";
+            return new MatmulRace.Champion(rows[0][0] ?? "", rows[0][1] ?? "", m, score.Value, su.Value, rows[0][5] ?? "", scheme);
         }
         catch { return null; }
     }

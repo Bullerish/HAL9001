@@ -15,7 +15,54 @@ of the local secrets or tooling yet in place.
 
 ---
 
-## ⏩ Pick up here — session of 2026-06-24 (live "honest & alive" dashboard)
+## ⏩ Pick up here — session of 2026-07-24 (thinking that never stops)
+
+**What changed, in one line:** HAL no longer needs an LLM to get better. Every rung of the ladder now
+improves on CPU alone, and the language model became the thing a *paid* visitor switches on.
+
+- **Free engines:** `SchemeCompose` (recursive composition — 4×4 in 49 muls, 8×8 in 343, 16×16 in 2401,
+  32×32 in 16807, all exact-verified) and `KernelTuner` (parametric autotuning for the wall-clock sizes;
+  measured 3.18× vs naive at 128×128). Both run with no key and no budget. Try them:
+  `dotnet run -- compose 32`, `dotnet run -- tune 128`, `dotnet run -- raceonce 16` (hive-free by design).
+- **The mesh actually forms now.** Hired workers never joined because the parent never told its own
+  transport about the port it had just spawned, and only lower→higher dials. `SwarmNode.AddKnownPeer`
+  fixes it; `dotnet run -- meshtest` reproduces the old shape then proves the new one. `HAL_TARGET_NODES`
+  is back on by default (**2**).
+- **Nodes query each other for free:** every ~2 min the leader hands each peer its own search seed for
+  the current ladder size; results come back as numbers and are **re-proven locally** before adoption.
+- **Ladder:** no longer stops at the top (it laps), and a round that *couldn't* run no longer counts as
+  convergence — it's reported as a skip.
+- **Memory bug that mattered:** the n⁶ cap ignored the `rank · n⁴` basis, so 16×16 was allowed and peaked
+  at **1.24 GB** measured. Now budgeted end-to-end via `HAL_SEARCH_MEM_MB` (default 256).
+
+- **The ladder no longer ends at 256.** Above the written rungs it doubles forever (512, 1024, 2048…),
+  capped only by `HAL_MAX_SIZE` (default 2048) because each doubling costs ~8× the wall-clock per round
+  (measured: 512 ≈ 13s, 1024 ≈ 91s, 2048 ≈ 7min). There is no `done` state; a `done:true` row left by an
+  older build is picked up and climbed from. `dotnet run -- ladder` prints the rungs.
+
+**▶ DO FIRST — the three things the live site is showing right now, and what each needs:**
+1. **"1 live node".** The mesh fix is code, so it needs the deploy. It ALSO needs the box env: if
+   `/etc/hal9001/hal.env` still has `HAL_TARGET_NODES=0` (the old example shipped that), the new default
+   of 2 will not apply — an explicit 0 means "off". Set it to `2` (or delete the line) and restart.
+   Check with `journalctl -u hal-swarm | grep hire` and the dashboard's node count.
+2. **"thinking paused".** Two parts: the pill now reads "LLM idle · matrix engines running" (deploy),
+   and it is *accurate* only because the CPU engines exist now. If you also want the language model on
+   without waiting for a buyer, set `HAL_DAILY_USD` above 0 — that is a deliberate spend of your key.
+3. **"256×256 is the last rung".** Fixed in code (see above). The live row currently says
+   `currentSize:256, stale:8, done:true`; the new build reopens it and carries on climbing.
+
+Then: review + push, then `gh workflow run deploy.yml`. After deploy the box should show `peer-round` /
+`matmul-round` events within minutes **even with `HAL_DAILY_USD=0`** — that is the check that it worked.
+New env keys are all optional (sane defaults): `HAL_TARGET_NODES=2`, `HAL_PEERROUND_SECS`,
+`HAL_PEERSEARCH_SECS`, `HAL_SEARCH_MEM_MB`, `HAL_MAX_SIZE`.
+
+**Note for the fresh-clone recipe:** `git config core.hooksPath .githooks` is now set on this machine.
+The hook's PII canary no longer hard-codes a username (it matches any `C:\Users\<name>` path, and you
+can add a private one with `git config hal.piiCanary '<string>'`).
+
+---
+
+## Session of 2026-06-24 (live "honest & alive" dashboard)
 
 **The repo is now PUBLIC** (decided this session). It's the core "HAL is real" trust signal — no secrets are committed (CI is secret-free; real secrets live only in `/etc/hal9001/hal.env` on the box). The box IP + root-deploy recipe were scrubbed from the public docs, though the IP remains in earlier git history (see Open threads).
 

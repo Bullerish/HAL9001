@@ -44,7 +44,7 @@ public static class ContributeWorker
 
             Console.WriteLine($"[worker] target {t.Size}x{t.Size}, rank {t.TargetRank} — searching ~{secondsPerRound:0}s...");
             TensorSearch.Decomposition? d = TensorSearch.Search(t.Size, t.TargetRank, out int err, maxSeconds: secondsPerRound);
-            if (d is null) { Console.WriteLine($"[worker] no decomposition this round (best residual {err}). Trying again."); continue; }
+            if (d is null) { Console.WriteLine($"[worker] no decomposition this round (best residual {TensorSearch.ErrText(err)}). Trying again."); continue; }
 
             var payload = new
             {

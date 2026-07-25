@@ -62,7 +62,14 @@ public static class SwarmAgent
         string? Source = null,       // candidate: the generated source (only the winner's is pushed, 5b)
         string? Status = null,       // candidate: Ok / Declined / GenerationFailed
         string? InType = null,       // candreq: declared input type every candidate must target (typed rung)
-        string? OutType = null);     // candreq: declared output type
+        string? OutType = null,      // candreq: declared output type
+        // FREE cross-node search round — nodes querying each other with no LLM and no budget:
+        int Size = 0,                // srch/srchres: the matrix size being worked
+        int Rank = 0,                // srch/srchres: the target rank (multiplication count) to beat
+        int Seed = 0,                // srch: this member's search seed, so no two nodes repeat each other
+        double Secs = 0,             // srch: how long to search before reporting back
+        int Err = -1,                // srchres: the best residual the member reached (0 = exact)
+        string? Scheme = null);      // srchres: the U/V/W triple, when the member found an exact one
 
     // rung 5a: the coordinator's in-progress fan-out — collecting competing candidates for one reqId.
     private sealed class Competition
@@ -147,11 +154,11 @@ public static class SwarmAgent
         const double HireGraceSecs = 60.0;   // min seconds between auto-hires — longer than a node's mesh-join time, so no spawn storms
         // PERSISTENT MESH (idle self-driving): keep the swarm populated to this many HELPER nodes so the
         // hive stays a mesh that can cross-query continuously — not just a one-shot "hire when solo".
-        // HAL_TARGET_NODES sets it. DEFAULT 0 (OFF): auto-spawn is opt-in until worker-mesh formation is
-        // verified on the target host — on the self-contained box, hired workers were observed to spawn but
-        // not peer up (root re-hires every ~60s), so leaving it off avoids churning a production VPS. Set
-        // HAL_TARGET_NODES=2 (say) once you've confirmed hired nodes actually join the mesh on that host.
-        int targetNodes = 0;
+        // HAL_TARGET_NODES sets it; DEFAULT 2, ceiling MaxAutoHiredNodes.
+        // This was previously defaulted OFF because hired workers were seen to spawn but never peer up.
+        // That had a cause, now fixed: the parent never told its own transport about the port it had just
+        // spawned, and since only the LOWER port dials, nobody ever dialed the worker (SwarmNode.AddKnownPeer).
+        int targetNodes = 2;
         {
             string? tnEnv = Environment.GetEnvironmentVariable("HAL_TARGET_NODES");
             if (int.TryParse(tnEnv, out int tn)) targetNodes = Math.Clamp(tn, 0, MaxAutoHiredNodes);
@@ -159,12 +166,25 @@ public static class SwarmAgent
         // CROSS-NODE QUERYING (idle self-driving): how often the idle leader poses a self-generated,
         // directive-serving question to the WHOLE mesh and runs a competition (every node answers, best is
         // adopted) — i.e. the nodes querying each other. Default ~5 min (HAL_CROSSQUERY_SECS overrides).
-        // The DAILY BUDGET is the real cost throttle (your choice: cap, then go free), not this cadence.
+        // This one COSTS TOKENS (it's the LLM deliberation), so it lives below the budget gate.
         DateTime lastCrossQuery = DateTime.MinValue;
         double CrossQuerySeconds = 300.0;
         {
             string? cqEnv = Environment.GetEnvironmentVariable("HAL_CROSSQUERY_SECS");
             if (double.TryParse(cqEnv, out double cqv) && cqv > 0) CrossQuerySeconds = cqv;
+        }
+        // FREE cross-node search rounds: the same idea — the whole mesh working one problem — but with
+        // the tensor search instead of a language model, so it costs NOTHING and runs whether or not
+        // anyone has paid, and whether or not any node has an API key. Much shorter cadence than the
+        // LLM competition precisely because it is free. HAL_PEERROUND_SECS / HAL_PEERSEARCH_SECS tune it.
+        DateTime lastPeerRound = DateTime.MinValue;
+        double PeerRoundSeconds = 120.0;    // how often the leader starts a round
+        double PeerSearchSeconds = 8.0;     // how long each node searches before reporting back
+        {
+            string? prEnv = Environment.GetEnvironmentVariable("HAL_PEERROUND_SECS");
+            if (double.TryParse(prEnv, out double prv) && prv > 0) PeerRoundSeconds = prv;
+            string? psEnv = Environment.GetEnvironmentVariable("HAL_PEERSEARCH_SECS");
+            if (double.TryParse(psEnv, out double psv) && psv > 0) PeerSearchSeconds = Math.Clamp(psv, 1, 60);
         }
         // AMBIENT PACING (bite 18): HAL_PACE scales every idle/LLM cadence up to throttle token burn for
         // a long-running "leave it on and watch" deployment. 1 = default snappy demo pace; "slow" ≈ 6×
@@ -180,6 +200,9 @@ public static class SwarmAgent
         // Prime Directive race (bite 14): each autonomous node runs matmul optimization rounds
         // continuously; a new record triggers a peer challenge so every node immediately fires back.
         var matmulTrigger = new System.Threading.SemaphoreSlim(0, 5); // peer challenges wake the race loop
+        // Wake the race loop, tolerating a full trigger: several wake-ups queued at once just means the
+        // loop is already about to run, which is exactly what we wanted. (Release() throws at max count.)
+        void WakeRace() { try { matmulTrigger.Release(); } catch (SemaphoreFullException) { } }
         DateTime lastRaceAt = DateTime.MinValue;
         double MatmulRaceIntervalSecs = 120.0 * pace; // baseline: one round every 2 minutes (×pace)
         double MinRaceIntervalSecs = 30.0 * pace;     // rate-limit so challenge cascades don't spiral
@@ -486,6 +509,85 @@ public static class SwarmAgent
             FinalizeCompetition(reqId, $"collection window {CollectionWindowSeconds:0}s elapsed");
         }
 
+        // ── FREE cross-node search round (no LLM, no budget, no key required) ────────────────────
+        // Leader side: choose what the hive should be working on right now — the ladder's current
+        // size and one multiplication below its champion — and hand each peer its own seed so the
+        // swarm covers different random starts of the same problem in parallel. Nothing here calls
+        // an LLM, so this is what keeps a mesh of nodes genuinely busy between paying visitors.
+        int peerRoundTick = 0;
+        async Task StartPeerSearchRoundAsync()
+        {
+            var peers = node.Peers.ToList();
+            if (peers.Count == 0) return;
+
+            // WHICH problem to give the mesh: the SMALL sizes, cycling 2 → 3 → 4. Deliberately not the
+            // ladder's current size. The direct search is only feasible down here, and down here is
+            // where a win is worth most — beating 3×3=23 would be a genuine open-problem result, and any
+            // improvement propagates to every larger size through composition. The big sizes are handled
+            // by each node's own autotuning, which needs no coordination.
+            int size = 0, target = 0;
+            for (int i = 0; i < 3; i++)
+            {
+                int cand = MatmulLadder.BaseRungs[(peerRoundTick + i) % 3];   // 2, 3, 4
+                MatmulRace.Champion? c = await core.GetMatmulChampionAsync(cand);
+                long best = c is not null ? (long)c.Score : (long)cand * cand * cand;
+                int t = (int)Math.Min(int.MaxValue, best) - 1;
+                if (t >= 1 && TensorSearch.Feasible(cand, t)) { size = cand; target = t; break; }
+            }
+            peerRoundTick++;
+            if (size == 0) return;   // nothing feasible to hand out right now
+            string reqId = Guid.NewGuid().ToString("N")[..8];
+            var seedRng = new Random();
+            foreach (string peer in peers)
+                await SendSwarm(peer, new SwarmMsg("srch", reqId, Origin: node.Id,
+                    Size: size, Rank: target, Seed: seedRng.Next(1, int.MaxValue), Secs: PeerSearchSeconds));
+
+            Console.WriteLine($"\n[peer-round] {peers.Count} node(s) searching {size}x{size} for rank-{target} (free, no LLM)");
+            Console.Write("> ");
+            LiveLog.Append($"> peer round: {peers.Count} node(s) hunting {size}x{size} rank-{target} (free)");
+            try { await core.Events.AppendAsync("peer-round", $"asked {peers.Count} node(s) to search {size}x{size} for rank-{target} — no LLM involved"); } catch { }
+        }
+
+        // Member side: run MY OWN seeded search and report back. Pure CPU: no key, no budget, no
+        // hive access needed — which is why even a keyless helper node is useful to the hive.
+        async Task HandlePeerSearchAsync(string from, SwarmMsg m)
+        {
+            if (m.Size < 2 || m.Rank < 1) return;
+            double secs = m.Secs > 0 ? Math.Clamp(m.Secs, 1, 60) : PeerSearchSeconds;
+            Console.WriteLine($"\n[peer-round] {from} asked me to search {m.Size}x{m.Size} for rank-{m.Rank} (~{secs:0}s)");
+            Console.Write("> ");
+
+            TensorSearch.Decomposition? d = null;
+            int err = TensorSearch.NotAttempted;
+            await Task.Run(() => d = TensorSearch.Search(m.Size, m.Rank, out err, maxSeconds: secs, seed: m.Seed));
+
+            await SendSwarm(from, new SwarmMsg("srchres", m.ReqId, AnsweredBy: node.Id,
+                Size: m.Size, Rank: m.Rank, Err: err,
+                Scheme: d is not null ? MatmulRace.SchemeJson(d) : null));
+        }
+
+        // Leader side: a peer reported. Numbers are logged; a claimed scheme is RE-PROVEN here
+        // (residual, compile, exact verify) before it can become the hive's champion.
+        async Task HandlePeerSearchResultAsync(string from, SwarmMsg m)
+        {
+            string who = m.AnsweredBy ?? from;
+            if (m.Scheme is null)
+            {
+                LiveLog.Append($"  {who}: no rank-{m.Rank} yet (best residual {TensorSearch.ErrText(m.Err)})");
+                return;
+            }
+            var (adopted, muls, note) = await MatmulRace.TryAdoptSchemeAsync(
+                core, m.Scheme, who, $"peer search round (LLM-free, seeded by {node.Id})");
+            Console.WriteLine($"\n[peer-round] {who} → {note}");
+            Console.Write("> ");
+            LiveLog.Append((adopted ? "OK " : "  ") + note);
+            if (adopted)
+            {
+                try { await core.Events.AppendAsync("peer-round-record", note); } catch { }
+                WakeRace();   // a new record — let the race loop react immediately
+            }
+        }
+
         // Coordinator side of a deliberation: generate test cases, broadcast the question to every
         // member as a candidate-request, gather candidates within the window, then show the slate.
         async Task RunCompetitionAsync(string reqId, string question, string origin)
@@ -593,6 +695,14 @@ public static class SwarmAgent
                     }
                     break;
 
+                // ── free cross-node search round (no LLM on either side) ──
+                case "srch":                       // leader → member: search this size/rank from this seed
+                    await HandlePeerSearchAsync(from, m);
+                    break;
+                case "srchres":                    // member → leader: what I found (numbers only)
+                    await HandlePeerSearchResultAsync(from, m);
+                    break;
+
                 // ── rung 5a fan-out ──
                 case "compete": // asker → coordinator: run a deliberation for this question
                     await RunCompetitionAsync(m.ReqId, m.Question ?? "", m.Origin ?? from);
@@ -669,7 +779,7 @@ public static class SwarmAgent
                 case "matmul-challenge": // a peer set a new speed record — respond immediately with our own round
                     Console.WriteLine($"\n[matmul-race] CHALLENGED by {m.Origin}: {m.Answer}"); Console.Write("> ");
                     _ = core.Events.AppendAsync("matmul-challenged", $"challenged by {m.Origin}: {m.Answer}", m.Origin);
-                    matmulTrigger.Release();
+                    WakeRace();
                     break;
             }
         }
@@ -818,39 +928,14 @@ public static class SwarmAgent
             while (!loopCts.IsCancellationRequested)
             {
                 try { await Task.Delay(10000, loopCts.Token); } catch { break; }
-                if (!core.HasLlm || !core.HasHive) continue;
+                // NOTE THE ORDER OF THIS LOOP. Everything FREE comes first and runs unconditionally:
+                // no API key needed, no budget needed, and no `continue` above it can skip it. The
+                // LLM work sits below a single gate. That ordering is the whole "HAL never stops
+                // thinking, but never spends unless someone paid" contract, expressed as control flow.
+                if (!core.HasHive) continue;
                 bool amLeader; lock (stateLock) amLeader = coordinator == node.Id;
                 if (!amLeader) continue;                                   // only the hive's leader introspects
 
-                // DONATIONS (bite 20): answer a paid visitor ask FIRST, via the SAFE voice path (no
-                // router, no generator, no code generation). One per cycle; runs regardless of mood/idle.
-                try
-                {
-                    var ask = await core.NextPendingAskAsync();
-                    if (ask is not null)
-                    {
-                        // Visitor Q&A also spends the owner's Anthropic key, so gate it on the SAME budget as
-                        // everything else. With no funded budget (HAL_DAILY_USD=0 and no donation) HAL will NOT
-                        // answer free asks on the owner's dime — they wait until someone funds the hive. This is
-                        // what makes "no spend unless someone pays" actually hold (it also closes a free-asks
-                        // abuse vector on the public page). Paid steers are budget-gated below as well.
-                        if (!await core.HasBudgetAsync()) continue;
-                        string reply = await core.RespondToVisitorAsync(ask.Value.Sender, ask.Value.Text);
-                        if (reply.Length > 0)
-                        {
-                            await core.AnswerAskAsync(ask.Value.Id, reply);
-                            await core.Events.AppendAsync("hal-reply", $"answered {ask.Value.Sender}");
-                            Console.WriteLine($"\n[transmission ← {ask.Value.Sender}] {ask.Value.Text}\n[HAL 9001] {reply}");
-                            Console.Write("> ");
-                        }
-                        continue; // one paid ask handled this cycle
-                    }
-                }
-                catch { }
-
-                // SELF-SCALING runs ABOVE the budget gate: spawning a node costs no tokens, and more nodes =
-                // more FREE matmul racing. So the mesh keeps forming/healing even after the day's LLM budget
-                // is spent (your rule: cap, then go free) — only the LLM work below the gate pauses at the cap.
                 bool isAuto = false;
                 try { isAuto = await core.IsAutonomousAsync(); } catch { /* treat as manual if hive unreachable */ }
 
@@ -869,13 +954,64 @@ public static class SwarmAgent
                         var peerPts = node.Peers
                             .Select(id => { int c = id.LastIndexOf(':'); return c >= 0 && int.TryParse(id[(c + 1)..], out int pt) ? pt : -1; })
                             .Where(pt => pt > 0);
-                        System.Diagnostics.Process? hired = await core.HireNodeAsync(myPort, peerPts);
-                        if (hired is not null) { hiredProcesses.Add(hired); lastHireAt = DateTime.UtcNow; Console.Write("> "); }
+                        AgentCore.HiredNode? hired = await core.HireNodeAsync(myPort, peerPts);
+                        if (hired is not null)
+                        {
+                            // TELL OUR OWN TRANSPORT about it. Without this the worker starts, waits to be
+                            // dialed (it took a higher port, and only lower→higher dials), and is never
+                            // dialed — because we never knew it existed. This one line is the difference
+                            // between "nodes spawn" and "nodes actually mesh and query each other".
+                            node.AddKnownPeer(hired.Port);
+                            lock (stateLock) allKnown.Add($"127.0.0.1:{hired.Port}");
+                            hiredProcesses.Add(hired.Proc); lastHireAt = DateTime.UtcNow; Console.Write("> ");
+                        }
                     }
                 }
 
+                // FREE CROSS-NODE ROUND — the nodes actually querying each other, on a short cadence,
+                // costing nothing. The leader picks the ladder's current size and the rank it wants to
+                // beat, then hands every peer its OWN seed: the same problem, searched from different
+                // random starts in parallel. Whatever a peer finds comes back as numbers, and the
+                // leader re-proves it locally before adopting (MatmulRace.TryAdoptSchemeAsync).
+                // This runs above the budget gate and needs no API key on any node involved.
+                if (isAuto && node.Peers.Count > 0
+                    && (DateTime.UtcNow - lastPeerRound).TotalSeconds > PeerRoundSeconds)
+                {
+                    lastPeerRound = DateTime.UtcNow;
+                    try { await StartPeerSearchRoundAsync(); } catch (Exception ex) { LiveLog.Append($"  peer round failed: {ex.Message}"); }
+                }
+
+                // ── everything below here costs money, and stops when the money does ──────────────
+                // No key on this node ⇒ nothing below is possible; the free work above already ran.
+                if (!core.HasLlm) continue;
+
+                // DONATIONS (bite 20): answer a paid visitor ask FIRST, via the SAFE voice path (no
+                // router, no generator, no code generation). One per cycle; runs regardless of mood/idle.
+                // Budget-gated like everything else: with nobody paying, asks WAIT rather than spend the
+                // owner's key. (This block sits below the free work on purpose — when it was above it,
+                // a single unanswered ask made every cycle `continue` and silently disabled self-scaling.)
+                try
+                {
+                    var ask = await core.NextPendingAskAsync();
+                    if (ask is not null && await core.HasBudgetAsync())
+                    {
+                        string reply = await core.RespondToVisitorAsync(ask.Value.Sender, ask.Value.Text);
+                        if (reply.Length > 0)
+                        {
+                            await core.AnswerAskAsync(ask.Value.Id, reply);
+                            await core.Events.AppendAsync("hal-reply", $"answered {ask.Value.Sender}");
+                            Console.WriteLine($"\n[transmission ← {ask.Value.Sender}] {ask.Value.Text}\n[HAL 9001] {reply}");
+                            Console.Write("> ");
+                        }
+                        continue; // one paid ask handled this cycle
+                    }
+                }
+                catch { }
+
                 // BUDGET (bite 21): when the day's LLM budget is spent, pause autonomous thinking.
-                // Paid asks above still get answered; the matmul loop's FREE tensor search keeps running.
+                // The free engines above — mesh, peer search rounds — and the matmul race loop's
+                // composition/tensor-search/autotuning keep running. HAL never goes quiet; it just
+                // stops spending.
                 if (!await core.HasBudgetAsync()) continue;
 
                 // STEERING (bite 22): act on ONE visitor menu-choice per cycle (no free text — the choice
@@ -1074,7 +1210,7 @@ public static class SwarmAgent
         // runs ONE ladder step: race the swarm's current size once (mult-count metric for small sizes,
         // wall-clock for large), update the shared plateau counter, and climb to the next size once a
         // size converges. A new record broadcasts a challenge so peers fire their own step immediately.
-        bool ladderDonePrinted = false;
+        int raceTick = 0;   // counts race ticks so every 4th can be a small-size side round
         async Task MatmulRaceLoop()
         {
             while (!loopCts.IsCancellationRequested)
@@ -1085,7 +1221,10 @@ public static class SwarmAgent
                 try { challenged = await matmulTrigger.WaitAsync(TimeSpan.FromSeconds(MatmulRaceIntervalSecs * boostMul), loopCts.Token); }
                 catch { break; }
 
-                if (!core.HasLlm || !core.HasHive) continue;
+                // NO API-KEY GATE HERE. The race's engines are free now (composition, tensor search,
+                // autotuning), so a keyless node — and a node whose budget is spent — still races. The
+                // hive only needs the shared cursor + champion table to collaborate on one ladder.
+                if (!core.HasHive) continue;
                 bool isAuto;
                 try { isAuto = await core.IsAutonomousAsync(); } catch { continue; }
                 if (!isAuto) continue;
@@ -1094,22 +1233,41 @@ public static class SwarmAgent
                 if ((DateTime.UtcNow - lastRaceAt).TotalSeconds < MinRaceIntervalSecs * boostMul) continue;
                 lastRaceAt = DateTime.UtcNow;
 
+                // SIDE ROUND — every 4th tick, race one of the SMALL rungs instead of the cursor, and
+                // leave the cursor alone. The ladder climbs away from 2/3/4 quickly, but those are the
+                // sizes where the direct search is feasible and where an improvement COMPOUNDS: a better
+                // 3×3 or 4×4 becomes a better 8/16/32/… on the next round through composition. Without
+                // this the hive would abandon exactly the work with the highest leverage.
+                raceTick++;
+                if (raceTick % 4 == 0)
+                {
+                    int small = MatmulLadder.BaseRungs[(raceTick / 4) % 3];   // cycles 2 → 3 → 4
+                    try
+                    {
+                        LiveLog.Append($"> side round: re-attacking {small}x{small} (small schemes lift every larger size)");
+                        var side = await MatmulRace.RunRoundAsync(client, core, myPort, small,
+                            MatmulLadder.MetricFor(small), ct: loopCts.Token, log: LiveLog.Append);
+                        if (side.Round is not null)
+                        {
+                            await core.Events.AppendAsync("matmul-round", "[side] " + side.Round.Summary);
+                            if (side.Round.NewRecord)
+                            {
+                                Console.WriteLine($"\n[matmul-race] side round set a new {small}x{small} record — every larger size can now inherit it.");
+                                Console.Write("> ");
+                                await BroadcastSwarm(new SwarmMsg("matmul-challenge", Origin: node.Id,
+                                    Answer: $"{small}x{small} {side.Round.Score:F0} muls — beat it"));
+                            }
+                        }
+                    }
+                    catch (OperationCanceledException) { break; }
+                    catch (Exception ex) { LiveLog.Append($"  side round error: {ex.Message}"); }
+                    continue;
+                }
+
                 try
                 {
-                    MatmulLadder.LadderStep? step = await MatmulLadder.StepAsync(client!, core, myPort, loopCts.Token, LiveLog.Append);
+                    MatmulLadder.LadderStep? step = await MatmulLadder.StepAsync(client, core, myPort, loopCts.Token, LiveLog.Append);
                     if (step is null) continue;
-
-                    if (step.Done)
-                    {
-                        if (!ladderDonePrinted)
-                        {
-                            Console.WriteLine($"\n[matmul-race] LADDER COMPLETE — every size up to {step.Size}x{step.Size} has converged. The hive has reached its empirical optimum.");
-                            Console.Write("> ");
-                            await core.Events.AppendAsync("matmul-ladder-done", $"ladder converged through {step.Size}x{step.Size}");
-                            ladderDonePrinted = true;
-                        }
-                        continue;
-                    }
 
                     string why = challenged ? "challenge received" : "race timer";
                     string unit = MatmulRace.MetricName(step.Metric);
@@ -1119,12 +1277,18 @@ public static class SwarmAgent
 
                     if (step.Round is null)
                     {
-                        Console.WriteLine("[matmul-race] all candidates failed compile or correctness this round.");
+                        // Two different things, reported as two different things: a round that RACED and
+                        // produced nothing, versus a round that had nothing it could race (only possible
+                        // now at a size no free engine covers and with no funded LLM budget).
+                        string why2 = step.Worked
+                            ? "all candidates failed compile or correctness this round"
+                            : "nothing to race at this size right now (no free engine covers it, LLM budget unfunded) — NOT counted as convergence";
+                        Console.WriteLine($"[matmul-race] {why2}.");
                         Console.Write("> ");
                         // Surface the round to the hive so the (separate-process) dashboard CRT can show it live.
-                        LiveLog.Append($"  all candidates failed this round");
+                        LiveLog.Append($"  {why2}");
                         await core.Events.AppendAsync("matmul-round",
-                            $"racing {step.Size}x{step.Size} [{unit}] (plateau {step.Stale}/{MatmulLadder.PlateauRounds}) — all candidates failed this round");
+                            $"racing {step.Size}x{step.Size} [{unit}] (plateau {step.Stale}/{MatmulLadder.PlateauRounds}) — {why2}");
                     }
                     else
                     {
@@ -1144,15 +1308,32 @@ public static class SwarmAgent
                         string note = $"racing {step.Size}x{step.Size} [{unit}] · plateau {step.Stale}/{MatmulLadder.PlateauRounds}"
                                     + (step.Round is null ? " · no candidate beat the bar this round" : " · " + step.Round.Summary);
                         int best = step.Round is not null ? (int)Math.Round(step.Round.Score) : 0;
-                        LiveMatrix.PublishStatus(step.Size, best, 0, note);
+                        LiveMatrix.PublishStatus(step.Size, best, note);
                     }
 
                     if (step.Advanced)
                     {
-                        Console.WriteLine($"[matmul-race] {step.Size}x{step.Size} CONVERGED — climbing the ladder to {step.NextSize}x{step.NextSize}.");
+                        // Two different reasons to move up, reported as two different things.
+                        string move = step.Worked
+                            ? $"{step.Size}x{step.Size} CONVERGED after {MatmulLadder.PlateauRounds} flat rounds"
+                            : $"{step.Size}x{step.Size} SKIPPED (nothing to race here right now — not a convergence claim)";
+                        Console.WriteLine($"[matmul-race] {move} — moving to {step.NextSize}x{step.NextSize}.");
                         Console.Write("> ");
-                        await core.Events.AppendAsync("matmul-size-converged",
-                            $"{step.Size}x{step.Size} converged after {MatmulLadder.PlateauRounds} flat rounds — climbing to {step.NextSize}x{step.NextSize}");
+                        await core.Events.AppendAsync(step.Worked ? "matmul-size-converged" : "matmul-size-skipped",
+                            $"{move} — moving to {step.NextSize}x{step.NextSize}");
+                    }
+
+                    if (step.AtCeiling)
+                    {
+                        // The top rung THIS MACHINE allows. Not "done" — the ladder has no end; this box
+                        // just runs out of memory/time above HAL_MAX_SIZE. So say exactly that, and keep
+                        // racing this size (plus the small-size side rounds, which can still lift it).
+                        Console.WriteLine($"\n[matmul-race] at this machine's top rung ({step.Size}x{step.Size}, HAL_MAX_SIZE={MatmulLadder.MaxSize}) — " +
+                                          "still racing it. Raise HAL_MAX_SIZE (or run on a bigger box) and the climb continues.");
+                        Console.Write("> ");
+                        LiveLog.Append($"> at the top rung this box allows ({step.Size}x{step.Size}) — still racing; raise HAL_MAX_SIZE to climb further");
+                        await core.Events.AppendAsync("matmul-ladder-ceiling",
+                            $"reached {step.Size}x{step.Size}, this machine's HAL_MAX_SIZE — continuing to race it (the ladder itself has no end)");
                     }
 
                     if (step.Improved && step.Round is not null)
@@ -1419,8 +1600,13 @@ public static class SwarmAgent
                     var peerPts = node.Peers
                         .Select(id => { int c = id.LastIndexOf(':'); return c >= 0 && int.TryParse(id[(c + 1)..], out int pt) ? pt : -1; })
                         .Where(pt => pt > 0);
-                    System.Diagnostics.Process? hired = await core.HireNodeAsync(myPort, peerPts);
-                    if (hired is not null) { hiredProcesses.Add(hired); lastHireAt = DateTime.UtcNow; spawned++; }
+                    AgentCore.HiredNode? hired = await core.HireNodeAsync(myPort, peerPts);
+                    if (hired is not null)
+                    {
+                        node.AddKnownPeer(hired.Port);   // required for the link to ever form (see AddKnownPeer)
+                        lock (stateLock) allKnown.Add($"127.0.0.1:{hired.Port}");
+                        hiredProcesses.Add(hired.Proc); lastHireAt = DateTime.UtcNow; spawned++;
+                    }
                 }
                 if (spawned == 0) Console.WriteLine($"[hire] nothing spawned (at cap {MaxAutoHiredNodes} or port range full).");
                 continue;
@@ -1463,11 +1649,11 @@ public static class SwarmAgent
                 if (!core.HasHive) { Console.WriteLine("[race] no hive configured."); continue; }
                 try
                 {
-                    var (idx, stale, done) = await core.GetLadderAsync();
-                    int curSize = MatmulLadder.Sizes[Math.Clamp(idx, 0, MatmulLadder.Sizes.Length - 1)];
-                    Console.WriteLine(done
-                        ? "[race] ladder COMPLETE — every size has converged to its empirical optimum."
-                        : $"[race] climbing: now racing {curSize}x{curSize} [{MatmulRace.MetricName(MatmulLadder.MetricFor(curSize))}], plateau {stale}/{MatmulLadder.PlateauRounds}.");
+                    var (idx, stale, _) = await core.GetLadderAsync();
+                    int curSize = MatmulLadder.SizeAt(Math.Clamp(idx, 0, MatmulLadder.RungCount - 1));
+                    Console.WriteLine($"[race] climbing: now racing {curSize}x{curSize} [{MatmulRace.MetricName(MatmulLadder.MetricFor(curSize))}], " +
+                                      $"plateau {stale}/{MatmulLadder.PlateauRounds}. Rungs: {string.Join(", ", MatmulLadder.Rungs)} " +
+                                      $"(top = HAL_MAX_SIZE {MatmulLadder.MaxSize}; the ladder itself has no end).");
                     var champs = await core.GetAllMatmulChampionsAsync();
                     if (champs.Count == 0)
                         Console.WriteLine("       no records yet — `autonomous on` to start the race.");

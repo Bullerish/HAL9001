@@ -40,11 +40,14 @@ static class LiveMatrix
 
     /// <summary>Publish a compact "currently working" status for sizes too large to render as U/V/W grids
     /// (n &gt; 4). Keeps the panel FRESH and following the hive up the ladder instead of frozen on the last
-    /// small scheme. Carries no grids — just n, the current best (muls), and a human note.</summary>
-    public static void PublishStatus(int n, int rank, int error, string note)
+    /// small scheme. Carries no grids — just n, the current best (muls), and a human note.
+    ///
+    /// The residual is published as -1 (= "not applicable"), NOT 0: there is no search residual on this
+    /// path, and 0 is the value that means "exact decomposition found". The dashboard hides -1.</summary>
+    public static void PublishStatus(int n, int rank, string note)
     {
         string safe = (note ?? "").Replace("\\", " ").Replace("\"", "'").Replace("\n", " ").Replace("\r", " ");
-        Publish($"{{\"n\":{n},\"rank\":{rank},\"note\":\"{safe}\"}}", error);
+        Publish($"{{\"n\":{n},\"rank\":{rank},\"note\":\"{safe}\"}}", -1);
     }
 
     /// <summary>The latest published snapshot wrapper, or "" if none. The dashboard parses ts/error/scheme.</summary>

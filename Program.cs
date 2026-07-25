@@ -154,6 +154,67 @@ switch (args[0].ToLowerInvariant())
         break;
     }
 
+    // raceonce [size] → run exactly ONE race round at this size with NO LLM and NO hive, so you can see
+    // what the free engines alone produce. Deliberately hive-free: it clears the TURSO_* vars for this
+    // process first, so a debugging run can never write to the live hive's champion table.
+    case "raceonce":
+    {
+        int rsize = args.Length >= 2 && int.TryParse(args[1], out int rs) ? rs : 8;
+        Environment.SetEnvironmentVariable("TURSO_DATABASE_URL", null);
+        Environment.SetEnvironmentVariable("TURSO_AUTH_TOKEN", null);
+        var rcore = new AgentCore(null);
+        Console.WriteLine($"== one race round at {rsize}x{rsize}, free engines only (no LLM, no hive) ==");
+        var outcome = await MatmulRace.RunRoundAsync(
+            null, rcore, 9000, rsize, MatmulLadder.MetricFor(rsize),
+            log: s => Console.WriteLine("   " + s));
+        Console.WriteLine($"   worked={outcome.Worked}");
+        Console.WriteLine(outcome.Round is null ? "   no candidate survived" : "   " + outcome.Round.Summary);
+        break;
+    }
+
+    // ladder → print the size ladder this machine will climb and where it stops (HAL_MAX_SIZE). The
+    // ladder has no built-in end: above the written-down rungs it doubles forever, and the only limit
+    // is what this box can hold and time. No key, hive or network needed.
+    case "ladder":
+    {
+        Console.WriteLine($"== Prime Directive ladder (HAL_MAX_SIZE = {MatmulLadder.MaxSize}) ==");
+        foreach (int s in MatmulLadder.Rungs)
+        {
+            string metric = MatmulRace.MetricName(MatmulLadder.MetricFor(s));
+            double mem = 3.0 * s * s * 8 / (1024 * 1024);   // three double[n,n] matrices per round
+            Console.WriteLine($"   {s,6}x{s,-6} [{metric,-4}] ~{mem,7:F1} MB of matrices per round");
+        }
+        Console.WriteLine("   ...and it keeps doubling from there — raise HAL_MAX_SIZE to add rungs.");
+        break;
+    }
+
+    // meshtest → prove a hired worker actually JOINS the mesh (the bug that kept the box solo in
+    // production). Loopback only; no API key, hive or internet needed.
+    case "meshtest":
+        await SwarmNode.SelfTestAsync();
+        break;
+
+    // compose [maxSize] → LLM-FREE COMPOSITION: build exact algorithms for every power-of-two size by
+    // composing the base 2x2 scheme with itself (8x8 in 343 muls, 16x16 in 2401, 32x32 in 16807), each
+    // one compiled, mul-counted and exact-verified. No API key, hive or network — this is the engine
+    // that keeps HAL improving at sizes the direct tensor search is too large to attempt.
+    case "compose":
+    {
+        int cmax = args.Length >= 2 && int.TryParse(args[1], out int cm) ? cm : 32;
+        SchemeCompose.Demo(cmax);
+        break;
+    }
+
+    // tune [size] → LLM-FREE AUTOTUNING: compile, correctness-check and benchmark every free kernel
+    // family (ikj / transposed / blocked tiles / recursive Strassen) at this size. This is what keeps
+    // the WALL-CLOCK half of the ladder improving with no API key and no budget.
+    case "tune":
+    {
+        int tsize = args.Length >= 2 && int.TryParse(args[1], out int ts) ? ts : 128;
+        KernelTuner.Demo(tsize);
+        break;
+    }
+
     // dashboard [port] → LIVE mission-control web UI (bite 18). Serves a local page that polls the
     // shared hive (Turso) and renders the race, ladder, champions, goals, journal, and event feed.
     // Needs TURSO_* env vars; no API key required (read-only). Default port 8765.

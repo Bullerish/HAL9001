@@ -208,16 +208,17 @@ public static class Dashboard
 
         try
         {
-            var (idx, stale, done) = await core.GetLadderAsync();
-            int cur = MatmulLadder.Sizes[Math.Clamp(idx, 0, MatmulLadder.Sizes.Length - 1)];
+            var (idx, stale, _) = await core.GetLadderAsync();
+            int cur = MatmulLadder.SizeAt(Math.Clamp(idx, 0, MatmulLadder.RungCount - 1));
             ladder = new
             {
-                sizes = MatmulLadder.Sizes,
+                sizes = MatmulLadder.Rungs,          // grows with HAL_MAX_SIZE — 256 is not the end
                 currentSize = cur,
                 metric = MatmulRace.MetricName(MatmulLadder.MetricFor(cur)),
                 stale,
                 plateauMax = MatmulLadder.PlateauRounds,
-                done,
+                maxSize = MatmulLadder.MaxSize,
+                done = false,                        // the ladder has no terminal state any more
             };
         }
         catch { }
@@ -302,7 +303,7 @@ public static class Dashboard
         try
         {
             var (idx, _, _) = await core.GetLadderAsync();
-            size = MatmulLadder.Sizes[Math.Clamp(idx, 0, MatmulLadder.Sizes.Length - 1)];
+            size = MatmulLadder.SizeAt(Math.Clamp(idx, 0, MatmulLadder.RungCount - 1));
             var champ = await core.GetMatmulChampionAsync(size);
             target = (champ is not null ? (int)champ.Score : size * size * size) - 1;
         }
@@ -633,7 +634,8 @@ public static class Dashboard
     //   • rate-limited per IP, body size-capped, JSON strictly parsed;
     //   • boost is bounded/clamped in AgentCore; an "ask" is sanitized + queued, never executed —
     //     HAL only ever REPLIES to it via the tool-less voice path. No code generation, ever.
-    private sealed record DonatePayload(string? Action, int? Minutes, double? Usd, string? Text, string? From, string? Vid, int? Tokens);
+    private sealed record DonatePayload(string? Action, int? Minutes, double? Usd, string? Text, string? From, string? Vid, int? Tokens,
+                                        string? Ref);   // tokens: caller-supplied idempotency key (one per payment)
 
     private static async Task<string> HandleDonateAsync(AgentCore core, HttpListenerContext ctx, string ip)
     {
@@ -667,10 +669,17 @@ public static class Dashboard
         }
         if (action == "tokens")
         {
-            // Credit tokens to a visitor's wallet (Stripe webhook → this, with the buyer's vid). Tokens are
-            // what unlock the paid menu actions (invent-a-tool, boost). Budget is still the hard cost cap.
+            // Credit tokens to a visitor's wallet (your own server-side fulfilment → this, with the buyer's
+            // vid). Tokens unlock the paid menu actions (invent-a-tool, boost); budget is still the hard cost cap.
             if (string.IsNullOrEmpty(p.Vid)) { ctx.Response.StatusCode = 400; return Err("missing vid"); }
             int n = Math.Clamp(p.Tokens ?? 0, 1, 1000);
+            // IDEMPOTENCY: a caller that retries (network blip, at-least-once webhook) must not double-credit
+            // a wallet or double-fund the thinking budget. Pass a stable `ref` per payment and the claim table
+            // — the same one the Stripe webhook uses — makes the second attempt a no-op. Without a ref we
+            // cannot dedupe, so the request is refused rather than silently risking a double credit.
+            if (string.IsNullOrWhiteSpace(p.Ref)) { ctx.Response.StatusCode = 400; return Err("missing ref (idempotency key)"); }
+            if (!await core.ClaimStripeEventAsync("donate:" + p.Ref))
+                return JsonSerializer.Serialize(new { ok = true, duplicate = true, tokens = await core.WalletBalanceAsync(p.Vid!) }, JsonOpts);
             int bal = await core.WalletCreditAsync(p.Vid!, n);
             // Also fund today's thinking budget so the buyer's steers can actually run (HAL_DAILY_USD=0 ⇒
             // nothing thinks unless paid). Price it from the matching pack; an allowance/cap, not a transfer.
@@ -1490,7 +1499,7 @@ async function refreshMatrix(){
     const grid=$("mx-grid"),stat=$("mx-stat"); if(!grid||!stat)return;
     if(d.grids){
       grid.textContent=d.grids;
-      if(d.working){stat.textContent="● working now · err "+d.error;stat.className="mxstat live";if(sound){sfx.blip();startProcessing(1500);}}
+      if(d.working){stat.textContent="● working now"+(d.error>=0?" · err "+d.error:"");stat.className="mxstat live";if(sound){sfx.blip();startProcessing(1500);}}
       else{stat.textContent=(d.ageSec>=0?"last worked "+d.ageSec+"s ago":"idle")+(d.error>=0?" · err "+d.error:"");stat.className="mxstat";}
     }else{
       stat.textContent="idle";stat.className="mxstat";
@@ -1711,7 +1720,12 @@ async function tick(){
   }).join(""):'<div class="empty">no events yet.</div>';
   $("journal").textContent=s.journal?s.journal.entry:"—";
   $("boost").style.display=s.boosted?"":"none";
-  if(s.budget){var bd=s.budget,cap=bd.limit+bd.bonus; if(bd.remaining<=0){$("budget").textContent="thinking paused";$("budget").style.color="var(--gold)";}else{$("budget").textContent="budget $"+bd.spent.toFixed(2)+"/$"+cap.toFixed(2);$("budget").style.color="var(--dim)";}}
+  // The budget meter measures ONE thing: money spent on the language model. It is NOT a measure of
+  // whether HAL is working — the matrix engines (composition, tensor search, autotuning, peer rounds)
+  // run on CPU and never stop. Saying "thinking paused" here was simply wrong once those existed.
+  if(s.budget){var bd=s.budget,cap=bd.limit+bd.bonus;
+    if(bd.remaining<=0){$("budget").textContent="LLM idle · matrix engines running";$("budget").title="Nobody has funded language-model time today, so HAL is not spending on it. It is still deriving and benchmarking algorithms on CPU — that part is free and always on. Buy tokens to switch the language model on.";$("budget").style.color="var(--gold)";}
+    else{$("budget").textContent="budget $"+bd.spent.toFixed(2)+"/$"+cap.toFixed(2);$("budget").title="Language-model spend funded for today. The free matrix engines run regardless.";$("budget").style.color="var(--dim)";}}
   $("asks").innerHTML=(s.asks&&s.asks.length)?s.asks.map(a=>'<div style="padding:7px 0;border-bottom:1px solid var(--line)"><div style="font-size:12px;color:#ff7a5c">▸ '+esc(a.sender)+': '+esc(a.text)+'</div>'+(a.reply?'<div style="font-size:13px;color:var(--txt);margin-top:3px">HAL: '+esc(a.reply)+'</div>':'<div style="font-size:11px;color:var(--dim);margin-top:3px">awaiting response…</div>')+'</div>').join(""):'<div class="empty">no transmissions yet.</div>';
   react(s);
 }

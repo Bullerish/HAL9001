@@ -35,9 +35,12 @@ These are invariants the project intends to hold. A report that breaks one of th
   fixed, server-side choice menu (the client sends only an opaque choice/pack **id**, mapped
   server-side to a fixed action) and a *tool-less* Q&A path. Even a fully successful prompt
   injection can only make HAL *say* something — it cannot make it execute attacker-supplied code.
-- **Wallets can only be credited by a Stripe-signed webhook.** The webhook verifies the Stripe
-  signature (constant-time), is idempotent against replay, and fails closed. The browser only ever
-  holds an opaque `halvid` cookie — never a balance — and every spend is re-validated server-side.
+- **A browser can never credit a wallet.** There are exactly two credit paths, both server-side and
+  both idempotent: the Stripe webhook (verifies the Stripe signature in constant time, dedupes by
+  session id, fails closed), and the `tokens` action on `/api/donate`, which is disabled unless
+  `HAL_DONATE_SECRET` is set, requires that secret in a header, and dedupes on a caller-supplied
+  `ref`. The browser only ever holds an opaque `halvid` cookie — never a balance — and every spend
+  is re-validated server-side.
 - **Volunteer compute is trustless.** Donated workers send only numbers; the coordinator
   re-verifies every submission. No code is exchanged, so a malicious volunteer cannot inject code.
 - **Static file serving is allow-listed.** Audio is served only from a fixed in-memory map of

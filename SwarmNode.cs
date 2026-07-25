@@ -41,7 +41,8 @@ namespace HAL9001;
 public sealed class SwarmNode : IAsyncDisposable
 {
     private const int RetryIntervalMs = 2000;   // maintenance loop cadence
-    private const int MaxDialAttempts = 60;     // ~2 min of retries, then presume that peer gone (cap)
+    private const int MaxDialAttempts = 60;     // ~2 min of fast retries, then fall back to slow retries
+    private const int SlowRetryEvery = 30;      // ...one attempt per 30 cycles (~1 min) after that
 
     private readonly int _listenPort;
     private readonly string _myId;
@@ -95,17 +96,37 @@ public sealed class SwarmNode : IAsyncDisposable
     // Continuously make the mesh whole: dial known higher-port peers we're not connected to.
     private async Task MaintenanceLoopAsync()
     {
+        long cycle = 0;
         while (!_cts.IsCancellationRequested)
         {
+            cycle++;
             foreach (string id in _known.Keys)
             {
                 if (_peers.ContainsKey(id)) { _dialFailures[id] = 0; continue; }   // already connected
                 if (PortOf(id) <= _listenPort) continue;                            // dial-direction: lower dials higher
-                if (_dialFailures.GetValueOrDefault(id) >= MaxDialAttempts) continue; // gave up (cap)
+                // Past the fast-retry cap we SLOW DOWN rather than give up forever. On a box that runs
+                // for weeks, "gave up" meant a peer that was down for two minutes could never rejoin —
+                // the mesh only ever shrank. A cheap heartbeat-rate redial keeps healing possible.
+                if (_dialFailures.GetValueOrDefault(id) >= MaxDialAttempts && cycle % SlowRetryEvery != 0) continue;
                 _ = DialOnceAsync(id);
             }
             try { await Task.Delay(RetryIntervalMs, _cts.Token); } catch { break; }
         }
+    }
+
+    /// <summary>
+    /// Tell this node about a member it should stay connected to. This is what a node that SPAWNS a
+    /// helper must call: the maintenance loop only dials peers it knows about, and only ever from the
+    /// lower port to the higher one — so a freshly hired worker (which always takes a higher port)
+    /// would sit there forever waiting to be dialed by a parent that had never heard of it. That is
+    /// exactly why hired nodes were seen to start but never join the mesh in production.
+    /// </summary>
+    public void AddKnownPeer(int port)
+    {
+        if (port == _listenPort) return;
+        string id = $"127.0.0.1:{port}";
+        _known.TryAdd(id, 0);
+        _dialFailures[id] = 0;      // fresh member: start its dial budget over
     }
 
     private async Task DialOnceAsync(string id)
@@ -315,6 +336,49 @@ public sealed class SwarmNode : IAsyncDisposable
         foreach (PeerLink link in _peers.Values.ToArray()) link.Dispose();
         _peers.Clear();
         _cts.Dispose();
+    }
+
+    /// <summary>
+    /// Regression test for the mesh-formation bug (`dotnet run -- meshtest`, no key/hive/network
+    /// beyond loopback). It reproduces the exact production shape: a "parent" listening on a low port
+    /// and a "worker" started on a HIGH port that was told about the parent. Because only the lower
+    /// port dials, the link can ONLY form once the parent is told the worker exists — which is what
+    /// <see cref="AddKnownPeer"/> does and what the hire path had been failing to do.
+    ///
+    /// Phase 1 asserts the broken shape stays unconnected (so the test can actually fail);
+    /// phase 2 calls AddKnownPeer and asserts the link forms.
+    /// </summary>
+    public static async Task<bool> SelfTestAsync()
+    {
+        const int parentPort = 9411, workerPort = 9412;
+        Console.WriteLine("== swarm mesh self-test (loopback only) ==");
+        await using var parent = new SwarmNode(parentPort);
+        await using var worker = new SwarmNode(workerPort);
+        await parent.StartAsync(Array.Empty<int>());          // parent knows nobody — as after a fresh spawn
+        await worker.StartAsync(new[] { parentPort });        // worker was told its parent, as `swarm <p> <peer>` does
+
+        async Task<bool> Linked(int seconds)
+        {
+            for (int i = 0; i < seconds * 4; i++)
+            {
+                if (parent.Peers.Count > 0 && worker.Peers.Count > 0) return true;
+                await Task.Delay(250);
+            }
+            return false;
+        }
+
+        bool earlyLink = await Linked(3);
+        Console.WriteLine($"   phase 1 — parent unaware of the worker: linked={earlyLink} (expect False: only lower→higher dials)");
+
+        parent.AddKnownPeer(workerPort);                      // the one line the hire path was missing
+        bool linked = await Linked(10);
+        Console.WriteLine($"   phase 2 — after AddKnownPeer({workerPort}): linked={linked} (expect True)");
+        Console.WriteLine($"   parent peers: [{string.Join(", ", parent.Peers)}]");
+        Console.WriteLine($"   worker peers: [{string.Join(", ", worker.Peers)}]");
+
+        bool pass = !earlyLink && linked;
+        Console.WriteLine(pass ? "   PASS — hired nodes join the mesh." : "   FAIL — the mesh did not form as expected.");
+        return pass;
     }
 
     private sealed class PeerLink : IDisposable
