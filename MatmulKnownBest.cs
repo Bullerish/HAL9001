@@ -36,6 +36,19 @@ public static class MatmulKnownBest
         BelowLowerBound, // fewer muls than a PROVEN lower bound — impossible ⇒ our verification has a bug
     }
 
+    /// <summary>The PROVEN lower bound for a size, or 0 when none is known here. Used to avoid hunting
+    /// a rank that mathematics has already ruled out: searching 2×2 for rank 6 can never succeed
+    /// (7 is proven optimal), and burning the mesh's CPU on it forever is not "thinking", it is a
+    /// treadmill. A size whose champion already equals its proven bound is SOLVED — move on.</summary>
+    public static int ProvenLower(int size) => Table.TryGetValue(size, out var e) ? e.Lower : 0;
+
+    /// <summary>True if a search for exactly this rank is worth starting at all.</summary>
+    public static bool WorthAttempting(int size, long rank)
+    {
+        int lower = ProvenLower(size);
+        return lower <= 0 || rank >= lower;
+    }
+
     /// <summary>Classify a verified multiplication count for a size against what humanity knows.</summary>
     public static (Verdict V, int Best, int Lower) Classify(int size, long muls)
     {

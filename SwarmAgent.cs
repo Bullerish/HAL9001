@@ -532,10 +532,17 @@ public static class SwarmAgent
                 MatmulRace.Champion? c = await core.GetMatmulChampionAsync(cand);
                 long best = c is not null ? (long)c.Score : (long)cand * cand * cand;
                 int t = (int)Math.Min(int.MaxValue, best) - 1;
-                if (t >= 1 && TensorSearch.Feasible(cand, t)) { size = cand; target = t; break; }
+                if (t < 1) continue;
+                // Never hand the mesh a target mathematics has already ruled out. 2×2 sits at 7, which
+                // is PROVEN optimal, so "find rank 6" is an infinite treadmill, not work. Skipping it
+                // sends the swarm to 3×3 instead — where the champion is 27, the best known is 23, and
+                // the true optimum is an open problem in [19,23]. That is worth CPU; rank 6 is not.
+                if (!MatmulKnownBest.WorthAttempting(cand, t)) continue;
+                if (!TensorSearch.Feasible(cand, t)) continue;
+                size = cand; target = t; break;
             }
             peerRoundTick++;
-            if (size == 0) return;   // nothing feasible to hand out right now
+            if (size == 0) return;   // nothing worth handing out right now
             string reqId = Guid.NewGuid().ToString("N")[..8];
             var seedRng = new Random();
             foreach (string peer in peers)

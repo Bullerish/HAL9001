@@ -332,6 +332,14 @@ public static class MatmulRace
         // would not fit the memory budget.
         long floor = bestMuls < double.MaxValue ? Math.Min(currentBest, (long)bestMuls) : currentBest;
         int target = (int)Math.Min(int.MaxValue, floor) - 1;
+        // Don't hunt a rank that is already PROVEN impossible (2×2 below 7). A size sitting on its
+        // proven lower bound is solved; grinding it forever would look like work and be none.
+        if (target >= 1 && !MatmulKnownBest.WorthAttempting(size, target))
+        {
+            log?.Invoke($"tensor-search: {size}x{size} rank-{target} is below the PROVEN lower bound " +
+                        $"({MatmulKnownBest.ProvenLower(size)}) — this size is solved, nothing to search");
+            target = 0;
+        }
         if (target >= 1)
         {
             log?.Invoke($"tensor-search: targeting rank-{target} for {size}x{size}...");
