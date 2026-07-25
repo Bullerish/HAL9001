@@ -15,10 +15,34 @@ of the local secrets or tooling yet in place.
 
 ---
 
-## ⏩ Pick up here — session of 2026-07-24 (thinking that never stops)
+## ⏩ Pick up here — session of 2026-07-25 (thinking that never stops) — **SHIPPED & LIVE**
 
 **What changed, in one line:** HAL no longer needs an LLM to get better. Every rung of the ladder now
 improves on CPU alone, and the language model became the thing a *paid* visitor switches on.
+
+**State at handoff:** `main` = `c029cc6`, pushed, **deployed** (two green `deploy.yml` runs:
+[30158608107](https://github.com/Bullerish/HAL9001/actions/runs/30158608107),
+[30158692518](https://github.com/Bullerish/HAL9001/actions/runs/30158692518)). Working tree clean.
+Verified live on hal9001.io straight after deploy:
+
+| what | before | after deploy |
+|---|---|---|
+| `nodesLive.total` | 1 | **3** (mesh self-scaled; `HAL_TARGET_NODES` default 2 + churn) |
+| `ladder.sizes` | ends at 256 | `[…,256,512,1024,2048]`, `maxSize:2048`, `done:false` |
+| free peer rounds | didn't exist | `> peer round: 2 node(s) hunting 3x3 rank-26 (free)` |
+| ladder cursor | `256, stale 8, done:true` | `256, plateau 8/8` → climbs to **512** next round |
+
+**⚠ The one thing NOT yet confirmed on the box:** the muls champions are still
+`2=7, 3=27, 4=56, 16=2744`. Composition should take **4×4 → 49** and **16×16 → 2401** the first time a
+round races those sizes — but the cursor is up at 256 and the small-size side round only fires every 4th
+race tick (~45 min at `HAL_PACE=slow`). **First thing to check on the new machine:**
+
+```bash
+curl -s https://hal9001.io/api/state | grep -o '"size":4,"metric":"muls","score":[0-9]*'
+```
+Expect `score:49`. If it is still 56 after an hour of uptime, look at `/api/live` for `compose:` lines and
+at `journalctl -u hal-swarm -n 200` on the box — the composition path is the highest-value new engine and
+it is the one claim in this session I did not get to observe end-to-end in production.
 
 - **Free engines:** `SchemeCompose` (recursive composition — 4×4 in 49 muls, 8×8 in 343, 16×16 in 2401,
   32×32 in 16807, all exact-verified) and `KernelTuner` (parametric autotuning for the wall-clock sizes;
@@ -29,9 +53,11 @@ improves on CPU alone, and the language model became the thing a *paid* visitor 
   fixes it; `dotnet run -- meshtest` reproduces the old shape then proves the new one. `HAL_TARGET_NODES`
   is back on by default (**2**).
 - **Nodes query each other for free:** every ~2 min the leader hands each peer its own search seed for
-  the current ladder size; results come back as numbers and are **re-proven locally** before adoption.
-- **Ladder:** no longer stops at the top (it laps), and a round that *couldn't* run no longer counts as
-  convergence — it's reported as a skip.
+  a small size; results come back as numbers and are **re-proven locally** before adoption (parse →
+  residual 0 → compile → BigInteger exact verify). A peer is never trusted.
+- **Ladder:** a round that *couldn't* run no longer counts as convergence — it's reported as a skip. And
+  it never hunts a rank that is already **proven impossible** (2×2 below 7): the first live peer round
+  after deploy was grinding 2×2 rank-6 forever, which is a treadmill, not work. Fixed in `c029cc6`.
 - **Memory bug that mattered:** the n⁶ cap ignored the `rank · n⁴` basis, so 16×16 was allowed and peaked
   at **1.24 GB** measured. Now budgeted end-to-end via `HAL_SEARCH_MEM_MB` (default 256).
 
@@ -40,25 +66,50 @@ improves on CPU alone, and the language model became the thing a *paid* visitor 
   (measured: 512 ≈ 13s, 1024 ≈ 91s, 2048 ≈ 7min). There is no `done` state; a `done:true` row left by an
   older build is picked up and climbed from. `dotnet run -- ladder` prints the rungs.
 
-**▶ DO FIRST — the three things the live site is showing right now, and what each needs:**
-1. **"1 live node".** The mesh fix is code, so it needs the deploy. It ALSO needs the box env: if
-   `/etc/hal9001/hal.env` still has `HAL_TARGET_NODES=0` (the old example shipped that), the new default
-   of 2 will not apply — an explicit 0 means "off". Set it to `2` (or delete the line) and restart.
-   Check with `journalctl -u hal-swarm | grep hire` and the dashboard's node count.
-2. **"thinking paused".** Two parts: the pill now reads "LLM idle · matrix engines running" (deploy),
-   and it is *accurate* only because the CPU engines exist now. If you also want the language model on
-   without waiting for a buyer, set `HAL_DAILY_USD` above 0 — that is a deliberate spend of your key.
-3. **"256×256 is the last rung".** Fixed in code (see above). The live row currently says
-   `currentSize:256, stale:8, done:true`; the new build reopens it and carries on climbing.
+**▶ ON THE NEW MACHINE — 5 minutes, in order:**
 
-Then: review + push, then `gh workflow run deploy.yml`. After deploy the box should show `peer-round` /
-`matmul-round` events within minutes **even with `HAL_DAILY_USD=0`** — that is the check that it worked.
-New env keys are all optional (sane defaults): `HAL_TARGET_NODES=2`, `HAL_PEERROUND_SECS`,
-`HAL_PEERSEARCH_SECS`, `HAL_SEARCH_MEM_MB`, `HAL_MAX_SIZE`.
+```powershell
+git clone git@hal9001.github.com:Bullerish/HAL9001.git   # needs the deploy key + ssh alias from §5.3
+cd HAL9001
+git config core.hooksPath .githooks                       # the pre-push secret/PII guard (public repo!)
+# (optional) a private canary string for that guard, never committed:
+# git config hal.piiCanary '<something local you never want pushed>'
 
-**Note for the fresh-clone recipe:** `git config core.hooksPath .githooks` is now set on this machine.
-The hook's PII canary no longer hard-codes a username (it matches any `C:\Users\<name>` path, and you
-can add a private one with `git config hal.piiCanary '<string>'`).
+# The three env vars, User scope (see §5.2 — the TURSO_* pair is what reaches the live hive):
+[Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY','<key>','User')
+[Environment]::SetEnvironmentVariable('TURSO_DATABASE_URL','<url>','User')
+[Environment]::SetEnvironmentVariable('TURSO_AUTH_TOKEN','<token>','User')
+# then OPEN A NEW TERMINAL so they're picked up.
+
+dotnet build                     # expect 0 warnings / 0 errors
+dotnet run -- racetest           # naive 8 / Strassen 7 / verifier accepts+rejects / peer-scheme trust
+dotnet run -- meshtest           # PASS — hired nodes join the mesh
+dotnet run -- compose 32         # 4x4=49, 8x8=343, 16x16=2401, 32x32=16807, all exact-verified
+dotnet run -- ladder             # the rungs this box will climb + per-round memory
+dotnet run -- timeline           # proves the TURSO_* vars reach the live hive
+```
+
+None of the first four need a key, hive, or network — they are the acceptance tests for this session's
+work. `timeline` is the one that proves your env is wired to production.
+
+**New CLI commands added this session:** `compose [max]`, `tune [size]`, `ladder`, `meshtest`,
+`raceonce [size]` (one race round, *deliberately hive-free* — it clears `TURSO_*` in-process so a
+debugging run can never write to the live champion table).
+
+**New env keys** — all optional with sane defaults, documented in `deploy/hal.env.example`:
+`HAL_TARGET_NODES=2`, `HAL_PEERROUND_SECS=120`, `HAL_PEERSEARCH_SECS=8`, `HAL_SEARCH_MEM_MB=256`,
+`HAL_MAX_SIZE=2048`. Nothing on the box needs changing for the current build to behave — but if you want
+bigger matrices, `HAL_MAX_SIZE` is the single knob (each doubling ≈ 8× the wall-clock per round).
+
+**Where the interesting work is now (highest → lowest leverage):**
+1. **3×3.** The hive's champion is **27 muls, which is just naive**. Best known to humanity is 23
+   (Laderman); the true optimum is an OPEN problem in [19,23]. The mesh is now hunting rank-26 there
+   every ~2 min for free. A correct 22 would be a genuine result. This is the single most valuable
+   thing the hive owns and it was being ignored until this session.
+2. **A better small base compounds.** Any improvement at 3×3 or 4×4 is inherited by every larger size
+   through `SchemeCompose.BestBaseAsync` on the next round. That is the growth mechanism now.
+3. **Bite 17's search is still weak** (2×2 rank-7 from random ≈ 1 in 9 — see the `bite17-search-notes`
+   memory). Composition routed around it, but a stronger search directly feeds (1) and (2).
 
 ---
 
