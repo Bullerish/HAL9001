@@ -398,6 +398,19 @@ public static class MatmulRace
                 long muls = Scalar.Muls;
                 worked = true;
                 if (!CompareScalar(reference, got)) { log?.Invoke($"  correctness FAIL [{Short(cand.Strategy, 30)}] {muls} muls"); continue; }
+
+                // The float check above runs ONE fixed input pair (seed 20260621) with a 1e-9 tolerance.
+                // That is enough to rank, but not enough to ADOPT: the seed never changes, and
+                // `refine-champion` iterates on the champion round after round, so a candidate that is
+                // wrong in general but happens to agree on that one pair could be refined straight onto
+                // the board. The free engines (tensor search, composition) have always been held to
+                // many-random-integer BigInteger exact verification — hold the LLM's work to the same bar.
+                // Fewer trials for the bigger rungs (each trial also runs a BigInteger reference multiply);
+                // by Schwartz–Zippel a wrong scheme surviving even 16 independent random integer inputs is
+                // vanishingly unlikely.
+                if (!VerifyExact(fn, size, size >= 16 ? 16 : ExactTrials))
+                { log?.Invoke($"  exact-verify FAIL [{Short(cand.Strategy, 30)}] {muls} muls — passed the float check but is not exact"); continue; }
+
                 log?.Invoke($"  OK {muls} muls [{Short(cand.Strategy, 30)}]" + (muls < bestMuls ? " ← new best" : ""));
                 if (muls < bestMuls) { bestMuls = muls; bestStrategy = cand.Strategy; bestSource = cand.Source; bestScheme = null; }
             }
