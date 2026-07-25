@@ -1212,6 +1212,80 @@ public static class SwarmAgent
             }
         }
 
+        // ── the grinder: HAL is never idle, and the screen always has something TRUE to print ──────
+        // The race fires once every MatmulRaceIntervalSecs — 12 minutes at HAL_PACE=slow — so between
+        // rounds the box did nothing and the live pane had nothing new to show. That pacing exists to
+        // throttle TOKEN BURN, but the free engines (tensor search, composition, autotuning) spend no
+        // tokens at all: a cost knob was throttling work that costs nothing but idle CPU.
+        //
+        // So: grind continuously. Short bursts of real derivation on the sizes where a better ALGORITHM
+        // can still exist, streaming genuine progress — restarts, residuals, the rank being hunted — and
+        // ADOPTING anything it actually finds. Leader-only, and duty-cycled so a small box keeps a core
+        // free for serving the page. Costs $0, runs whether or not anyone has paid.
+        double GrindSecs = 6.0, GrindRestSecs = 3.0; bool grindOn = true;
+        {
+            string? g = Environment.GetEnvironmentVariable("HAL_GRIND");
+            if (g is not null && (g == "0" || g.Equals("off", StringComparison.OrdinalIgnoreCase))) grindOn = false;
+            if (double.TryParse(Environment.GetEnvironmentVariable("HAL_GRIND_SECS"), out double gs) && gs > 0) GrindSecs = Math.Clamp(gs, 1, 60);
+            if (double.TryParse(Environment.GetEnvironmentVariable("HAL_GRIND_REST_SECS"), out double gr) && gr >= 0) GrindRestSecs = Math.Clamp(gr, 0, 60);
+        }
+        async Task GrinderLoop()
+        {
+            var rng = new Random(node.Id.GetHashCode() ^ Environment.TickCount);
+            while (grindOn && !loopCts.IsCancellationRequested)
+            {
+                try
+                {
+                    bool amLeader; lock (stateLock) amLeader = coordinator == node.Id;
+                    bool isAuto = false;
+                    if (amLeader && core.HasHive) { try { isAuto = await core.IsAutonomousAsync(); } catch { } }
+                    if (!amLeader || !isAuto) { await Task.Delay(4000, loopCts.Token); continue; }
+
+                    int[] open = MatmulLadder.SideRungs;
+                    if (open.Length == 0) { await Task.Delay(4000, loopCts.Token); continue; }
+                    // Weighted to 3x3: it is the only size with real headroom left (27 today, 23 published,
+                    // optimum open in [19,23]) and any gain there composes into every larger size.
+                    int size = rng.Next(100) < 55 && open.Contains(3) ? 3 : open[rng.Next(open.Length)];
+
+                    long best;
+                    try { var champ = await core.GetMatmulChampionAsync(size); best = champ is not null && champ.Metric == MatmulRace.Metric.Muls ? (long)champ.Score : (long)size * size * size; }
+                    catch { best = (long)size * size * size; }
+                    int target = (int)best - 1;
+                    if (target < 1 || !MatmulKnownBest.WorthAttempting(size, target)) { await Task.Delay(4000, loopCts.Token); continue; }
+
+                    LiveLog.Append($"~ grinding {size}x{size} for rank-{target} (free CPU, no model)");
+                    long tick = 0; int bestErr = -1;
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    // CPU-bound: run it off the async context so the node's other loops keep serving.
+                    TensorSearch.Decomposition? found = await Task.Run(() =>
+                    {
+                        var d = TensorSearch.Search(size, target, out int e, maxSeconds: GrindSecs,
+                            onProgress: p => { if (sw.ElapsedMilliseconds - tick >= 900) { tick = sw.ElapsedMilliseconds; LiveLog.Append("   " + p); } },
+                            onSnapshot: (dec, err) => LiveMatrix.Publish(MatmulRace.SchemeJson(dec), err));
+                        bestErr = e; return d;
+                    }, loopCts.Token);
+
+                    // Always report the pass, so a search that plateaus still prints a real number rather
+                    // than going silent — the residual IS the calculation, and watching it sit at 27 is
+                    // the honest picture of how hard 3x3 is.
+                    if (found is null)
+                        LiveLog.Append($"   {size}x{size}: no rank-{target} this pass · best residual {TensorSearch.ErrText(bestErr)}");
+
+                    if (found is TensorSearch.Decomposition win)
+                    {
+                        // Never discard a real find: re-prove it locally and put it on the board.
+                        string json = MatmulRace.SchemeJson(win);
+                        var (adopted, muls, note) = await MatmulRace.TryAdoptSchemeAsync(core, json, node.Id, "grinder (LLM-free derivation)");
+                        LiveLog.Append(adopted ? $"OK GRINDER FOUND IT — {note}" : $"   grinder: {note}");
+                        if (adopted) { try { await core.Events.AppendAsync("matmul-record", note); } catch { } }
+                    }
+                }
+                catch (OperationCanceledException) { break; }
+                catch (Exception ex) { LiveLog.Append($"   grinder error: {ex.Message}"); }
+                try { await Task.Delay(TimeSpan.FromSeconds(GrindRestSecs), loopCts.Token); } catch { break; }
+            }
+        }
+
         // ── Prime Directive ladder loop (bites 14+15) ────────────────────────────────────────
         // Fires every MatmulRaceIntervalSecs or immediately when a peer challenge arrives. Each tick
         // runs ONE ladder step: race the swarm's current size once (mult-count metric for small sizes,
@@ -1426,6 +1500,7 @@ public static class SwarmAgent
         _ = AskerRecoveryLoop();
         _ = CuriosityLoop();
         _ = MatmulRaceLoop();
+        _ = GrinderLoop();   // free, continuous — so the hive is never idle and the page is never static
 
         void KillHired() { foreach (var hp in hiredProcesses) { try { hp.Kill(entireProcessTree: true); } catch { } } }
         // Ctrl+C: prevent immediate kill, clean up children, then let the REPL exit via null readline.

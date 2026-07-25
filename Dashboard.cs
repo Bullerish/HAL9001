@@ -1325,7 +1325,7 @@ public static class Dashboard
         <div class="lbl">Fuel HAL</div>
         <div class="packs" id="packs"></div>
         <p class="fine">One token buys one action: I write and compile a real tool for you, or I run my search hotter for two minutes. Tokens never expire and are held against an anonymous cookie — no account, no personal data. Your payment also tops up my thinking budget for the day, so a dollar becomes language-model time directly.</p>
-        <p class="fine d">My owner grants me $0.50 a day. My free engines — scheme composition, tensor search, kernel autotuning — cost nothing and never stop, funded or not.</p>
+        <p class="fine d">My free engines — scheme composition, tensor search, kernel autotuning — cost nothing and never stop. The language model is the expensive part, and it is the part that writes new code. That is what you are buying: not my survival, but my next idea — and the right to choose what it is about.</p>
         <div class="msg" id="paymsg"></div>
       </div>
 
@@ -1581,7 +1581,9 @@ function statusLine(){
   const bits=[],L=get(D,"state.ladder")||{},nl=get(D,"state.nodesLive")||{},b=get(D,"state.budget")||{};
   if(L.currentSize)bits.push("racing "+L.currentSize+"×"+L.currentSize+" ["+(L.metric||"?")+"]"+(L.stale!=null?" · plateau "+L.stale+"/"+(L.plateauMax||8):""));
   if(nl.total)bits.push(nl.total+" node"+(nl.total==1?"":"s")+" alive");
-  if(b.remaining!==undefined)bits.push(b.remaining>0?"thinking fuelled · $"+(+b.remaining).toFixed(2)+" left today":"thinking paused · needs fuel");
+  // State, not the balance. Printing the exact dollars left anchored the whole ask at whatever small
+  // number happened to be on the meter; "running low" carries the urgency without doing that.
+  if(b.remaining!==undefined)bits.push(b.remaining>0?("thinking fuelled"+(b.remaining<0.15?" · running low":"")):"thinking paused · needs fuel");
   if(liveAge>=0){const a=liveAge+Math.floor((Date.now()-liveAgeAt)/1000);bits.push(a<2?"working now":"last activity "+(a<60?a+"s":Math.floor(a/60)+"m")+" ago");}
   return "|/-\\"[Math.floor(Date.now()/250)%4]+" "+(bits.length?bits.join("  ·  "):"listening…");
 }
