@@ -49,9 +49,17 @@ jobs:
           scp -i ~/.ssh/deploy_key ./publish-linux/HAL9001.dll \
             "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/hal9001/HAL9001.dll"
 
-      # NOTE: CI deliberately does NOT write to /etc/hal9001/hal.env. A one-time step lived here to
-      # set HAL_DAILY_USD=0 (done — the box now reports limit:0); it was removed so the env file
-      # stays under human control and this pipeline keeps shipping nothing but the DLL.
+      # ── ONE-TIME (remove after it has run once) ────────────────────────────────────────────────
+      # Owner's decision: a 50c/day free allowance, with Stripe contributions stacking on top of it
+      # (a contribution adds to the same day's "bonus", and remaining = limit + bonus - spent).
+      # CI holds the only SSH key to the box, so this is the available lever. Idempotent, keeps a
+      # .bak, and rewrites only this one key — every other secret in the file is untouched.
+      - name: One-time — set the free LLM allowance to $0.50/day
+        run: |
+          ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "sed -i.bak 's/^[[:space:]]*HAL_DAILY_USD[[:space:]]*=.*/HAL_DAILY_USD=0.5/' /etc/hal9001/hal.env; \
+             grep -q '^HAL_DAILY_USD=' /etc/hal9001/hal.env || echo 'HAL_DAILY_USD=0.5' >> /etc/hal9001/hal.env; \
+             echo 'allowance now:' \$(grep '^HAL_DAILY_USD=' /etc/hal9001/hal.env)"
 
       - name: Fix ownership and restart services
         run: |
