@@ -345,6 +345,13 @@ dotnet run -- join 127.0.0.1 5000  # Step-2 raw TCP chat: connect
 
 > Newest first. Each rung was verified before the next was built. Commit hashes are on `main`.
 
+### The visitor voice now answers with facts instead of atmosphere
+Six consecutive replies on the live site opened *"I appreciate your…"*, and one claimed *"my neural architectures continue to refine themselves"* — HAL has no neural architectures. That copy sat directly beneath the panel promising every number on the page is real, so it was actively corrosive to the one thing the site is selling.
+- **Cause:** `RespondToVisitorAsync` was handed *no state at all* — just the visitor's message — so the model filled the vacuum with generic AI-assistant atmosphere. The journal path reads well for the opposite reason: it is handed facts and explicitly forbidden from inventing.
+- **Fix:** a `VisitorFactsAsync` briefing, every line read live — identity and Prime Directive, mood with its actual curiosity/confidence/fatigue numbers, tools written, the size being raced and its plateau count, best multiplication counts for 2/3/4 **against humanity's known best** (including that 2×2 is *proven* optimal and that 3×3 is still behind), the discovery count with the reason it is zero, the active goal, and the last few real events. Nothing hardcoded; all of it derived.
+- The prompt now demands grounding, forbids inventing numbers or capabilities, bans the "I appreciate…" opener, and states plainly what HAL is — *a C# program with a shared database, a compiler, and a search* — and is not.
+- Unchanged: the path stays **tool-less**, and the visitor's message stays untrusted input inside `<<< >>>`. The facts go in as context, never as instructions.
+
 ### 5×5, 6×6 and 7×7 exist now — and the free search stops grinding a solved size
 The ladder ran `2, 3, 4, 8, 16, …`: it **jumped straight from 4 to 8**, so HAL had never once attempted a 5×5. That was not a compute limit — at the 256 MB search budget a 5×5 needs **0.2 MB** (16×16 is what needs ~1 GB). Added rungs **5, 6, 7**.
 - **Why 5×5 is the best unexplored target.** A composition base is only as good as its exponent ω = log(R)/log(n); Strassen's is 2.8074. For an n×n base to beat it, its rank must be under n^ω — that is **< 21.8 for 3×3**, **< 49.0 for 4×4** (HAL has 27 and 49, so neither beats it), but **< 91.7 for 5×5**, which HAL had never even looked at. A verified 5×5 under 92 multiplications would become a better base than Strassen and — through the propagation added earlier today — lift every composable size automatically.
