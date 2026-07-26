@@ -103,6 +103,60 @@ actually *hides* the origin IP.
 
 ---
 
+## 8. Memory: the OOM that took the box down (2026-07-26)
+
+The kernel killed HAL9001 three times over — ~1.4 GB resident **each**, across three processes — and took
+SSH and Caddy with it. The box has **3846 MB and no swap**, so 3 × 1.4 GB was simply fatal, instantly.
+
+Three causes stacked:
+- `HAL_TARGET_NODES=2` started working (the mesh-join fix landed), so the box ran **three** HAL processes
+  where it used to run one. Nothing capped them.
+- The ladder re-climbed to 1024/2048 after new rungs were inserted. A wall-clock round there allocates
+  three `double[n,n]` (~32 MB each at 2048) plus an output per candidate kernel — all on the **Large
+  Object Heap, which .NET never compacts unless asked**, so resident memory only ever grew.
+- A continuous free "grinder" loop made it worse (now default OFF, and bounded to 3×3/4×4).
+
+**The fix that matters is the cgroup ceiling**, applied as drop-ins so the unit files stay untouched:
+
+```bash
+mkdir -p /etc/systemd/system/hal-swarm.service.d /etc/systemd/system/hal-dashboard.service.d
+printf '[Service]
+MemoryAccounting=yes
+MemoryHigh=35%%
+MemoryMax=45%%
+' > /etc/systemd/system/hal-swarm.service.d/memory.conf
+printf '[Service]
+MemoryAccounting=yes
+MemoryHigh=10%%
+MemoryMax=15%%
+' > /etc/systemd/system/hal-dashboard.service.d/memory.conf
+systemctl daemon-reload && systemctl restart hal-swarm hal-dashboard
+systemctl show hal-swarm -p MemoryMax    # must NOT say infinity
+```
+
+Hired workers are **forked by the swarm unit, so they share its cgroup** — one ceiling covers the whole
+mesh. .NET also reads the cgroup limit and sizes its GC heap from it, so the runtime collects harder
+instead of growing until the OOM killer picks a victim at random.
+
+Also add swap — with none, pressure is instant death instead of a slowdown you can catch:
+```bash
+fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
+```
+
+Settings that keep this box comfortable: `HAL_MAX_SIZE=512`, `HAL_TARGET_NODES=1`, `HAL_GRIND=off`.
+
+**Gotcha:** `sed -i 's/^KEY=.*/KEY=new/'` silently does nothing when the key is absent from `hal.env`
+(several keys were added to the template later). Upsert instead:
+```bash
+set_env() { grep -q "^$1=" /etc/hal9001/hal.env && sed -i "s|^$1=.*|$1=$2|" /etc/hal9001/hal.env || echo "$1=$2" >> /etc/hal9001/hal.env; }
+```
+
+**Gotcha:** there is no git checkout on the box — CI ships only `HAL9001.dll`. Run `scp`/`ssh-copy-id`
+from your own machine; on the box those commands point at itself.
+
+---
+
 ## Notes
 
 - **Cost.** `HAL_PACE=slow` keeps token burn low. Run the hive in **one** place (stop your local
