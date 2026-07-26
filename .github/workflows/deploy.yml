@@ -42,11 +42,25 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+          # ssh-keyscan is fragile against fail2ban / MaxStartups: it opens several short
+          # pre-auth connections that aggressive SSH jails treat as probes. Tolerate partial
+          # failures so a few closed probes do not abort the whole deploy under bash -e.
+          ssh-keyscan -T 10 -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+          # If keyscan produced nothing useful, seed known_hosts on the first real connection.
+          if [ ! -s ~/.ssh/known_hosts ]; then
+            ssh -i ~/.ssh/deploy_key \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=accept-new \
+              -o ConnectTimeout=15 \
+              "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" "echo ssh-ok"
+          fi
 
       - name: Copy DLL to server
         run: |
-          scp -i ~/.ssh/deploy_key ./publish-linux/HAL9001.dll \
+          scp -i ~/.ssh/deploy_key \
+            -o IdentitiesOnly=yes \
+            -o ConnectTimeout=30 \
+            ./publish-linux/HAL9001.dll \
             "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/hal9001/HAL9001.dll"
 
       # NOTE: CI deliberately does NOT write to /etc/hal9001/hal.env. One-time steps have lived here
@@ -55,12 +69,18 @@ jobs:
 
       - name: Fix ownership and restart services
         run: |
-          ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+          ssh -i ~/.ssh/deploy_key \
+            -o IdentitiesOnly=yes \
+            -o ConnectTimeout=30 \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
             "chown hal:hal /opt/hal9001/HAL9001.dll; \
              pkill -9 -f '[H]AL9001 swarm' || true; sleep 2; \
              systemctl restart hal-dashboard hal-swarm"
 
       - name: Verify dashboard is up
         run: |
-          ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+          ssh -i ~/.ssh/deploy_key \
+            -o IdentitiesOnly=yes \
+            -o ConnectTimeout=30 \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
             "sleep 2 && curl -fs localhost:8765/api/wallet >/dev/null && echo 'dashboard OK'"
