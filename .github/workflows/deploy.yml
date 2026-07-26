@@ -40,14 +40,35 @@ jobs:
       - name: Prepare SSH
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+          # NO ssh-keyscan. It opens one connection PER key algorithm and drops each at key exchange
+          # without ever authenticating, which the box's fail2ban sshd jail (maxretry 4, see
+          # deploy/harden.sh) can read as repeated failed logins — banning the runner and taking the
+          # rest of the deploy with it. Runner IPs rotate, so it failed intermittently.
+          # accept-new is the same trust-on-first-use that keyscan+known_hosts gave us, still refuses a
+          # CHANGED host key, and costs one connection instead of four.
+          {
+            echo "Host deploytarget"
+            echo "  HostName ${{ secrets.DEPLOY_HOST }}"
+            echo "  User ${{ secrets.DEPLOY_USER }}"
+            echo "  IdentityFile ~/.ssh/deploy_key"
+            echo "  IdentitiesOnly yes"
+            echo "  StrictHostKeyChecking accept-new"
+            echo "  ConnectTimeout 20"
+            echo "  ServerAliveInterval 15"
+          } > ~/.ssh/config
+          chmod 600 ~/.ssh/config
 
+      # One transient refusal should not throw away a good build — retry with backoff.
       - name: Copy DLL to server
         run: |
-          scp -i ~/.ssh/deploy_key ./publish-linux/HAL9001.dll \
-            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/hal9001/HAL9001.dll"
+          for i in 1 2 3; do
+            if scp ./publish-linux/HAL9001.dll deploytarget:/opt/hal9001/HAL9001.dll; then exit 0; fi
+            echo "scp attempt $i failed; retrying in $((i*15))s"
+            sleep $((i*15))
+          done
+          echo "could not copy the DLL after 3 attempts"; exit 1
 
       # NOTE: CI deliberately does NOT write to /etc/hal9001/hal.env. One-time steps have lived here
       # twice to set HAL_DAILY_USD (now 0.5 — the box reports limit:0.5); each was removed straight
@@ -55,12 +76,12 @@ jobs:
 
       - name: Fix ownership and restart services
         run: |
-          ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+          ssh deploytarget \
             "chown hal:hal /opt/hal9001/HAL9001.dll; \
              pkill -9 -f '[H]AL9001 swarm' || true; sleep 2; \
              systemctl restart hal-dashboard hal-swarm"
 
       - name: Verify dashboard is up
         run: |
-          ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
-            "sleep 2 && curl -fs localhost:8765/api/wallet >/dev/null && echo 'dashboard OK'"
+          ssh deploytarget \
+            "sleep 3 && curl -fs localhost:8765/api/wallet >/dev/null && echo 'dashboard OK'"
