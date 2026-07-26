@@ -120,18 +120,23 @@ Three causes stacked:
 
 ```bash
 mkdir -p /etc/systemd/system/hal-swarm.service.d /etc/systemd/system/hal-dashboard.service.d
-printf '[Service]
+
+cat > /etc/systemd/system/hal-swarm.service.d/memory.conf <<'EOF'
+[Service]
 MemoryAccounting=yes
-MemoryHigh=35%%
-MemoryMax=45%%
-' > /etc/systemd/system/hal-swarm.service.d/memory.conf
-printf '[Service]
+MemoryHigh=35%
+MemoryMax=45%
+EOF
+
+cat > /etc/systemd/system/hal-dashboard.service.d/memory.conf <<'EOF'
+[Service]
 MemoryAccounting=yes
-MemoryHigh=10%%
-MemoryMax=15%%
-' > /etc/systemd/system/hal-dashboard.service.d/memory.conf
+MemoryHigh=10%
+MemoryMax=15%
+EOF
+
 systemctl daemon-reload && systemctl restart hal-swarm hal-dashboard
-systemctl show hal-swarm -p MemoryMax    # must NOT say infinity
+systemctl show hal-swarm -p MemoryMax    # must NOT say infinity — expect ~1.7e9 on a 3.8 GB box
 ```
 
 Hired workers are **forked by the swarm unit, so they share its cgroup** — one ceiling covers the whole
