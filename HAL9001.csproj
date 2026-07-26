@@ -15,6 +15,21 @@
     <Nullable>enable</Nullable>
     <RootNamespace>HAL9001</RootNamespace>
     <AssemblyName>HAL9001</AssemblyName>
+
+    <!--
+      MEMORY, after an OOM killed the live box. Several HAL9001 processes were sitting at ~1.4 GB
+      resident each. The driver is the Large Object Heap: a wall-clock round at 2048x2048 allocates
+      three double[2048,2048] (~32 MB each) plus an output per candidate kernel, and every one of those
+      goes straight to the LOH — which the GC does NOT compact by default, so the resident set climbs
+      and never comes back down.
+        Workstation GC (not Server) because Server GC keeps a heap PER CORE and is much hungrier, and
+        this is a small shared box, not a dedicated app server.
+        RetainVMGarbageCollection=false so freed segments are returned to the OS instead of being held
+        for reuse — on a box this size we want the memory back, not the allocation speed.
+    -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <RetainVMGarbageCollection>false</RetainVMGarbageCollection>
   </PropertyGroup>
 
   <ItemGroup>

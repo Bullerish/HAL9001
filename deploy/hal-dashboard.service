@@ -14,6 +14,12 @@ ExecStart=/opt/hal9001/HAL9001 dashboard 8765
 StandardInput=null
 Restart=always
 RestartSec=5
+
+# The page is the thing that must stay up, so it gets its own guaranteed slice and a ceiling well below
+# the swarm's — it should never be the process that dies, and it should never be what kills the box.
+MemoryAccounting=yes
+MemoryMax=15%
+MemoryHigh=10%
 # Hardening
 NoNewPrivileges=true
 PrivateTmp=true

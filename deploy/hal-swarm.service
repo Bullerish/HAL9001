@@ -15,6 +15,19 @@ ExecStart=/opt/hal9001/HAL9001 swarm 9000
 StandardInput=null
 Restart=always
 RestartSec=5
+
+# ── MEMORY GUARD (added after an OOM took the whole box down) ──────────────────────────────────────
+# The kernel killed HAL9001 repeatedly at ~1.4 GB resident EACH, across three processes, and took SSH
+# and Caddy with it. Two reasons this unit needs a ceiling:
+#   • the hired worker nodes are forked by this unit, so they live in ITS cgroup — one limit covers the
+#     whole mesh rather than each process being free to grow on its own;
+#   • .NET reads the cgroup limit and sizes its GC heap from it, so setting this makes the runtime
+#     collect harder instead of ballooning until the OOM killer picks a victim at random.
+# A percentage keeps it correct whatever the box is resized to. If the unit hits the ceiling systemd
+# restarts it (Restart=always) — a bounced hive is vastly better than an unreachable server.
+MemoryAccounting=yes
+MemoryMax=45%
+MemoryHigh=35%
 # Hardening
 NoNewPrivileges=true
 PrivateTmp=true

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime;
 using System.Text.Json;
 
 namespace HAL9001;
@@ -1238,6 +1239,20 @@ public static class SwarmAgent
             if (double.TryParse(Environment.GetEnvironmentVariable("HAL_GRIND_SECS"), out double gs) && gs > 0) GrindSecs = Math.Clamp(gs, 0.5, 10);
             if (double.TryParse(Environment.GetEnvironmentVariable("HAL_GRIND_REST_SECS"), out double gr) && gr >= 0) GrindRestSecs = Math.Clamp(gr, 1, 120);
         }
+        // Hand the big arrays back to the OS. A round at 1024/2048 allocates tens of megabytes of
+        // double[n,n] per candidate; all of it lands on the Large Object Heap, which is never compacted
+        // unless asked. Without this the resident set only ever grew — which is how the box got OOM-killed.
+        // Cheap: this runs once per round/burst, not per allocation.
+        static void ReleaseBigArrays()
+        {
+            try
+            {
+                GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+            }
+            catch { }
+        }
+
         async Task GrinderLoop()
         {
             var rng = new Random(node.Id.GetHashCode() ^ Environment.TickCount);
@@ -1293,6 +1308,7 @@ public static class SwarmAgent
                 }
                 catch (OperationCanceledException) { break; }
                 catch (Exception ex) { LiveLog.Append($"   grinder error: {ex.Message}"); }
+                ReleaseBigArrays();
                 try { await Task.Delay(TimeSpan.FromSeconds(GrindRestSecs), loopCts.Token); } catch { break; }
             }
         }
@@ -1482,6 +1498,8 @@ public static class SwarmAgent
                     Console.WriteLine($"[matmul-race] round error: {ex.Message}");
                     Console.Write("> ");
                 }
+                // A wall-clock round at 1024/2048 just allocated tens of MB per candidate on the LOH.
+                ReleaseBigArrays();
             }
         }
 
