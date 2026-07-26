@@ -1222,12 +1222,21 @@ public static class SwarmAgent
         // can still exist, streaming genuine progress — restarts, residuals, the rank being hunted — and
         // ADOPTING anything it actually finds. Leader-only, and duty-cycled so a small box keeps a core
         // free for serving the page. Costs $0, runs whether or not anyone has paid.
-        double GrindSecs = 6.0, GrindRestSecs = 3.0; bool grindOn = true;
+        // SAFETY, learned the hard way: the first cut of this ran 6s-on/3s-off over every SideRung and
+        // left the box unreachable on both 22 and 443 after ~16 hours. Two causes, both mine:
+        //   • TensorSearch only checks its time budget BETWEEN restarts, and at a large rank a single
+        //     restart (8x8 wants rank ~342 over 4096 cells) runs far past maxSeconds — so a "6 second"
+        //     burst could peg a core for minutes, back to back, forever.
+        //   • a small VPS also has to serve the page; 67% of a core was not a slice, it was the machine.
+        // So: OFF unless explicitly enabled, only the tiny tensors where a restart is genuinely quick,
+        // and a duty cycle that leaves most of the core alone.
+        double GrindSecs = 2.0, GrindRestSecs = 6.0; bool grindOn = false;
+        const int GrindMaxSize = 4;   // 3x3 = 729 cells, 4x4 = 4096 — restarts here finish in ms
         {
             string? g = Environment.GetEnvironmentVariable("HAL_GRIND");
-            if (g is not null && (g == "0" || g.Equals("off", StringComparison.OrdinalIgnoreCase))) grindOn = false;
-            if (double.TryParse(Environment.GetEnvironmentVariable("HAL_GRIND_SECS"), out double gs) && gs > 0) GrindSecs = Math.Clamp(gs, 1, 60);
-            if (double.TryParse(Environment.GetEnvironmentVariable("HAL_GRIND_REST_SECS"), out double gr) && gr >= 0) GrindRestSecs = Math.Clamp(gr, 0, 60);
+            if (g is not null && (g == "1" || g.Equals("on", StringComparison.OrdinalIgnoreCase))) grindOn = true;
+            if (double.TryParse(Environment.GetEnvironmentVariable("HAL_GRIND_SECS"), out double gs) && gs > 0) GrindSecs = Math.Clamp(gs, 0.5, 10);
+            if (double.TryParse(Environment.GetEnvironmentVariable("HAL_GRIND_REST_SECS"), out double gr) && gr >= 0) GrindRestSecs = Math.Clamp(gr, 1, 120);
         }
         async Task GrinderLoop()
         {
@@ -1241,11 +1250,13 @@ public static class SwarmAgent
                     if (amLeader && core.HasHive) { try { isAuto = await core.IsAutonomousAsync(); } catch { } }
                     if (!amLeader || !isAuto) { await Task.Delay(4000, loopCts.Token); continue; }
 
-                    int[] open = MatmulLadder.SideRungs;
-                    if (open.Length == 0) { await Task.Delay(4000, loopCts.Token); continue; }
+                    // Only the tiny tensors. Bigger rungs are where the time budget overran and starved
+                    // the box; composition and the paced race already cover them.
+                    int[] open = MatmulLadder.SideRungs.Where(s => s <= GrindMaxSize).ToArray();
+                    if (open.Length == 0) { await Task.Delay(10000, loopCts.Token); continue; }
                     // Weighted to 3x3: it is the only size with real headroom left (27 today, 23 published,
                     // optimum open in [19,23]) and any gain there composes into every larger size.
-                    int size = rng.Next(100) < 55 && open.Contains(3) ? 3 : open[rng.Next(open.Length)];
+                    int size = rng.Next(100) < 70 && open.Contains(3) ? 3 : open[rng.Next(open.Length)];
 
                     long best;
                     try { var champ = await core.GetMatmulChampionAsync(size); best = champ is not null && champ.Metric == MatmulRace.Metric.Muls ? (long)champ.Score : (long)size * size * size; }
