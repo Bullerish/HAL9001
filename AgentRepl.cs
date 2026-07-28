@@ -138,11 +138,13 @@ public static class AgentRepl
                 core.Git.PrintRemoteAndBranch();
                 Console.WriteLine("Syncing existing handlers from GitHub...");
                 int loaded = core.LoadSharedHandlers();
+                HandlerForge.Register(core); // LLM-free forge loop (#20 #21)
                 Console.WriteLine($"  {loaded} handler(s) loaded and ready.");
             }
             else
             {
                 Console.WriteLine("No git repo detected — handlers will stay in memory only.");
+                HandlerForge.Register(core); // forge needs registry + hive, not git
             }
             Console.WriteLine();
 
