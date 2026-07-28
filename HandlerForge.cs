@@ -9,11 +9,61 @@ namespace HAL9001;
 ///   3. Propose type-compatible A→B compositions that are not yet in the registry.
 ///   4. Approved sources are persisted via <see cref="HandlerGenerator.PersistShared"/> (git).
 ///
-/// This is the mechanical core only. Swarm message fan-out / git-on-approve wiring lives in
-/// SwarmAgent + AgentCore call sites (follow-up commits on the same track).
+/// Call <see cref="Register"/> once after AgentCore is up (agent + swarm). Multi-node quorum
+/// + git-on-approve remain follow-up commits.
 /// </summary>
 public static class HandlerForge
 {
+    // ── background forge loop (started via Register from agent/swarm startup) ───────────
+    static AgentCore? _core;
+    static int _started; // 0/1 via Interlocked
+    static DateTime _lastTick = DateTime.MinValue;
+    static double _intervalSecs = 180.0;
+    static bool _enabled = true;
+
+    /// <summary>
+    /// Call once after AgentCore is up. Starts a free-CPU loop that stresses Stable handlers
+    /// and proposes composites. Safe to call multiple times.
+    /// HAL_FORGE=0/off disables; HAL_FORGE_SECS sets interval (default 180, then × HAL_PACE).
+    /// </summary>
+    public static void Register(AgentCore core)
+    {
+        _core = core ?? throw new ArgumentNullException(nameof(core));
+        {
+            string? f = Environment.GetEnvironmentVariable("HAL_FORGE")?.Trim().ToLowerInvariant();
+            if (f is "0" or "off" or "false" or "no") _enabled = false;
+            if (double.TryParse(Environment.GetEnvironmentVariable("HAL_FORGE_SECS"), out double fs) && fs > 0)
+                _intervalSecs = Math.Clamp(fs, 30, 3600);
+            string? paceEnv = Environment.GetEnvironmentVariable("HAL_PACE");
+            double pace = 1.0;
+            if (string.Equals(paceEnv, "slow", StringComparison.OrdinalIgnoreCase)) pace = 6.0;
+            else if (double.TryParse(paceEnv, out double pv) && pv > 0) pace = pv;
+            _intervalSecs *= pace;
+        }
+        if (!_enabled) { LiveLog.Append("> forge: disabled (HAL_FORGE=off)"); return; }
+        if (System.Threading.Interlocked.Exchange(ref _started, 1) == 1) return;
+        _ = Task.Run(BackgroundLoopAsync);
+        LiveLog.Append($"> forge: background loop on (every {_intervalSecs:0}s)");
+    }
+
+    static async Task BackgroundLoopAsync()
+    {
+        while (_enabled)
+        {
+            try { await Task.Delay(TimeSpan.FromSeconds(Math.Max(10, _intervalSecs / 6))); }
+            catch { break; }
+            var core = _core;
+            if (core is null || !core.HasHive) continue;
+            bool isAuto;
+            try { isAuto = await core.IsAutonomousAsync(); } catch { continue; }
+            if (!isAuto) continue;
+            if ((DateTime.UtcNow - _lastTick).TotalSeconds < _intervalSecs) continue;
+            _lastTick = DateTime.UtcNow;
+            try { await TickAsync(core, limit: 3); }
+            catch (Exception ex) { LiveLog.Append($"  forge tick failed: {ex.Message}"); }
+        }
+    }
+
     private static readonly System.Globalization.CultureInfo Inv =
         System.Globalization.CultureInfo.InvariantCulture;
 
@@ -45,7 +95,6 @@ public static class HandlerForge
         var notes = new List<string>();
         int ran = 0, passed = 0, crashed = 0, nondet = 0;
 
-        // 1) Example smoke
         string example = string.IsNullOrWhiteSpace(cap.ExampleRequest) ? "1" : cap.ExampleRequest.Trim();
         var smoke = await RunOnceAsync(core, cap, example, timeoutMs);
         ran++;
@@ -53,7 +102,6 @@ public static class HandlerForge
         else if (string.IsNullOrWhiteSpace(smoke.Output)) { notes.Add("example returned empty"); }
         else passed++;
 
-        // 2) Determinism (Stable only)
         if (cap.Stability == StabilityKind.Stable && !smoke.Crashed)
         {
             string? first = smoke.Output;
@@ -72,13 +120,12 @@ public static class HandlerForge
             }
         }
 
-        // 3) Boundary / fuzz — must not crash the process
         foreach (string bad in BoundaryInputs(example))
         {
             var r = await RunOnceAsync(core, cap, bad, timeoutMs);
             ran++;
             if (r.Crashed) { crashed++; notes.Add($"crash on boundary '{Preview(bad)}'"); }
-            else passed++; // typed error / empty is fine; crash is not
+            else passed++;
         }
 
         return new SuiteReport(cap.Name, ran, passed, crashed, nondet, notes);
@@ -86,7 +133,6 @@ public static class HandlerForge
 
     /// <summary>
     /// Propose novel A→B composites from type-compatible Stable pairs not already in the registry.
-    /// Does not synthesize source — only names candidates the swarm can later wire / verify.
     /// </summary>
     public static IReadOnlyList<CompositeIdea> ProposeComposites(IReadOnlyList<Capability> caps, int max = 8)
     {
@@ -99,7 +145,7 @@ public static class HandlerForge
             foreach (var b in stable)
             {
                 if (ReferenceEquals(a, b)) continue;
-                if (a.OutputType != b.InputType) continue; // type chain
+                if (a.OutputType != b.InputType) continue;
                 string proposed = $"compose-{Slug(a.Name)}-then-{Slug(b.Name)}";
                 if (names.Contains(proposed)) continue;
                 if (ideas.Any(i => i.ProposedName == proposed)) continue;
@@ -151,8 +197,6 @@ public static class HandlerForge
         var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            // Handlers are sync IHandler.Handle — run on the thread pool with a hard timeout so a
-            // wedged handler cannot stall the forge tick (or the matmul race that shares the process).
             Task<string> task = Task.Run(() =>
             {
                 try { return cap.Handler.Handle(input) ?? ""; }
@@ -181,7 +225,7 @@ public static class HandlerForge
         yield return "<<<not-a-valid-payload>>>";
         if (example.Length > 0)
         {
-            yield return example[..Math.Max(1, example.Length / 2)]; // truncate
+            yield return example[..Math.Max(1, example.Length / 2)];
             char[] chars = example.ToCharArray();
             if (chars.Length > 0)
             {
