@@ -111,6 +111,7 @@ public static class SwarmAgent
         AnthropicClient? client = AnthropicClient.FromEnvironment();
         var core = new AgentCore(client);
         core.LoadSharedHandlers();
+        HandlerForge.Register(core); // LLM-free forge loop (#20 #21)
 
         await using var node = new SwarmNode(myPort);
         core.Events.Actor = node.Id; // episodic memory: this node's events are stamped with its identity
