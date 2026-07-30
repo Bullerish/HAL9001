@@ -1189,11 +1189,11 @@ public static class Dashboard
   .ctitle{color:var(--green);font-size:11px;letter-spacing:2px;text-transform:uppercase;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .cblink{width:8px;height:8px;border-radius:50%;background:var(--green);animation:cblink 1.1s steps(1) infinite;box-shadow:0 0 6px var(--green);flex:none}
   @keyframes cblink{0%,49%{opacity:1}50%,100%{opacity:0}}
-  .crtbody{padding:14px 16px;height:336px;overflow:hidden;position:relative;z-index:1;cursor:pointer}
+  .crtbody{padding:14px 16px;height:520px;overflow:hidden;position:relative;z-index:1;cursor:pointer}
   .crtlines{font:13px/1.6 "Courier New",Courier,monospace;color:var(--green);text-shadow:0 0 6px rgba(51,204,68,.6);white-space:pre;word-break:break-all;height:calc(100% - 34px);overflow:hidden}
   .crtstatus{font:12px/1.5 "Courier New",Courier,monospace;color:var(--green);opacity:.85;white-space:pre-wrap;word-break:break-word;
     border-top:1px solid rgba(51,204,68,.22);margin-top:8px;padding-top:6px;max-height:28px;overflow:hidden}
-  .mxgrid{font:12px/1.45 "Courier New",Courier,monospace;color:var(--green);text-shadow:0 0 6px rgba(51,204,68,.5);white-space:pre;margin:0;padding:14px 16px;max-height:250px;overflow:auto;position:relative;z-index:1}
+  .mxgrid{font:12px/1.45 "Courier New",Courier,monospace;color:var(--green);text-shadow:0 0 6px rgba(51,204,68,.5);white-space:pre;margin:0;padding:14px 16px;max-height:320px;overflow:auto;position:relative;z-index:1}
 
   /* ── layout ──────────────────────────────────────────────────────────────── */
   .bar{position:sticky;top:0;z-index:60;display:flex;align-items:center;gap:12px;padding:9px 22px;
@@ -1283,7 +1283,7 @@ public static class Dashboard
     .hi1{width:64px;height:26px;left:11px;top:7px}.hi2{width:21px;height:10px;left:20px;top:23px}
     .stats{grid-template-columns:1fr 1fr}.zero{grid-template-columns:1fr;gap:10px}
     .zero .n{font-size:60px}.two{grid-template-columns:1fr}.four{grid-template-columns:1fr 1fr}
-    .fns{grid-template-columns:1fr 1fr}.ctrs{grid-template-columns:1fr}.crtbody{height:250px}
+    .fns{grid-template-columns:1fr 1fr}.ctrs{grid-template-columns:1fr}.crtbody{height:380px}
     .stat .v{font-size:30px}.sect{margin-top:44px}.wrap{padding:0 16px}
     .act .w{width:88px}
   }
@@ -1590,7 +1590,7 @@ function statusLine(){
 function renderCRT(){
   const el=$("crtlines");if(!el)return;
   let code=typing?liveCode.slice(0,typePos):liveCode;
-  if(code){const ls=code.split("\n");if(ls.length>14)code=(typing?ls.slice(-14):ls.slice(0,14)).join("\n")+(typing?"":"\n…");}
+  if(code){const ls=code.split("\n");if(ls.length>24)code=(typing?ls.slice(-24):ls.slice(0,24)).join("\n")+(typing?"":"\n…");}
   el.textContent=feedText+(code?"\n\n"+code+(typing?" ▍":""):"");
   el.scrollTop=el.scrollHeight;
   const st=$("crtstatus");if(st)st.textContent=statusLine();
@@ -1618,7 +1618,7 @@ async function pull(){
     try{const r=await fetch("/api/"+n,{credentials:"include"});if(!r.ok)return;D[n]=await r.json();reached=true;}catch(e){}
   }));
   const lines=get(D,"live.lines")||[];
-  feedText=lines.slice(-40).join("\n");
+  feedText=lines.slice(-60).join("\n");
   const last=lines.length?lines[lines.length-1]:"";
   if(last!==liveLast&&liveLast){flareEye(false);if(sound)sfx.blip();startProcessing(2000);}
   liveLast=last;
